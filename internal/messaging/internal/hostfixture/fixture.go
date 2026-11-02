@@ -217,6 +217,7 @@ func (f *Fixture) reply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outcome, err := f.store.Reply(
+		r.Context(),
 		fenceKey(messaging.Identity{RunID: req.ToRunID}, req.MessageID, f.store.Generation()),
 		req.FromRunID,
 		json.RawMessage(req.Body),

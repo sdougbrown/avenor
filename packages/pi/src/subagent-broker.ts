@@ -262,7 +262,7 @@ export interface BrokerAskArgs {
   message: string
   /** Bound on the wait for a reply; ignores a non-positive or non-finite value. */
   timeoutMs?: number
-  /** Caller cancellation; an abort withdraws the ask before reporting. */
+  /** Caller cancellation; the ask keeps its edge so a late answer still arrives. */
   signal?: AbortSignal
 }
 
@@ -532,12 +532,13 @@ async function brokerAsk(
   } catch (error) {
     const timedOut = (error instanceof Error && error.name === 'TimeoutError')
       || brokerErrorOutcome(error) === 'timed-out'
-    const cleaned = await withdrawAsk(env, messageId, generation, fetchImpl)
+    // The wait ended, but the ask did not: its edge stays open so a late answer
+    // still reaches the asker. An aborted wait keeps it open the same way.
     if (timedOut) return { outcome: 'timed-out', messageId }
+    if (signal?.aborted) return { outcome: 'possibly-pending', messageId }
     const outcome = brokerErrorOutcome(error)
     if (outcome) return { outcome, messageId }
-    if (cleaned.pending) return { outcome: 'possibly-pending', messageId }
-    return { outcome: cleaned.outcome, messageId }
+    return { outcome: 'possibly-pending', messageId }
   }
 
   const record = reply !== null && typeof reply === 'object' ? reply as Record<string, unknown> : {}

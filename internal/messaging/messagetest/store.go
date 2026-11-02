@@ -156,7 +156,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		if got := store.PendingCount(sender.RunID); got != 1 {
 			t.Fatalf("pending = %d, want 1", got)
 		}
-		outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"hi"}`))
+		outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"hi"}`))
 		if err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
@@ -239,7 +239,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		}
 	})
 
-	t.Run("wait timeout terminates once", func(t *testing.T) {
+	t.Run("wait timeout terminates once and keeps the edge", func(t *testing.T) {
 		store := newStore(t)
 		msgID := id(t, time.Minute)
 		admit(t, store, msgID, "bob")
@@ -251,8 +251,10 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		if err != nil || again.Outcome != messaging.OutcomeTimedOut {
 			t.Fatalf("second Wait = (%+v, %v)", again, err)
 		}
-		if store.PendingCount(sender.RunID) != 0 {
-			t.Fatal("timed-out edge is still live")
+		// The wait is terminal; the ask is not. Its edge stays open so a reply
+		// that arrives later still reaches the asker.
+		if store.PendingCount(sender.RunID) != 1 {
+			t.Fatal("timed-out ask lost its edge")
 		}
 	})
 
@@ -272,7 +274,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		}
 	})
 
-	t.Run("wait timeout keeps the queued ask", func(t *testing.T) {
+	t.Run("wait timeout keeps the queued ask and its edge", func(t *testing.T) {
 		store := newStore(t)
 		msgID := id(t, time.Minute)
 		admit(t, store, msgID, "bob")
@@ -287,10 +289,17 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		if len(received) != 1 || received[0].MessageID != msgID {
 			t.Fatalf("target received %+v, want the timed-out ask", received)
 		}
-		// The timed-out ID is fenced, so a late reply cannot answer it and falls
-		// back to fire-and-forget delivery for the sender.
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"late"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
-			t.Fatalf("late Reply = (%q, %v), want edge-absent", outcome, err)
+		// The asker stopped waiting, but the edge stayed open: the answer is
+		// delivered to the asker as an ordinary message, tagged with its id.
+		if outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"late"}`)); err != nil || outcome != messaging.OutcomeReplied {
+			t.Fatalf("late Reply = (%q, %v), want replied", outcome, err)
+		}
+		late, err := store.Receive("alice", 8)
+		if err != nil {
+			t.Fatalf("Receive reply: %v", err)
+		}
+		if len(late) != 1 || late[0].MessageID != msgID+".reply" || late[0].FromRunID != "bob" {
+			t.Fatalf("asker received %+v, want bob's late reply", late)
 		}
 		if ack, ok := store.Fence(key(store, msgID)); !ok || !ack.Terminal {
 			t.Fatalf("fence = (%+v, %v), want terminal", ack, ok)
@@ -302,7 +311,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		}
 	})
 
-	t.Run("wait abandonment keeps the queued ask", func(t *testing.T) {
+	t.Run("wait abandonment keeps the queued ask and its edge", func(t *testing.T) {
 		store := newStore(t)
 		msgID := id(t, time.Minute)
 		admit(t, store, msgID, "bob")
@@ -319,15 +328,22 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		if len(received) != 1 || received[0].MessageID != msgID {
 			t.Fatalf("target received %+v, want the abandoned ask", received)
 		}
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"late"}`)); err != nil || outcome != messaging.OutcomeEdgeAbsent {
-			t.Fatalf("late Reply = (%q, %v), want edge-absent", outcome, err)
+		if outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"late"}`)); err != nil || outcome != messaging.OutcomeReplied {
+			t.Fatalf("late Reply = (%q, %v), want replied", outcome, err)
+		}
+		late, err := store.Receive("alice", 8)
+		if err != nil {
+			t.Fatalf("Receive reply: %v", err)
+		}
+		if len(late) != 1 || late[0].MessageID != msgID+".reply" {
+			t.Fatalf("asker received %+v, want bob's late reply", late)
 		}
 		if ack, ok := store.Fence(key(store, msgID)); !ok || !ack.Terminal {
 			t.Fatalf("fence = (%+v, %v), want terminal", ack, ok)
 		}
 	})
 
-	t.Run("legacy wait timeout leaves no fence", func(t *testing.T) {
+	t.Run("legacy wait timeout leaves no fence and keeps the edge", func(t *testing.T) {
 		store := newStore(t)
 		msgID := "legacy-timeout-id"
 		legacyKey := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID}
@@ -342,7 +358,16 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		if received, err := store.Receive("bob", 8); err != nil || len(received) != 1 {
 			t.Fatalf("Receive = (%+v, %v), want the timed-out ask retained", received, err)
 		}
-		// The same unversioned ID can be sent again immediately.
+		// The edge is still open, so the same unversioned ID cannot be sent again
+		// until it is answered, withdrawn, or expires.
+		if _, err := store.Admit(t.Context(), askstore.AdmitRequest{
+			Sender: sender, Target: "bob", MessageID: msgID, Generation: store.Generation(), Legacy: true,
+		}); !errors.Is(err, messaging.ErrDuplicateMessageID) {
+			t.Fatalf("re-admit error = %v, want duplicate refusal", err)
+		}
+		if outcome, err := store.Withdraw(legacyKey); err != nil || outcome.Outcome != messaging.OutcomeWithdrawn {
+			t.Fatalf("Withdraw = (%+v, %v), want withdrawn", outcome, err)
+		}
 		admitLegacy(t, store, msgID, "bob")
 	})
 
@@ -353,7 +378,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		admitLegacy(t, store, msgID, "bob")
 		// The reply names the current generation; the lookup falls back to the
 		// generation-less key the legacy ask was registered under.
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		if outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
 		res, err := store.Wait(t.Context(), legacyKey, time.Second)
@@ -372,14 +397,14 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		msgID := id(t, time.Minute)
 		admit(t, store, msgID, "bob")
 		generationless := messaging.FenceKey{Sender: sender.RunID, MessageID: msgID}
-		outcome, err := store.Reply(generationless, "bob", []byte(`{"message":"pong"}`))
+		outcome, err := store.Reply(t.Context(), generationless, "bob", []byte(`{"message":"pong"}`))
 		if err != nil || outcome != messaging.OutcomeEdgeAbsent {
 			t.Fatalf("generation-less Reply = (%q, %v), want edge-absent", outcome, err)
 		}
 		if !store.Pending(sender.RunID, msgID) {
 			t.Fatal("generation-less reply disturbed the live edge")
 		}
-		if outcome, err := store.Reply(key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		if outcome, err := store.Reply(t.Context(), key(store, msgID), "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
 		res, err := store.Wait(t.Context(), key(store, msgID), time.Second)
@@ -393,7 +418,7 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		msgID := id(t, time.Minute)
 		admit(t, store, msgID, "bob")
 		k := key(store, msgID)
-		if outcome, err := store.Reply(k, "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
+		if outcome, err := store.Reply(t.Context(), k, "bob", []byte(`{"message":"pong"}`)); err != nil || outcome != messaging.OutcomeReplied {
 			t.Fatalf("Reply = (%q, %v)", outcome, err)
 		}
 		store.RemoveRun("bob")
@@ -455,6 +480,39 @@ func RunStoreSuite(t *testing.T, newStore StoreFactory) {
 		}
 		if _, ok := store.Fence(key(store, msgID)); ok {
 			t.Fatal("prune fenced an ask before its deadline")
+		}
+	})
+
+	t.Run("prune retracts an abandoned ask past its deadline", func(t *testing.T) {
+		store, backend := NewMemoryStore(t)
+		minted := time.Now().UTC()
+		msgID, err := messaging.NewMsgID(minted, minted.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("NewMsgID: %v", err)
+		}
+		admit(t, store, msgID, "bob")
+
+		// The asker stops waiting: the edge is abandoned, the ask stays queued.
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if waited, err := store.Wait(ctx, key(store, msgID), time.Minute); waited.Outcome != messaging.OutcomePossiblyPending {
+			t.Fatalf("Wait = (%q, %v), want possibly-pending", waited.Outcome, err)
+		}
+
+		// Past the deadline the prune terminates the edge and fences the id, so
+		// nothing can be delivered over it again; the reclamation on the next
+		// tick drops that fence and retracts the queued delivery through its
+		// remove handle.
+		store.Prune(minted.Add(2 * time.Minute))
+		store.Prune(minted.Add(2*time.Minute + time.Second))
+		if removed := backend.Removed(); removed != 1 {
+			t.Fatalf("retracted %d queued deliveries, want the abandoned ask retracted", removed)
+		}
+		if received, err := store.Receive("bob", 8); err != nil || len(received) != 0 {
+			t.Fatalf("Receive = (%+v, %v), want an empty target queue", received, err)
+		}
+		if _, ok := store.Fence(key(store, msgID)); ok {
+			t.Fatal("the expired abandoned ask was still fenceable")
 		}
 	})
 

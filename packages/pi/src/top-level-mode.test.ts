@@ -119,9 +119,9 @@ test('an ask in flight is aborted by session shutdown instead of outliving its i
     await h.eventHandlers.session_shutdown({}, {})
     const result = await pending.catch((error: unknown) => error)
     expect(aborted.value).toBe(true)
-    // Shutdown withdraws the edge rather than leaving it to time out, so the ask
-    // names the outcome the shutdown path produces, not merely "not replied".
-    expect((result as { details?: { outcome?: string } }).details).toMatchObject({ action: 'ask', outcome: 'withdrawn' })
+    // A wait that ends is not a withdrawal: the ask keeps its edge, and the
+    // broker clears a retired run's edges when the session retires.
+    expect((result as { details?: { outcome?: string } }).details).toMatchObject({ action: 'ask', outcome: 'possibly-pending' })
   } finally { globalThis.fetch = base; await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
 

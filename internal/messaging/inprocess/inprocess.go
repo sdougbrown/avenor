@@ -119,6 +119,7 @@ func (t *Transport) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 		return res, err
 	}
 	outcome, err := t.store.Reply(
+		ctx,
 		t.key(messaging.Identity{RunID: req.ToRunID}, req.MessageID, t.store.Generation()),
 		req.From.RunID,
 		[]byte(req.Body),

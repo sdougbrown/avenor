@@ -11,13 +11,16 @@ const (
 	// ProtocolVersion is the shared messaging protocol the client negotiates.
 	ProtocolVersion = 1
 
-	// MaxWait caps a single wait and is also the acceptance-deadline horizon
-	// a receiver accepts from a message ID.
+	// MaxWait caps a single wait. It is not the acceptance-deadline horizon: an
+	// asker's wait may end before the edge does, so an answer that arrives after
+	// the wait still has a window to land.
 	MaxWait = 10 * time.Minute
 
 	// MaxAcceptanceHorizon bounds an ID-encoded acceptance deadline relative to
-	// the receiver's own clock.
-	MaxAcceptanceHorizon = 10 * time.Minute
+	// the receiver's own clock, and is what a minted ID's deadline spans: twice
+	// the wait cap, so an ask keeps its edge for one more wait window after the
+	// asker's own wait ends.
+	MaxAcceptanceHorizon = 2 * MaxWait
 
 	// CleanupDeadline is the independent budget for transport cleanup.
 	CleanupDeadline = 5 * time.Second

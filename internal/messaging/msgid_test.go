@@ -24,7 +24,7 @@ func TestMsgID(t *testing.T) {
 		}
 	})
 
-	t.Run("zero deadline uses the wait cap", func(t *testing.T) {
+	t.Run("zero deadline spans the acceptance horizon", func(t *testing.T) {
 		id, err := NewMsgID(now, time.Time{})
 		if err != nil {
 			t.Fatalf("NewMsgID: %v", err)
@@ -33,7 +33,7 @@ func TestMsgID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseMsgID: %v", err)
 		}
-		if want := now.Add(MaxWait); !got.Equal(want) {
+		if want := now.Add(MaxAcceptanceHorizon); !got.Equal(want) {
 			t.Fatalf("deadline = %s, want %s", got, want)
 		}
 	})
@@ -106,4 +106,17 @@ func TestMsgID(t *testing.T) {
 			t.Fatalf("long deadline %s is not after short deadline %s", longDeadline, shortDeadline)
 		}
 	})
+}
+
+// TestAcceptanceHorizonCouplesTheMinters pins the horizon's value and its 2×
+// relation to the wait cap: the Go minter, the core minter and the hook
+// minter each encode the same window, and drift in one makes its ids refused
+// at every other admission.
+func TestAcceptanceHorizonCouplesTheMinters(t *testing.T) {
+	if MaxAcceptanceHorizon != 2*MaxWait {
+		t.Fatalf("MaxAcceptanceHorizon = %s, want 2 * MaxWait (%s)", MaxAcceptanceHorizon, 2*MaxWait)
+	}
+	if MaxAcceptanceHorizon != 20*time.Minute {
+		t.Fatalf("MaxAcceptanceHorizon = %s, want the shared 20-minute horizon", MaxAcceptanceHorizon)
+	}
 }

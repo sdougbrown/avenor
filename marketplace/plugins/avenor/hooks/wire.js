@@ -12,7 +12,13 @@
 // than imported; change schemas/message.outcome.json and messaging-text.ts
 // first. Nothing here touches the engine call object.
 
-const MAX_WAIT_MS = 600000
+export const MAX_WAIT_MS = 600000
+
+/**
+ * The acceptance window a minted message id encodes: two wait windows, so an
+ * ask keeps its edge for one more window after the asker's own wait ends.
+ */
+export const MESSAGE_HORIZON_MS = 2 * MAX_WAIT_MS
 
 /** The id shape mintMessageID produces; ask records use it as a file name. */
 export const MESSAGE_ID = /^av1\.[0-9a-z]+\.[0-9a-f]{32}$/
@@ -42,11 +48,11 @@ export function randomHex(nBytes) {
 }
 
 /**
- * A versioned message id whose encoded acceptance deadline spans the shared
- * wait window, exactly like messaging.NewMsgID / newMsgID.
+ * A versioned message id whose encoded acceptance deadline spans the acceptance
+ * horizon, exactly like messaging.NewMsgID / newMsgID.
  */
 export function mintMessageID(now) {
-  return "av1." + Math.trunc(now + MAX_WAIT_MS).toString(36) + "." + randomHex(16)
+  return "av1." + Math.trunc(now + MESSAGE_HORIZON_MS).toString(36) + "." + randomHex(16)
 }
 
 /** Reduce a caller-supplied ask timeout to what the broker accepts. */
@@ -220,7 +226,7 @@ export function quote(value) {
  * internal/messaging.Repair takes them.
  */
 const ASK_TEMPLATES = {
-  "timed-out": 'no reply to {message_id} from {target} before the timeout; withdraw it with avenor_message action="withdraw" message_id={message_id}',
+  "timed-out": 'no reply to {message_id} from {target} before the timeout; the ask stays open for a later answer, and avenor_message action="withdraw" message_id={message_id} drops it',
   "not-sent": "ask {message_id} was not sent to {target}; nothing is pending",
   "possibly-pending": 'ask {message_id} to {target} may still be pending; if no reply arrives, withdraw it with avenor_message action="withdraw" message_id={message_id}',
   "lost": "ask {message_id} to {target} is lost and cannot be withdrawn; nothing is pending",

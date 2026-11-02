@@ -21,15 +21,13 @@ type scriptedTransport struct {
 	withdrawErr    error
 	preflightErr   error
 
-	sendCalls           int
-	waitCalls           int
-	withdrawCalls       int
-	generation          string
-	lastSend            messaging.SendRequest
-	lastWait            messaging.WaitRequest
-	lastWithdraw        messaging.WithdrawRequest
-	withdrawCtxErr      error
-	withdrawHasDeadline bool
+	sendCalls     int
+	waitCalls     int
+	withdrawCalls int
+	generation    string
+	lastSend      messaging.SendRequest
+	lastWait      messaging.WaitRequest
+	lastWithdraw  messaging.WithdrawRequest
 }
 
 func (s *scriptedTransport) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -69,8 +67,6 @@ func (s *scriptedTransport) Reply(ctx context.Context, req messaging.ReplyReques
 func (s *scriptedTransport) Withdraw(ctx context.Context, req messaging.WithdrawRequest) (messaging.WithdrawResult, error) {
 	s.withdrawCalls++
 	s.lastWithdraw = req
-	s.withdrawCtxErr = ctx.Err()
-	_, s.withdrawHasDeadline = ctx.Deadline()
 	return s.withdrawResult, s.withdrawErr
 }
 
@@ -192,6 +188,7 @@ func TestAskClassifications(t *testing.T) {
 		{name: "invalid request", send: messaging.SendResult{Outcome: messaging.OutcomeNotSent}, sendErr: messaging.ErrInvalidRequest, outcome: messaging.OutcomeNotSent},
 		{name: "untyped send failure is uncertain", send: messaging.SendResult{}, sendErr: errors.New("connection reset"), outcome: messaging.OutcomePossiblyPending, pending: true},
 		{name: "uncertain wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomePossiblyPending}, withdraw: messaging.WithdrawResult{Outcome: messaging.OutcomePossiblyPending}, outcome: messaging.OutcomePossiblyPending, pending: true},
+		{name: "timed-out wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomeTimedOut}, outcome: messaging.OutcomeTimedOut, pending: true},
 		{name: "withdrawn wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomeWithdrawn}, outcome: messaging.OutcomeWithdrawn},
 		{name: "lost wait", send: messaging.SendResult{Outcome: messaging.OutcomeSent}, wait: messaging.WaitResult{Outcome: messaging.OutcomeLost}, outcome: messaging.OutcomeLost},
 	}
@@ -224,50 +221,26 @@ func TestAskClassifications(t *testing.T) {
 	}
 }
 
-func TestAskFailedWaitWithdraws(t *testing.T) {
+func TestAskFailedWaitKeepsTheEdge(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	t.Run("failed wait is retracted under the cleanup context", func(t *testing.T) {
-		tr := &scriptedTransport{
-			generation:     "gen-1",
-			sendResults:    []messaging.SendResult{{Outcome: messaging.OutcomeSent}},
-			waitResults:    []messaging.WaitResult{{Outcome: messaging.OutcomePossiblyPending}},
-			withdrawResult: messaging.WithdrawResult{Outcome: messaging.OutcomeWithdrawn},
-		}
-		_, err := New(tr, Options{}).Ask(ctx, sendRequest("id-1"), waitRequest("id-1"))
-		var askErr *Error
-		if !errors.As(err, &askErr) {
-			t.Fatalf("Ask error = %v, want *Error", err)
-		}
-		if tr.withdrawCalls != 1 {
-			t.Fatalf("withdraw calls = %d, want 1", tr.withdrawCalls)
-		}
-		if tr.lastWithdraw.MessageID != "id-1" || tr.lastWithdraw.Sender != alice || tr.lastWithdraw.Generation != "gen-1" {
-			t.Fatalf("withdraw request = %+v, want the ask's identity and id", tr.lastWithdraw)
-		}
-		if tr.withdrawCtxErr != nil || !tr.withdrawHasDeadline {
-			t.Fatalf("cleanup context = (err %v, deadline %v), want a bounded live context", tr.withdrawCtxErr, tr.withdrawHasDeadline)
-		}
-		if askErr.Pending() {
-			t.Fatal("retracted ask is still reported pending")
-		}
-	})
-
-	t.Run("unconfirmed retraction stays pending", func(t *testing.T) {
+	t.Run("a possibly-pending wait leaves the ask open", func(t *testing.T) {
 		tr := &scriptedTransport{
 			generation:  "gen-1",
 			sendResults: []messaging.SendResult{{Outcome: messaging.OutcomeSent}},
 			waitResults: []messaging.WaitResult{{Outcome: messaging.OutcomePossiblyPending}},
-			withdrawErr: errors.New("cleanup unavailable"),
 		}
 		_, err := New(tr, Options{}).Ask(ctx, sendRequest("id-1"), waitRequest("id-1"))
 		var askErr *Error
 		if !errors.As(err, &askErr) {
 			t.Fatalf("Ask error = %v, want *Error", err)
 		}
-		if tr.withdrawCalls != 1 || !askErr.Pending() {
-			t.Fatalf("withdraw calls = %d (pending %v), want 1 and pending", tr.withdrawCalls, askErr.Pending())
+		if tr.withdrawCalls != 0 {
+			t.Fatalf("withdraw calls = %d, want none: the edge stays open for a late reply", tr.withdrawCalls)
+		}
+		if !askErr.Pending() {
+			t.Fatal("an ask whose wait ended is no longer reported pending")
 		}
 	})
 
@@ -286,10 +259,9 @@ func TestAskFailedWaitWithdraws(t *testing.T) {
 	})
 }
 
-// TestAskTimeoutRetractsTheUndeliveredAsk pins that a timed-out fence keeps
-// its retraction handle, so the failed-wait withdrawal empties the target's
-// queue instead of leaving an ask nobody can answer.
-func TestAskTimeoutRetractsTheUndeliveredAsk(t *testing.T) {
+// TestAskTimeoutKeepsTheUndeliveredAsk pins that a timed-out wait leaves the
+// ask queued and its edge open, so the target can still answer it.
+func TestAskTimeoutKeepsTheUndeliveredAsk(t *testing.T) {
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatalf("start broker: %v", err)
@@ -320,8 +292,11 @@ func TestAskTimeoutRetractsTheUndeliveredAsk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DrainAgentMessages: %v", err)
 	}
-	if len(queued) != 0 {
-		t.Fatalf("timed-out ask left %d queued message(s)", len(queued))
+	if len(queued) != 1 {
+		t.Fatalf("timed-out ask left %d queued message(s), want the ask retained", len(queued))
+	}
+	if !b.Store().Pending("alice", msgID) {
+		t.Fatal("timed-out ask lost its edge")
 	}
 }
 

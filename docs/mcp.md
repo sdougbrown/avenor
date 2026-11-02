@@ -357,7 +357,7 @@ One tool for every message between runs, with an explicit `action`. The shared r
 | `action` | Required fields | What it does |
 |---|---|---|
 | `tell` | `target`, `message` | Deliver a message and return; no ask edge is created. |
-| `ask` | `target`, `message`, optional `timeout_ms` | Deliver a message and wait for the reply. |
+| `ask` | `target`, `message`, optional `timeout_ms` | Deliver a message and wait for the reply. The wait is bounded; the ask stays open until answered, withdrawn, or its acceptance deadline passes. |
 | `reply` | `reply_to`, `message` | Answer an inbound message: an ask through its claim, a tell through the broker's route. |
 | `resume` | `target`, `message`, optional `label`, `idempotency_key` | Continue a completed run's session in a new run. |
 | `withdraw` | `message_id` | Retract a pending ask. |
@@ -377,7 +377,7 @@ Every result is the same snake_case object on every surface: `action`, `outcome`
 |---|---|
 | `sent` | A tell, reply or control reply was delivered. |
 | `replied` | The ask's reply arrived; `reply` holds its text. |
-| `timed-out` | No reply before `timeout_ms`. The ask is terminal, so a later `withdraw` reports `timed-out` and retracts nothing. |
+| `timed-out` | No reply before `timeout_ms`. The ask keeps its edge, so an answer that arrives later is delivered to the asker as an ordinary message; `withdraw` still retracts it. |
 | `withdrawn` | The ask was retracted. |
 | `edge-absent` | No pending ask or tell route matched; nothing was sent or withdrawn. |
 | `lost` | The message provably cannot arrive. For `reply`, no receipt survived and the reply may or may not have landed. |

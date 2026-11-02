@@ -8,6 +8,8 @@ import assert from 'node:assert/strict'
 
 import {
   mintMessageID,
+  MAX_WAIT_MS,
+  MESSAGE_HORIZON_MS,
   normalizeAskTimeoutMs,
   buildAgentMessage,
   parseControlMessage,
@@ -19,12 +21,12 @@ import {
   askFailureOutcome,
 } from '../hooks/wire.js'
 
-test('mintMessageID: versioned shape with an encoded ten-minute horizon', () => {
+test('mintMessageID: versioned shape with an encoded twenty-minute horizon', () => {
   const now = 1_700_000_000_000
   const id = mintMessageID(now)
   const parts = id.split('.')
   assert.equal(parts[0], 'av1')
-  assert.equal(parseInt(parts[1], 36), now + 600000)
+  assert.equal(parseInt(parts[1], 36), now + 1200000)
   assert.match(parts[2], /^[0-9a-f]{32}$/)
   // Two mints never collide.
   assert.notEqual(id, mintMessageID(now))
@@ -189,7 +191,7 @@ test('renderAskFailure: the shared sentences, byte-identical to messaging-text',
   )
   assert.equal(
     renderAskFailure('av1.m.1', 'mesh-a', 'timed-out'),
-    'no reply to "av1.m.1" from "mesh-a" before the timeout; withdraw it with avenor_message action="withdraw" message_id="av1.m.1"',
+    'no reply to "av1.m.1" from "mesh-a" before the timeout; the ask stays open for a later answer, and avenor_message action="withdraw" message_id="av1.m.1" drops it',
   )
   assert.equal(
     renderAskFailure('av1.m.1', 'mesh-a', 'not-sent'),
@@ -251,4 +253,10 @@ test('extractReplyMessage: reply text, timeout and cancellation', () => {
   assert.equal(extractReplyMessage({ cancelled: true }), '(cancelled)')
   // No message field: the whole row, stringified, so nothing is invented.
   assert.equal(extractReplyMessage({ outcome: 'replied', payload: { other: 1 } }), '{"outcome":"replied","payload":{"other":1}}')
+})
+test('the encoded horizon stays coupled to the shared wait cap', () => {
+  // Three minters encode the same window; drift in one makes its ids refused
+  // at every other admission.
+  assert.equal(MESSAGE_HORIZON_MS, 1_200_000)
+  assert.equal(MESSAGE_HORIZON_MS, 2 * MAX_WAIT_MS)
 })

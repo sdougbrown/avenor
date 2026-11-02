@@ -4,6 +4,7 @@ import messageInputSchema from '../../../schemas/message.input.json'
 import {
   MAX_FINAL_OUTPUT_RUNES,
   MAX_WAIT_MS,
+  MESSAGE_HORIZON_MS,
   boundFinalOutput,
   extractReplyId,
   extractReplyMessage,
@@ -28,7 +29,7 @@ describe('newMsgID', () => {
     const now = 1_700_000_000_000
     const [version, deadline, nonce] = newMsgID(now).split('.')
     expect(version).toBe('av1')
-    expect(Number.parseInt(deadline, 36)).toBe(now + MAX_WAIT_MS)
+    expect(Number.parseInt(deadline, 36)).toBe(now + 2 * MAX_WAIT_MS)
     expect(nonce).toMatch(/^[0-9a-f]{32}$/)
   })
 
@@ -138,5 +139,14 @@ describe('reply helpers', () => {
     for (const value of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, undefined]) {
       expect(normalizeAskTimeoutMs(value)).toBeUndefined()
     }
+  })
+})
+
+describe('the acceptance horizon couples the minters', () => {
+  it('stays twice the shared wait cap at the shared value', () => {
+    // Three minters encode the same window; drift in one makes its ids
+    // refused at every other admission.
+    expect(MESSAGE_HORIZON_MS).toBe(1_200_000)
+    expect(MESSAGE_HORIZON_MS).toBe(2 * MAX_WAIT_MS)
   })
 })
