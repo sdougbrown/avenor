@@ -7,6 +7,7 @@ interface HostAsk {
   from_run_id: string
   message: string
   role?: string
+  expects_reply: boolean
 }
 
 /** Record every provider reply and answer it as delivered, or edge-absent when
@@ -55,7 +56,7 @@ function drainOnce(asks: HostAsk[]) {
 describe('host inbound ask delivery', () => {
   it('surfaces a broker ask via pi.sendUserMessage as a steer', async () => {
     const brokerReceiveTool = mock(async () => ({
-      asks: [{ message_id: 'ask-1', from_run_id: 'rt_child', message: 'is the build green?', role: 'agent' }],
+      asks: [{ message_id: 'ask-1', from_run_id: 'rt_child', message: 'is the build green?', role: 'agent', expects_reply: true }],
     }))
     const harness = await startHostExtension(brokerReceiveTool)
     try {
@@ -65,6 +66,30 @@ describe('host inbound ask delivery', () => {
       expect(body).toContain('is the build green?')
       expect(body).toContain('avenor_message({ action: "reply", reply_to: "ask-1"')
       expect(options.deliverAs).toBe('steer')
+    } finally {
+      await harness.eventHandlers.session_shutdown({}, {})
+    }
+  })
+
+  it('delivers a tell without the reply line and without registering it', async () => {
+    // A tell has no reply edge, so nothing is registered for a reply to
+    // correlate against: a reply to its id reports edge-absent.
+    const brokerReceiveTool = mock(async () => ({
+      asks: [{ message_id: 'tell-1', from_run_id: 'rt_child', message: 'fyi only', role: 'agent', expects_reply: false }],
+    }))
+    const harness = await startHostExtension(brokerReceiveTool, async () => {})
+    try {
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
+      const [body] = harness.sendUserMessage.mock.calls[0] as unknown as [string]
+      expect(body).toContain('Message from peer')
+      expect(body).toContain('fyi only')
+      expect(body).not.toContain('reply_to')
+      const result = await harness.registeredTools.avenor_message.execute('t1', {
+        action: 'reply',
+        reply_to: 'tell-1',
+        message: 'unsolicited answer',
+      })
+      expect(result.details.outcome).toBe('edge-absent')
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
     }
@@ -113,7 +138,7 @@ describe('host inbound ask delivery', () => {
     const brokerReceiveTool = mock(async () => {
       if (brokerReceiveTool.mock.calls.length === 1) throw new Error('broker down')
       return {
-        asks: [{ message_id: 'ask-recover', from_run_id: 'rt_child', message: 'recover me', role: 'agent' }],
+        asks: [{ message_id: 'ask-recover', from_run_id: 'rt_child', message: 'recover me', role: 'agent', expects_reply: true }],
       }
     })
     const harness = await startHostExtension(brokerReceiveTool)
@@ -131,8 +156,8 @@ describe('host inbound ask delivery', () => {
 
   it('answers the polled ask it is addressed to', async () => {
     const brokerReceiveTool = drainOnce([
-      { message_id: 'f-old', from_run_id: 'rt_child', message: 'old question', role: 'agent' },
-      { message_id: '0-new', from_run_id: 'rt_child', message: 'need a decision', role: 'agent' },
+      { message_id: 'f-old', from_run_id: 'rt_child', message: 'old question', role: 'agent', expects_reply: true },
+      { message_id: '0-new', from_run_id: 'rt_child', message: 'need a decision', role: 'agent', expects_reply: true },
     ])
     const replySpy = mock(async (_args: Record<string, unknown>) => {})
     const harness = await startHostExtension(brokerReceiveTool, replySpy)
@@ -156,7 +181,7 @@ describe('host inbound ask delivery', () => {
 
   it('answers a shared ask at most once under concurrent replies', async () => {
     const brokerReceiveTool = drainOnce([
-      { message_id: 'ask-host-c', from_run_id: 'rt_child', message: 'race me', role: 'agent' },
+      { message_id: 'ask-host-c', from_run_id: 'rt_child', message: 'race me', role: 'agent', expects_reply: true },
     ])
     const replySpy = mock(async (_args: Record<string, unknown>) => {})
     const harness = await startHostExtension(brokerReceiveTool, replySpy)
@@ -176,7 +201,7 @@ describe('host inbound ask delivery', () => {
 
   it('keeps the pending ask retryable when the host broker send fails', async () => {
     const brokerReceiveTool = drainOnce([
-      { message_id: 'ask-host-r', from_run_id: 'rt_child', message: 'retry me', role: 'agent' },
+      { message_id: 'ask-host-r', from_run_id: 'rt_child', message: 'retry me', role: 'agent', expects_reply: true },
     ])
     const replySpy = mock(async (_args: Record<string, unknown>): Promise<void> => {
       throw new Error('broker down')
@@ -230,7 +255,7 @@ describe('host inbound ask delivery', () => {
 
   it('does not resurrect a claimed ask when its failed send outlives the session', async () => {
     const brokerReceiveTool = drainOnce([
-      { message_id: 'ask-old', from_run_id: 'rt_child', message: 'old session ask', role: 'agent' },
+      { message_id: 'ask-old', from_run_id: 'rt_child', message: 'old session ask', role: 'agent', expects_reply: true },
     ])
     const send = deferred<{ outcome: string }>()
     const replySpy = mock(() => send.promise)
@@ -261,7 +286,7 @@ describe('host inbound ask delivery', () => {
 
   it('keeps a claimed ask restorable when another supervisor is disposed', async () => {
     const brokerReceiveTool = drainOnce([
-      { message_id: 'ask-kept', from_run_id: 'rt_child', message: 'keep my claim', role: 'agent' },
+      { message_id: 'ask-kept', from_run_id: 'rt_child', message: 'keep my claim', role: 'agent', expects_reply: true },
     ])
     const send = deferred<{ outcome: string }>()
     let sends = 0
@@ -313,8 +338,8 @@ describe('host inbound ask delivery', () => {
   })
 
   it('keeps pending asks and polling owned by each extension instance', async () => {
-    const asksA = [{ message_id: 'ask-a', from_run_id: 'rt_a', message: 'for A', role: 'agent' }]
-    const asksB = [{ message_id: 'ask-b', from_run_id: 'rt_b', message: 'for B', role: 'agent' }]
+    const asksA = [{ message_id: 'ask-a', from_run_id: 'rt_a', message: 'for A', role: 'agent', expects_reply: true }]
+    const asksB = [{ message_id: 'ask-b', from_run_id: 'rt_b', message: 'for B', role: 'agent', expects_reply: true }]
     const replyA = mock(async (_args: Record<string, unknown>) => {})
     const replyB = mock(async (_args: Record<string, unknown>) => {})
     const a = await startHostExtension(drainOnce(asksA), replyA, { pollIntervalMs: 10 })

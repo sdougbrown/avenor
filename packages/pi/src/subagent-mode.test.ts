@@ -107,7 +107,7 @@ describe('sub-agent broker mode (integration)', () => {
       [
         {
           type: 'agent_message',
-          payload: { id: 'ask-1', from_run_id: 'supervisor', message: 'is the build green?' },
+          payload: { id: 'ask-1', from_run_id: 'supervisor', message: 'is the build green?', expects_reply: true },
         },
       ],
     ], 0, 0, 0, {
@@ -178,7 +178,7 @@ describe('sub-agent broker mode (integration)', () => {
       await waitFor(() => resultTool.mock.calls.length === 1)
 
       fetchStub.setHandler('/poll-control', () => Response.json([
-        { type: 'agent_message', payload: { id: 'ask-block', from_run_id: 'supervisor', message: 'still there?' } },
+        { type: 'agent_message', payload: { id: 'ask-block', from_run_id: 'supervisor', message: 'still there?', expects_reply: true } },
       ]))
       await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
       const interrupted = await settleWithin(
@@ -200,7 +200,7 @@ describe('sub-agent broker mode (integration)', () => {
   it('tolerates a JSON null poll response (empty queue) and keeps polling', async () => {
     const fetchStub = stubBrokerFetch([
       null,
-      [{ type: 'agent_message', payload: { id: 'ask-2', from_run_id: 'supervisor', message: 'later ask' } }],
+      [{ type: 'agent_message', payload: { id: 'ask-2', from_run_id: 'supervisor', message: 'later ask', expects_reply: true } }],
     ])
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
@@ -217,7 +217,7 @@ describe('sub-agent broker mode (integration)', () => {
 
   it('keeps polling after a non-ok /poll-control response', async () => {
     const fetchStub = stubBrokerFetch(
-      [[{ type: 'agent_message', payload: { id: 'ask-e', from_run_id: 'supervisor', message: 'after the error' } }]],
+      [[{ type: 'agent_message', payload: { id: 'ask-e', from_run_id: 'supervisor', message: 'after the error', expects_reply: true } }]],
       0,
       0,
       1,
@@ -242,7 +242,7 @@ describe('sub-agent broker mode (integration)', () => {
   it('answers a shared ask at most once under concurrent replies', async () => {
     let sends = 0
     const fetchStub = stubBrokerFetch(
-      [[{ type: 'agent_message', payload: { id: 'ask-c', from_run_id: 'supervisor', message: 'race me' } }]],
+      [[{ type: 'agent_message', payload: { id: 'ask-c', from_run_id: 'supervisor', message: 'race me', expects_reply: true } }]],
       0, 0, 0, {
         '/send': () => {
           sends++
@@ -272,7 +272,7 @@ describe('sub-agent broker mode (integration)', () => {
 
   it('keeps the pending ask retryable when /send fails', async () => {
     const fetchStub = stubBrokerFetch(
-      [[{ type: 'agent_message', payload: { id: 'ask-r', from_run_id: 'supervisor', message: 'retry me' } }]],
+      [[{ type: 'agent_message', payload: { id: 'ask-r', from_run_id: 'supervisor', message: 'retry me', expects_reply: true } }]],
       1,
     )
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
@@ -348,7 +348,7 @@ describe('sub-agent broker mode (integration)', () => {
   it('routes a reply through the host provider outside sub-agent mode', async () => {
     const fetchStub = stubBrokerFetch([])
     const brokerReceiveTool = mock(async () => ({
-      asks: [{ message_id: 'ask-h', from_run_id: 'rt_sub', message: 'host question', role: 'agent' }],
+      asks: [{ message_id: 'ask-h', from_run_id: 'rt_sub', message: 'host question', role: 'agent', expects_reply: true }],
     }))
     const reply = mock(async (_asker: string, _id: string, _message: string) => ({
       outcome: 'replied' as const,
@@ -416,7 +416,7 @@ describe('sub-agent broker mode (integration)', () => {
       await harness.eventHandlers.session_shutdown({}, {})
       await harness.eventHandlers.session_start({}, harness.ctx)
       receive.resolve(new Response(JSON.stringify([
-        { type: 'agent_message', payload: { id: 'old-child-ask', from_run_id: 'supervisor', message: 'old session question' } },
+        { type: 'agent_message', payload: { id: 'old-child-ask', from_run_id: 'supervisor', message: 'old session question', expects_reply: true } },
       ])))
       await waitFor(() => polls > 1)
       expect(harness.sendUserMessage).not.toHaveBeenCalled()
@@ -435,7 +435,7 @@ describe('sub-agent broker mode (integration)', () => {
 
   it('does not restore a sub-agent ask when its failed send outlives the session', async () => {
     const fetchStub = stubBrokerFetch(
-      [[{ type: 'agent_message', payload: { id: 'old-child-reply', from_run_id: 'supervisor', message: 'reply before shutdown' } }]],
+      [[{ type: 'agent_message', payload: { id: 'old-child-reply', from_run_id: 'supervisor', message: 'reply before shutdown', expects_reply: true } }]],
       0, 0, 0, {
         // The first send is intercepted below; the retry reaches this handler
         // and finds no route, so the broker reports the edge absent.

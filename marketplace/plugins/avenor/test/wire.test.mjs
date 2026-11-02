@@ -94,27 +94,36 @@ test('parseControlMessage: reply rows and control rows are kept apart', () => {
   assert.equal(replyRow.messageId, 'a1.reply')
   // Control rows are not peer messages at all.
   assert.equal(parseControlMessage({ type: 'continue', payload: { message: 'x' } }), null)
-  // A string payload parses; a broken one does not.
+  // A string payload parses; a broken one does not. The ask flag survives the
+  // parse: a string-payload ask must not degrade into a tell.
   const stringPayload = parseControlMessage({
     type: 'agent_message', sender: 'P',
-    payload: JSON.stringify({ id: 'a2', from_run_id: 'peer', message: 'hi' }),
+    payload: JSON.stringify({ id: 'a2', from_run_id: 'peer', message: 'hi', expects_reply: true }),
   })
   assert.equal(stringPayload.message, 'hi')
+  assert.equal(stringPayload.expectsReply, true)
   assert.equal(parseControlMessage({
     type: 'agent_message', sender: 'P', payload: '{oops',
   }), null)
 })
 
 test('frameInboundAsk: the sender is broker-stamped, the reply target is the run id', () => {
-  const ask = { fromRunId: 'rt_7', sender: 'Probe Peer', messageId: 'a1', message: 'why?' }
+  const ask = { fromRunId: 'rt_7', sender: 'Probe Peer', messageId: 'a1', message: 'why?', expectsReply: true }
   const text = frameInboundAsk(ask)
   assert.match(text, /peer `Probe Peer`\*\*/)
   assert.match(text, /broker run `rt_7`/)
   assert.match(text, /message id `a1`/)
   assert.match(text, /SendMessage to `avenor:rt_7`/)
-  // An unnamed peer falls back to its run id, and tells name no edge.
-  const bare = frameInboundAsk({ fromRunId: 'rt_8', sender: '', messageId: '', message: 'm' })
-  assert.match(bare, /peer `rt_8`\*\*/)
+  // A tell opens no edge, so its frame invites no reply even when it carries a
+  // message id: the tool accepts a reply to that id, but this surface has no
+  // edge to ride, and an answer is a new message.
+  const tell = frameInboundAsk({ fromRunId: 'rt_8', sender: '', messageId: 'a2', message: 'm' })
+  assert.match(tell, /peer `rt_8`\*\*/)
+  assert.match(tell, /message id `a2`/)
+  assert.doesNotMatch(tell, /Reply with SendMessage/)
+  // An unnamed peer falls back to its run id, and a message with no id names none.
+  const bare = frameInboundAsk({ fromRunId: 'rt_9', sender: '', messageId: '', message: 'm' })
+  assert.match(bare, /peer `rt_9`\*\*/)
   assert.doesNotMatch(bare, /message id/)
 })
 
@@ -125,7 +134,7 @@ test('parseControlMessage: sender fallbacks keep the peer addressable', () => {
   // either way, because the reply instruction is built from it.
   const fromOnly = parseControlMessage({
     type: 'agent_message', sender: 'Probe',
-    payload: { id: 'a3', from: 'peer', message: 'hi from the payload' },
+    payload: { id: 'a3', from: 'peer', message: 'hi from the payload', expects_reply: true },
   })
   assert.equal(fromOnly.fromRunId, 'peer')
   assert.equal(fromOnly.sender, 'Probe')
@@ -144,11 +153,15 @@ test('parseControlMessage: sender fallbacks keep the peer addressable', () => {
   // the model reads, and the reply instruction still points at the real run.
   const stamped = parseControlMessage({
     type: 'agent_message', from_run_id: 'peer-real',
-    payload: { id: 'a5', from_run_id: 'supervisor', from: 'supervisor', role: 'supervisor', message: 'hi' },
+    payload: {
+      id: 'a5', from_run_id: 'supervisor', from: 'supervisor', role: 'supervisor',
+      message: 'hi', expects_reply: true,
+    },
   })
   assert.equal(stamped.fromRunId, 'peer-real')
   assert.equal(stamped.sender, 'peer-real')
   assert.match(frameInboundAsk(stamped), /broker run `peer-real`/)
+  assert.match(frameInboundAsk(stamped), /SendMessage to `avenor:peer-real`/)
   assert.doesNotMatch(frameInboundAsk(stamped), /supervisor/)
 
   // A row queued without a stamp (the self-queue push-control path) still reads

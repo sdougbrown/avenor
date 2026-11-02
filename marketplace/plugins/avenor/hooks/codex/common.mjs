@@ -252,9 +252,9 @@ export function framePeerMessage(ask) {
   let frame = "**📨 Message from avenor peer `" + sender + "`** (broker run `" + ask.fromRunId + "`";
   frame += ask.messageId === "" ? "" : ", message id `" + ask.messageId + "`";
   frame += ")\n\n" + ask.message + "\n\n";
-  frame += ask.messageId === ""
-    ? "No reply is required; answer only if the message itself asks you to."
-    : "Answer with the avenor message tool: `action: \"reply\"`, `reply_to: \"" + ask.messageId + "\"`, `message: \"…\"`.";
+  frame += ask.expectsReply === true
+    ? "Answer with the avenor message tool: `action: \"reply\"`, `reply_to: \"" + ask.messageId + "\"`, `message: \"…\"`."
+    : "No reply is required; answer only if the message itself asks you to.";
   return frame;
 }
 

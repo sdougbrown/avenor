@@ -3110,10 +3110,20 @@ describe('Avenor Pi extension', () => {
     let deliverAsk = false
     const tool = mock(async () => ({
       asks: deliverAsk
-        ? [{ message_id: 'ask-1', from_run_id: 'rt_1', message: 'may I proceed?', role: 'agent' }]
+        ? [{ message_id: 'ask-1', from_run_id: 'rt_1', message: 'may I proceed?', role: 'agent', expects_reply: true }]
         : [],
     }))
     return { tool, deliver: () => { deliverAsk = true } }
+  }
+
+  function makeTellBrokerReceiveTool() {
+    let deliverTell = false
+    const tool = mock(async () => ({
+      asks: deliverTell
+        ? [{ message_id: 'tell-1', from_run_id: 'rt_1', message: 'fyi, no action needed', role: 'agent' }]
+        : [],
+    }))
+    return { tool, deliver: () => { deliverTell = true } }
   }
 
   function makeTwoRunSpawnTool(sock: string) {
@@ -3418,6 +3428,41 @@ describe('Avenor Pi extension', () => {
       ready: false,
       interrupted_by: { run_id: 'rt_1', status: 'asking' },
     })
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('holds a blocking avenor_result when the awaited run sends a tell', async () => {
+    // A tell is delivered unregistered and uninterrupting: a peer fyi must not
+    // wake a blocking wait with a spurious asking stop point.
+    const SOCK = '/tmp/tell-no-interrupt.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return { run_id: 'rt_1', label: 'worker', status: 'running', runtime_id: 'rt-1' }
+    })
+    const resultTool = makeBlockingResultTool()
+    const { tool: brokerReceiveTool, deliver } = makeTellBrokerReceiveTool()
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      resultTool,
+      brokerReceiveTool,
+      spawnTool: mock(async () => ({ run_id: 'rt_1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt-1' })),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const resultPromise: Promise<{ content: Array<{ text: string }>; details?: unknown }> = h.registeredTools.avenor_result.execute('t2', { run_id: 'rt_1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    await waitFor(() => resultTool.mock.calls.length === 1)
+
+    deliver()
+    await waitFor(() => h.sendUserMessage.mock.calls.length > 0)
+    const [tellBody] = h.sendUserMessage.mock.calls[0] as unknown as [string]
+    expect(tellBody).toContain('fyi, no action needed')
+    expect(tellBody).not.toContain('reply_to')
+
+    let outcome: 'returned' | 'rejected' | undefined
+    resultPromise.then(() => { outcome = 'returned' }, () => { outcome = 'rejected' })
+    await h.waitPollMatching(() => true)
+    expect(outcome).toBeUndefined()
 
     await h.eventHandlers.session_shutdown()
   })
