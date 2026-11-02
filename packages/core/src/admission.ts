@@ -4,7 +4,8 @@
 // enum, then string and integer constraints. The applicability entries and the
 // repair sentences come from schemas/, so both languages reject and render
 // identical inputs identically.
-import { quote, quoteList } from './messaging-text.js'
+import repairsBase from '../../../schemas/repairs.json'
+import { quote, quoteList } from './text.js'
 
 /** Render one repair sentence for an error code with its pre-quoted facts. */
 export type RepairRender = (code: string, facts?: Record<string, string>) => string
@@ -35,6 +36,20 @@ export interface Constraints {
   integers: Record<string, IntegerConstraints>
   arrays: Record<string, ArrayConstraints>
   enums: Record<string, string[]>
+}
+
+/**
+ * Merge the shared repair sentences (schemas/repairs.json) with a tool's own
+ * codes and overrides — the fixture wins, exactly like the Go generators merge
+ * them. The one merge for every TypeScript router: a shared sentence is edited
+ * once, and a code missing from both tables renders as '' loudly in the
+ * fixture comparisons.
+ */
+export function mergeRepairs(fixtureRepairs: Record<string, string>): Record<string, string> {
+  return {
+    ...(repairsBase as { repairs: Record<string, string> }).repairs,
+    ...fixtureRepairs,
+  }
 }
 
 /**

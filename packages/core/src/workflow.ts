@@ -6,9 +6,8 @@
 // identical inputs identically.
 import workflowInputSchema from '../../../schemas/workflow.input.json'
 import workflowConformance from '../../../schemas/workflow_route.conformance.json'
-import repairsBase from '../../../schemas/repairs.json'
 import type { WorkflowCompleteParams, WorkflowGateParams, WorkflowGateOperation } from './client.js'
-import { compileConstraints, validateFields, type ApplicabilityEntry } from './admission.js'
+import { compileConstraints, mergeRepairs, validateFields, type ApplicabilityEntry } from './admission.js'
 import { refused, ToolError } from './message.js'
 import { quote, quoteList, substitute } from './messaging-text.js'
 import { validateObservedAt, validateTimeout } from './tools/validate.js'
@@ -90,12 +89,9 @@ const fixture = workflowConformance as unknown as {
   applicability: Record<string, ApplicabilityEntry>
 }
 
-// The shared repair sentences (schemas/repairs.json) plus the tool's own codes
-// and overrides - the fixture wins, exactly like the Go generator merges them.
-const repairs = {
-  ...(repairsBase as { repairs: Record<string, string> }).repairs,
-  ...fixture.repairs,
-}
+// The shared repair sentences plus this tool's own codes and overrides — the
+// fixture wins, the same merge every router uses.
+const repairs = mergeRepairs(fixture.repairs)
 const applicability = fixture.applicability
 
 const constraints = compileConstraints(workflowInputSchema)
