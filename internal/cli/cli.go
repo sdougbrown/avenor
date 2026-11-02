@@ -79,10 +79,10 @@ func Run(args []string) int {
 	return run(args, os.Getenv, os.Stderr)
 }
 
-// RunOptions carries the parsed CLI flags for one run. A Backend of ""
-// means the flag was not supplied on the command line; runWithOptions then
-// applies DefaultBackend.
-type RunOptions struct {
+// runOptions carries the parsed CLI flags for one run. BackendSet records
+// whether --backend appeared on the command line, so an explicit value equal
+// to the default (or empty) still counts as supplied.
+type runOptions struct {
 	Agent                  string
 	Label                  string
 	PromptFile             string
@@ -101,6 +101,7 @@ type RunOptions struct {
 	Thinking               string
 	ClaudeMCPWait          time.Duration
 	Backend                string
+	BackendSet             bool
 	RunID                  string
 	MaxRetries             int
 	AutoApprove            bool
@@ -152,13 +153,7 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		return 1
 	}
 
-	var backendExplicit bool
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "backend" {
-			backendExplicit = true
-		}
-	})
-	opts := RunOptions{
+	opts := runOptions{
 		Agent:                  *agent,
 		Label:                  *label,
 		PromptFile:             *promptFile,
@@ -187,18 +182,18 @@ func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode 
 		RosterFile:             *rosterFile,
 		RosterEntry:            *rosterEntry,
 		PonyConfig:             *ponyConfig,
+		Backend:                *backend,
 	}
-	if backendExplicit {
-		opts.Backend = *backend
-	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "backend" {
+			opts.BackendSet = true
+		}
+	})
 	return runWithOptions(opts, getenv, stderr)
 }
 
-func runWithOptions(opts RunOptions, getenv func(string) string, stderr io.Writer) (exitCode int) {
-	backendExplicit := opts.Backend != ""
-	if !backendExplicit {
-		opts.Backend = DefaultBackend
-	}
+func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Writer) (exitCode int) {
+	backendExplicit := opts.BackendSet
 
 	runID := opts.RunID
 	if runID == "" {
