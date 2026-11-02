@@ -9,7 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/pelletier/go-toml/v2 v2.4.3
-	github.com/sdougbrown/cli-contract v0.4.5
+	github.com/sdougbrown/cli-contract v0.4.6-0.20261102224618-24721c0ffde9
 	github.com/sdougbrown/cli-registry v0.1.1
 	github.com/sdougbrown/poo v0.1.0
 	golang.org/x/sys v0.41.0

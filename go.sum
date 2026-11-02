@@ -18,8 +18,8 @@ github.com/modelcontextprotocol/go-sdk v1.6.0/go.mod h1:kzm3kzFL1/+AziGOE0nUs3gv
 github.com/pelletier/go-toml/v2 v2.4.3 h1:GTRvJQutkOSftxIFD5xw9aepkYNuPWmVJpffdDPYVpY=
 github.com/pelletier/go-toml/v2 v2.4.3/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
-github.com/sdougbrown/cli-contract v0.4.5 h1:o8LhJvlqvApv05FaX0ZpUcHp214XJbPAy33hwZUf8bo=
-github.com/sdougbrown/cli-contract v0.4.5/go.mod h1:+a2rSY4b3JzSWgqaY81Pl8xQaVzMTWcW2m+dH+YsoyY=
+github.com/sdougbrown/cli-contract v0.4.6-0.20261102224618-24721c0ffde9 h1:poG6m3YUyDpwTId6N8FuGT5mXYqaRqk1hYeGI4cDYys=
+github.com/sdougbrown/cli-contract v0.4.6-0.20261102224618-24721c0ffde9/go.mod h1:+a2rSY4b3JzSWgqaY81Pl8xQaVzMTWcW2m+dH+YsoyY=
 github.com/sdougbrown/cli-registry v0.1.1 h1:y+ciPIS1lPm0DFCm0iCEQ/sVBd82RVVp3QS6Uy/r+QU=
 github.com/sdougbrown/cli-registry v0.1.1/go.mod h1:6Eu42h9COF8QgCjU8fRxrYe07BB+1EK0LInwdhRTpWc=
 github.com/sdougbrown/poo v0.1.0 h1:ywXm143rW7LYkl27jOJ1F6sVUYdBbLn6SEg2G6yfyyY=

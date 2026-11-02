@@ -136,7 +136,7 @@ func RunCommand() *clicontract.Command {
 			{Name: "model", Kind: clicontract.String, Usage: "backend-specific model id"},
 			{Name: "thinking", Kind: clicontract.String, Usage: "thinking level (off, minimal, low, medium, high, xhigh, max)"},
 			{Name: "claude-mcp-wait", Kind: clicontract.Duration, Usage: "hold the first prompt until this long after launch so MCP servers connect first (claude backend, direct runs only; 0 = off, max 60s)"},
-			{Name: "backend", Kind: clicontract.String, Usage: fmt.Sprintf("runtime backend (default %s)", DefaultBackend)},
+			{Name: "backend", Kind: clicontract.String, Usage: "runtime backend", Default: DefaultBackend},
 			{Name: "run-id", Kind: clicontract.String, Usage: "correlation id for this run (generated if not set)"},
 			{Name: "max-retries", Kind: clicontract.Int, Usage: "maximum retry attempts on transient failure (0 = no retry)"},
 			{Name: "auto-approve", Kind: clicontract.Bool, Usage: "automatically approve all permission requests"},
@@ -185,12 +185,7 @@ func RunInvocation(inv clicontract.Invocation, getenv func(string) string, stder
 		RosterFile:             inv.Flags["roster-file"],
 		RosterEntry:            inv.Flags["roster-entry"],
 		PonyConfig:             inv.Flags["pony-config"],
-		// cli-contract v0.4.5 reports an absent flag as "", so an explicit
-		// empty --backend is indistinguishable from an omitted one here.
-		BackendSet: inv.Flags["backend"] != "",
-	}
-	if !opts.BackendSet {
-		opts.Backend = DefaultBackend
+		BackendSet:             inv.Supplied["backend"],
 	}
 	return runWithOptions(opts, getenv, stderr)
 }
