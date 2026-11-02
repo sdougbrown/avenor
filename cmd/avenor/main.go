@@ -4,7 +4,6 @@ import (
 	"os"
 
 	"github.com/sdougbrown/avenor/internal/cli"
-	"github.com/sdougbrown/cli-contract"
 )
 
 // Version is the release tag, injected at build time via -ldflags. Unreleased
@@ -19,7 +18,7 @@ func main() {
 		}
 		// The declared surface handles everything else: migrated commands,
 		// help, version, and caller errors for unknown commands.
-		os.Exit(clicontract.Run(app(), avenorAdapter{}, os.Args[1:], os.Stdout, os.Stderr))
+		os.Exit(runDeclared(os.Args[1:], os.Stdout, os.Stderr))
 	}
 
 	// A bare invocation stays on the pre-library path: the declared surface
