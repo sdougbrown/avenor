@@ -1,12 +1,12 @@
 // The one JSON-quoting rule and the one template substituter for every
-// TypeScript tool router, the twin of internal/admission's quote.go. A leaf
+// TypeScript tool router, the twin of internal/tooladmission's quote.go. A leaf
 // module on purpose: the admission engine and the per-tool text renderers both
 // import it, so neither imports the other.
 
 /** Render a value for a template fact as one JSON string literal. Control,
  * format, line- and paragraph-separator characters are escaped, so a label a
  * producer controls cannot carry a bidi override or a zero-width character into
- * tool text. The rule is byte-identical to internal/admission.Quote.
+ * tool text. The rule is byte-identical to internal/tooladmission.Quote.
  */
 export function quote(value: string): string {
   return `"${escapeNonPrintable(value)}"`

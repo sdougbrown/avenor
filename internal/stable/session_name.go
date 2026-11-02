@@ -3,10 +3,10 @@ package stable
 import (
 	"time"
 
-	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
+	"github.com/sdougbrown/avenor/internal/tooladmission"
 )
 
 // Static permission reasons. A rename denial is a fixed sentence, not a
@@ -25,7 +25,7 @@ func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name stri
 		return messaging.RenameResult{}, &router.ToolError{
 			Code:    "invalid_name",
 			Message: messaging.SessionNameRuleMessage(name),
-			Facts:   map[string]string{"name": admission.Quote(name)},
+			Facts:   map[string]string{"name": tooladmission.Quote(name)},
 		}
 	}
 

@@ -1,5 +1,5 @@
 // The one field-validation engine for every TypeScript tool router, the twin of
-// internal/admission (Go). It runs the same fixed order the Go engine runs:
+// internal/tooladmission (Go). It runs the same fixed order the Go engine runs:
 // unknown property, missing required property, wire type, array item type,
 // enum, then string and integer constraints. The applicability entries and the
 // repair sentences come from schemas/, so both languages reject and render

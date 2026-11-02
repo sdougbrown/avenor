@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/tooladmission"
 	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
@@ -18,8 +18,8 @@ import (
 // have always named them. The definitions live in one place; the messaging and
 // workflow tables are the same Go type.
 type (
-	ActionApplicability = admission.ActionApplicability
-	PropertyConstraints = admission.PropertyConstraints
+	ActionApplicability = tooladmission.ActionApplicability
+	PropertyConstraints = tooladmission.PropertyConstraints
 )
 
 // Result is one tool call's outcome: the action that ran and the control
@@ -71,8 +71,8 @@ type Options struct {
 // engine is the shared admission engine over the workflow repairs table. The
 // per-action applicability entries, their wire types, enums and limits, and the
 // sentences come from this package; the field-validation order and checks live
-// in internal/admission.
-var engine = admission.New(Repair)
+// in internal/tooladmission.
+var engine = tooladmission.New(Repair)
 
 // Admit validates one call against its action's applicability entry and
 // returns the action it names. Execute runs it first, so a surface can
@@ -83,7 +83,7 @@ func Admit(input json.RawMessage) (string, error) {
 	if err != nil {
 		return "", invalidActionError()
 	}
-	action, ok := admission.FieldString(fields, "action")
+	action, ok := tooladmission.FieldString(fields, "action")
 	if !ok {
 		return "", invalidActionError()
 	}
@@ -301,7 +301,7 @@ func ActionOf(input json.RawMessage) string {
 	if err != nil {
 		return ""
 	}
-	action, _ := admission.FieldString(fields, "action")
+	action, _ := tooladmission.FieldString(fields, "action")
 	return action
 }
 
@@ -379,7 +379,7 @@ func decodeObject(input json.RawMessage) (map[string]json.RawMessage, error) {
 // pinned them to the int64 range, so the conversion cannot overflow. An
 // omitted number decodes as the zero value, which is the server default.
 func (in workflowInput) afterSeq() int64 {
-	rational, ok := admission.ExactInteger(json.RawMessage(in.AfterSeq))
+	rational, ok := tooladmission.ExactInteger(json.RawMessage(in.AfterSeq))
 	if !ok || !rational.Num().IsInt64() {
 		return 0
 	}
@@ -387,7 +387,7 @@ func (in workflowInput) afterSeq() int64 {
 }
 
 func (in workflowInput) limit() int {
-	rational, ok := admission.ExactInteger(json.RawMessage(in.Limit))
+	rational, ok := tooladmission.ExactInteger(json.RawMessage(in.Limit))
 	if !ok || !rational.Num().IsInt64() {
 		return 0
 	}
@@ -412,9 +412,9 @@ func refused(err error) *ToolError {
 
 // quote and quoteList render template facts through the shared escaping rule,
 // so the two routers cannot disagree on how an id is quoted.
-func quote(value string) string { return admission.Quote(value) }
+func quote(value string) string { return tooladmission.Quote(value) }
 
-func quoteList(values []string) string { return admission.QuoteList(values) }
+func quoteList(values []string) string { return tooladmission.QuoteList(values) }
 
 var timeoutRE = regexp.MustCompile(`^(\d+)(s|m|h)?$`)
 

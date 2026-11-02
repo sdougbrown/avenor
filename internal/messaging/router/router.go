@@ -19,17 +19,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/askclient"
+	"github.com/sdougbrown/avenor/internal/tooladmission"
 	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
 // Engine is the shared admission engine over the messaging repairs table. The
 // per-action applicability entries, their wire types and limits, and the
 // sentences come from internal/messaging; the field-validation order and
-// checks live in internal/admission.
-var engine = admission.New(messaging.Repair)
+// checks live in internal/tooladmission.
+var engine = tooladmission.New(messaging.Repair)
 
 // Provider is what one surface supplies to the router: the shared transport,
 // the caller and surface it speaks as, and the runtime operations only that
@@ -141,7 +141,7 @@ func (r *Router) Execute(ctx context.Context, input json.RawMessage) (Result, er
 		return Result{}, invalidAction(messaging.MessageRouteFields{})
 	}
 
-	action, ok := fieldString(fields, "action")
+	action, ok := tooladmission.FieldString(fields, "action")
 	if !ok {
 		return Result{}, invalidAction(messaging.MessageRouteFields{})
 	}
@@ -619,13 +619,13 @@ func asToolError(err error) *ToolError {
 }
 
 // quote, sanitize and quoteList render template facts through the shared
-// escaping rule in internal/admission, so the routers and the rename authority
+// escaping rule in internal/tooladmission, so the routers and the rename authority
 // cannot disagree on how an id is quoted.
-func quote(value string) string { return admission.Quote(value) }
+func quote(value string) string { return tooladmission.Quote(value) }
 
-func sanitize(value string) string { return admission.Sanitize(value) }
+func sanitize(value string) string { return tooladmission.Sanitize(value) }
 
-func quoteList(values []string) string { return admission.QuoteList(values) }
+func quoteList(values []string) string { return tooladmission.QuoteList(values) }
 
 // The six message actions, the reserved self alias, and the two tool-level
 // outcomes. The action spellings are the schema's action enum.
@@ -689,18 +689,6 @@ func decodeObject(input json.RawMessage) (map[string]json.RawMessage, error) {
 		fields = map[string]json.RawMessage{}
 	}
 	return fields, nil
-}
-
-func fieldString(fields map[string]json.RawMessage, name string) (string, bool) {
-	raw, ok := fields[name]
-	if !ok {
-		return "", false
-	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", false
-	}
-	return value, true
 }
 
 // timeoutMS converts the validated integer-valued timeout_ms into whole

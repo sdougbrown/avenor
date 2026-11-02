@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/tooladmission"
 	"github.com/sdougbrown/avenor/internal/toolerr"
 )
 
@@ -13,8 +13,8 @@ import (
 // have always named them. The definitions live in one place; the messaging and
 // workflow tables are the same Go type.
 type (
-	ActionApplicability = admission.ActionApplicability
-	PropertyConstraints = admission.PropertyConstraints
+	ActionApplicability = tooladmission.ActionApplicability
+	PropertyConstraints = tooladmission.PropertyConstraints
 )
 
 // ConformanceCase is one language-neutral conformance case from

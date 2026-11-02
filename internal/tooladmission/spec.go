@@ -1,4 +1,4 @@
-package admission
+package tooladmission
 
 // ActionApplicability is the per-action input contract: the one table both the
 // Go and the TypeScript router validate against. The JSON Schema variants are

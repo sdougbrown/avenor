@@ -1,8 +1,8 @@
-// Package admission holds the pieces every tool router shares: the JSON
+// Package tooladmission holds the pieces every tool router shares: the JSON
 // quoting rule, the per-action input contract types, and the field-validation
 // engine. A router constructs one Engine over its own repairs table, so the
 // admission semantics live here while each tool keeps its own sentences.
-package admission
+package tooladmission
 
 import (
 	"fmt"

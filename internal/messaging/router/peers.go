@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/tooladmission"
 )
 
 // peersActionVocabulary is the peers action union in declaration order. It is
@@ -40,7 +41,7 @@ func ExecutePeers(ctx context.Context, p Provider, input json.RawMessage) (Resul
 	if err != nil {
 		return Result{}, peersInvalidAction()
 	}
-	action, ok := fieldString(fields, "action")
+	action, ok := tooladmission.FieldString(fields, "action")
 	if !ok {
 		if _, present := fields["action"]; present {
 			return Result{}, peersInvalidAction()
