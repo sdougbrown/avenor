@@ -725,9 +725,10 @@ func TestReachableOutcomesAreRenderable(t *testing.T) {
 	}
 }
 
-// TestReplyClaimRestoredUnlessDelivered pins the claim rule: only a replied
-// outcome proves the asker received the answer, so every other outcome leaves
-// the ask claimable.
+// TestReplyClaimRestoredUnlessDelivered pins the claim rule: a replied outcome
+// (the ask's edge accepted the reply) and a sent outcome (the broker delivered
+// it through the fallback) both prove the asker received the answer, so only
+// the other outcomes leave the ask claimable.
 func TestReplyClaimRestoredUnlessDelivered(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -735,6 +736,7 @@ func TestReplyClaimRestoredUnlessDelivered(t *testing.T) {
 		restored bool
 	}{
 		{"replied consumes the claim", messaging.OutcomeReplied, false},
+		{"sent consumes the claim", messaging.OutcomeSent, false},
 		{"not-sent restores the claim", messaging.OutcomeNotSent, true},
 		{"possibly-pending restores the claim", messaging.OutcomePossiblyPending, true},
 		{"edge-absent restores the claim", messaging.OutcomeEdgeAbsent, true},

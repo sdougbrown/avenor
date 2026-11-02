@@ -986,6 +986,31 @@ describe('host message provider', () => {
     expect(surfaceClaims.size).toBe(0)
   })
 
+  it('releases the claim when a late reply reports sent', async () => {
+    // The fallback path delivered the answer even though the edge was gone, so
+    // the claim must still be released on `sent`: a retained claim would make
+    // a retry re-send the answer.
+    const pending = new Map([['ask-1', { from_run_id: 'rt_7', message_id: 'ask-1' }]])
+    const surfaceClaims: Map<string, { asker: string, generation: number }> = new Map()
+    const client = fakeClient({
+      messageReply: mock(async () => ({ outcome: 'sent' })),
+    })
+    const host = createHostMessageProvider({
+      surface: 'pi-host',
+      supervisorId: '/tmp/avenor-provider.sock',
+      generation: 'gen-1',
+      client,
+      pendingAsks: pending,
+      pollGeneration: () => 0,
+    })
+    installAskClaims(host, surfaceClaims, pending, () => 0)
+
+    const result = await executeMessage(host, { action: 'reply', reply_to: 'ask-1', message: 'answer' })
+
+    expect(result.outcome).toBe('sent')
+    expect(surfaceClaims.size).toBe(0)
+  })
+
   it('reads a plain error naming a generation mismatch as stale', () => {
     expect(isGenerationMismatchError(new Error('messaging: generation mismatch'))).toBe(true)
     expect(isGenerationMismatchError(new Error('some other error'))).toBe(false)
@@ -1097,6 +1122,27 @@ describe('child message provider', () => {
     expect(result.outcome).toBe('replied')
     expect(broker.reply).toHaveBeenCalledWith('supervisor', 'ask-1', 'answer')
     expect(pending.has('ask-1')).toBe(false)
+  })
+
+  it('releases the surface claim when the child reply reports sent', async () => {
+    // Observing the claims map, not pendingAsks: claimAsk already removed the
+    // row from pendingAsks, so only the release on `sent` proves the claim
+    // path consumed the late delivery.
+    const pending = new Map([['ask-1', { from_run_id: 'supervisor', message_id: 'ask-1' }]])
+    const claims = new Map<string, { asker: string, generation: number }>()
+    const broker = childBroker({ reply: mock(async () => ({ outcome: 'sent', messageId: 'ask-1' })) })
+    const child = createChildMessageProvider({
+      surface: 'pi-child',
+      runId: 'rt_child',
+      broker,
+      pendingAsks: pending,
+    })
+    installAskClaims(child, claims, pending, () => 0)
+
+    const result = await executeMessage(child, { action: 'reply', reply_to: 'ask-1', message: 'answer' })
+
+    expect(result.outcome).toBe('sent')
+    expect(claims.size).toBe(0)
   })
 
   it('refuses resolution and state when the listing is incomplete, even for a peer it read', async () => {

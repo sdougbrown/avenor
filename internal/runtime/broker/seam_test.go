@@ -135,8 +135,8 @@ func TestLocalMessagingSeamServesTheHTTPChildPaths(t *testing.T) {
 		"reply_to":    "edge-already-retired",
 		"payload":     map[string]any{"message": "late"},
 	})
-	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeEdgeAbsent) {
-		t.Fatalf("absent-edge reply = (%d, %v), want 200 edge-absent", status, body)
+	if status != http.StatusOK || body["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("absent-edge reply = (%d, %v), want 200 sent", status, body)
 	}
 	if delivered := rec.Tells(); len(delivered) != 2 || delivered[1].ToRunID != "sender" {
 		t.Fatalf("deliveries = %+v, want the absent-edge fallback through the seam", delivered)

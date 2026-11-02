@@ -547,7 +547,7 @@ func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging
 	if body.Generation != "" {
 		generation = body.Generation
 	}
-	if body.Outcome == messaging.OutcomeReplied || body.Outcome == messaging.OutcomeEdgeAbsent {
+	if body.Outcome == messaging.OutcomeReplied || body.Outcome == messaging.OutcomeEdgeAbsent || body.Outcome == messaging.OutcomeSent {
 		return fail(body.Outcome, generation, nil)
 	}
 	return fail(messaging.OutcomePossiblyPending, generation,

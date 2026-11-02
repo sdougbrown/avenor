@@ -27,7 +27,6 @@ func TestInProcessReplyRouting(t *testing.T) {
 				t.Fatalf("legacy Admit: %v", err)
 			}
 		},
-		Rotate: func(t *testing.T) { store.Reset() },
 	})
 }
 

@@ -104,7 +104,7 @@ messages.
 
 | Outcome | Meaning |
 |---|---|
-| `sent` | The receiver admitted the ask; an edge exists. |
+| `sent` | The receiver accepted the message. For an ask, an edge exists; for a reply, the answer was delivered. |
 | `replied` | A reply was delivered to the waiting sender. |
 | `timed-out` | The bounded wait expired before a reply. |
 | `withdrawn` | The sender completed a withdrawal. |
@@ -196,7 +196,7 @@ The local adapter drives the broker's own router:
 | Path | Purpose |
 |---|---|
 | `/sessions` | Authenticated preflight and peer listing: the broker's generation, its `messaging_protocol` marker, and the peers the installed messenger can see. A listing the messenger could not finish is reported as `peers_error` beside the partial `sessions` array, and the adapter rejects it instead of treating the partial list as complete. The policy is shared across surfaces: a provider that resolves a target or reads a run state from the listing — the Go child and MCP providers and the TypeScript host and child providers alike — refuses the lookup when the listing is incomplete, even when the target is in the partial set; only the peers tool serves the partial list beside the detail. |
-| `/send` | Admit one message or ask. A reply (`reply_to` set) may omit `to_run_id`: the broker routes the reply to the sender of the tell or ask the id names, and reports `edge-absent` when no route exists. A reply that cannot be routed to a local sender relays the way a tell does, so a reply to a cross-branch tell reaches the sender's branch. The reply carries its own route key (`<id>.reply`) and the id it answers, so the recipient can answer the answer; an `ask` result with outcome `replied` exposes that route key as `reply_id`. A message with neither `to_run_id` nor `reply_to` is refused `400 invalid-request`. |
+| `/send` | Admit one message or ask. A reply (`reply_to` set) may omit `to_run_id`: the broker routes the reply to the sender of the tell or ask the id names, and reports `edge-absent` when no route exists. A reply that names a target but finds no live edge is delivered to that target and reports `sent`, because the answer is already queued for it. A reply that cannot be routed to a local sender relays the way a tell does, so a reply to a cross-branch tell reaches the sender's branch. The reply carries its own route key (`<id>.reply`) and the id it answers, so the recipient can answer the answer; an `ask` result with outcome `replied` exposes that route key as `reply_id`. A message with neither `to_run_id` nor `reply_to` is refused `400 invalid-request`. |
 | `/wait_reply` | Wait for the ask's terminal state. |
 | `/cancel_message` | Withdraw an ask. |
 | `/poll-control` | Drain queued control and agent messages. |

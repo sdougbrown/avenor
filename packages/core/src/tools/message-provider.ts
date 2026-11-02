@@ -658,7 +658,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         if (outcome) return { outcome: outcome as MessageOutcome, messageId: inboundAskId }
         throw authorityError(error)
       }
-      if (sent.outcome === 'replied') provider.releaseAsk?.(inboundAskId)
+      if (sent.outcome === 'replied' || sent.outcome === 'sent') provider.releaseAsk?.(inboundAskId)
       return { outcome: sent.outcome as MessageOutcome, messageId: inboundAskId }
     },
 
@@ -926,7 +926,7 @@ export function createChildMessageProvider(options: ChildProviderOptions): Messa
     ask: (targetRunId, message, timeoutMs, signal) => broker.ask(targetRunId, message, newMsgID(), timeoutMs, signal),
     reply: async (inboundAskId, message, askerRunId) => {
       const result = await broker.reply(askerRunId, inboundAskId, message)
-      if (result.outcome === 'replied') provider.releaseAsk?.(inboundAskId)
+      if (result.outcome === 'replied' || result.outcome === 'sent') provider.releaseAsk?.(inboundAskId)
       return result
     },
     withdraw: messageId => broker.withdraw(messageId),

@@ -95,8 +95,37 @@ func TestLocalReplyRouting(t *testing.T) {
 				t.Fatalf("legacy Admit: %v", err)
 			}
 		},
-		Rotate: func(t *testing.T) { b.Store().Reset() },
 	})
+}
+
+// TestLocalReplyFallbackAfterRotation pins this transport's side of the case
+// the shared suite cannot pin: the broker owns the queues, so a reply that
+// arrives after a rotation degrades to a fire-and-forget delivery and reports
+// sent — naming the absence the edge left behind would make a delivered
+// answer read as lost.
+func TestLocalReplyFallbackAfterRotation(t *testing.T) {
+	b := newBroker(t)
+	at := newAdapter(t, b, alice)
+	bt := newAdapter(t, b, bob)
+
+	pre, err := at.Preflight(t.Context())
+	if err != nil {
+		t.Fatalf("Preflight: %v", err)
+	}
+	msgID := mintID(t, time.Minute)
+	if _, err := at.Send(t.Context(), messaging.SendRequest{
+		From: alice, To: bob, MessageID: msgID, Generation: pre.Generation, Body: `{"message":"ping"}`,
+	}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b.Store().Reset()
+
+	replied, err := bt.Reply(t.Context(), messaging.ReplyRequest{
+		From: bob, ToRunID: alice.RunID, MessageID: msgID, Body: `{"message":"pong"}`,
+	})
+	if err != nil || replied.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Reply after rotation = (%+v, %v), want sent", replied, err)
+	}
 }
 
 // TestLocalAdapterGenerationRotation pins the rotation rule: a rejected

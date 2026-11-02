@@ -1897,6 +1897,9 @@ func TestBrokerReplyAfterRotationFallsBackToDelivery(t *testing.T) {
 	if reply["status"] != http.StatusOK || reply["note"] == nil {
 		t.Fatalf("reply = %+v, want the fire-and-forget fallback", reply)
 	}
+	if reply["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("reply outcome = %v, want sent: the delivery happened", reply["outcome"])
+	}
 	got := pollAgentMessages(t, addr, "rotated_asker", senderToken)
 	if len(got) != 1 {
 		t.Fatalf("asker poll = %v, want the reply delivered", got)
@@ -2589,9 +2592,14 @@ func TestBrokerWaitReplyDisconnectCleanup(t *testing.T) {
 	}
 
 	// A later reply cannot answer the abandoned edge and is delivered to the
-	// sender as fire-and-forget.
-	if r := sendReply(t, b.Addr(), targetToken, "disco_target", "disco_sender", msgID, "late reply"); r["status"] != http.StatusOK || r["note"] == nil {
-		t.Fatalf("late reply = %+v, want the fire-and-forget fallback", r)
+	// sender as fire-and-forget, so it reports sent rather than the absence it
+	// used to claim.
+	late := sendReply(t, b.Addr(), targetToken, "disco_target", "disco_sender", msgID, "late reply")
+	if late["status"] != http.StatusOK || late["note"] == nil {
+		t.Fatalf("late reply = %+v, want the fire-and-forget fallback", late)
+	}
+	if late["outcome"] != string(messaging.OutcomeSent) {
+		t.Fatalf("late reply outcome = %v, want sent: the delivery happened", late["outcome"])
 	}
 	sender := b.GetRun("disco_sender")
 	sender.Mu.Lock()

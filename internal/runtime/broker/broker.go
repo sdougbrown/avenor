@@ -1383,7 +1383,7 @@ func (b *Broker) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSONBody(w, http.StatusOK, map[string]any{
 				"queued":  true,
 				"note":    "reply_to edge not found, delivered as fire-and-forget",
-				"outcome": messaging.OutcomeEdgeAbsent,
+				"outcome": messaging.OutcomeSent,
 			})
 			return
 		}

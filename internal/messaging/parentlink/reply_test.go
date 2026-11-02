@@ -82,6 +82,39 @@ func TestLinkReplyReportsAnUnrecordedAskWithoutPosting(t *testing.T) {
 	}
 }
 
+// TestLinkReplyPassesTheParentSentOutcomeThrough pins the late-delivery case:
+// a parent that reports `sent` (its fallback delivered the answer after its
+// edge was gone) hands the outcome to the child unchanged, so the child's
+// claim-consuming layers see a delivery instead of a possibly-pending claim.
+func TestLinkReplyPassesTheParentSentOutcomeThrough(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathSend:
+			return http.StatusOK, `{"outcome":"sent"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	ctx := testContext(t)
+	link := newTestLink(t, stub, "gen-a")
+	if err := link.RecordRelay(messaging.RelayRoute{
+		MessageID:      "msg-1",
+		AskerRunID:     "run-x",
+		EdgeGeneration: "gen-a",
+	}); err != nil {
+		t.Fatalf("RecordRelay: %v", err)
+	}
+
+	outcome, err := link.Reply(ctx, replyRequest("msg-1"))
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if outcome.Outcome != messaging.OutcomeSent {
+		t.Fatalf("Reply outcome = %q, want %q", outcome, messaging.OutcomeSent)
+	}
+}
+
 func TestLinkReplyReportsTheProtocolErrorWhenTheParentAnswersWithoutAReplyVerdict(t *testing.T) {
 	cases := []struct {
 		name string
@@ -90,10 +123,6 @@ func TestLinkReplyReportsTheProtocolErrorWhenTheParentAnswersWithoutAReplyVerdic
 		{
 			name: "no verdict at all",
 			body: `{"message_id":"msg-1"}`,
-		},
-		{
-			name: "an outcome a reply never reports",
-			body: `{"outcome":"sent","message_id":"msg-1"}`,
 		},
 	}
 	for _, testCase := range cases {
