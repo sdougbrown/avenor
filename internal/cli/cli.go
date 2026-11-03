@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"maps"
@@ -29,6 +28,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/pony"
 	"github.com/sdougbrown/avenor/internal/runtime/pony/model/openai"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/cli-contract"
 )
 
 const (
@@ -75,10 +75,6 @@ func OverrideStopReason(stopReason string, cancelled bool, timedOut bool) string
 	}
 }
 
-func Run(args []string) int {
-	return run(args, os.Getenv, os.Stderr)
-}
-
 // runOptions carries the parsed CLI flags for one run. BackendSet records
 // whether --backend appeared on the command line, so an explicit value equal
 // to the default (or empty) still counts as supplied.
@@ -115,80 +111,82 @@ type runOptions struct {
 	PonyConfig             string
 }
 
-func run(args []string, getenv func(string) string, stderr io.Writer) (exitCode int) {
-	fs := flag.NewFlagSet("avenor", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-
-	agent := fs.String("agent", "", "agent name")
-	label := fs.String("label", "", "free-form label for log correlation")
-	promptFile := fs.String("prompt-file", "", "path to prompt file (mutually exclusive with --prompt)")
-	prompt := fs.String("prompt", "", "inline prompt text (mutually exclusive with --prompt-file)")
-	dir := fs.String("dir", ".", "working directory for the agent")
-	resume := fs.String("resume", "", "resume an existing session id")
-	serverURL := fs.String("server-url", "", "long-lived ACP server endpoint")
-	onEvent := fs.String("on-event", "", "path to write NDJSON events (optional; events are discarded if unset)")
-	permissionHandler := fs.String("permission-handler", "", "permission handler, supports file:<path>")
-	sentinelFile := fs.String("sentinel-file", "", "path to write a completion sentinel (also derives permission base unless --permission-handler is set)")
-	resultFile := fs.String("result-file", "", "path to write the run's final assistant message as plain text (direct runs only; written before the sentinel)")
-	pidFile := fs.String("pid-file", "", "path to write this process's pid at startup (removed on exit)")
-	timeout := fs.Duration("timeout", 0, "overall session timeout")
-	progressTimeout := fs.Duration("progress-timeout", 0, "session progress timeout (fires if no event for duration)")
-	model := fs.String("model", "", "backend-specific model id")
-	thinking := fs.String("thinking", "", "thinking level (off, minimal, low, medium, high, xhigh, max)")
-	claudeMCPWait := fs.Duration("claude-mcp-wait", 0, "hold the first prompt until this long after launch so MCP servers connect first (claude backend, direct runs only; 0 = off, max 60s)")
-	backend := fs.String("backend", DefaultBackend, "runtime backend")
-	runIDFlag := fs.String("run-id", "", "correlation id for this run (generated if not set)")
-	maxRetries := fs.Int("max-retries", 0, "maximum retry attempts on transient failure (0 = no retry)")
-	autoApprove := fs.Bool("auto-approve", false, "automatically approve all permission requests")
-	controlSocket := fs.String("control-socket", "", "unix socket path for control plane")
-	httpDebug := fs.String("http-debug", "", "http debug adapter bind address")
-	permClaimTimeout := fs.Duration("permission-claim-timeout", 0, "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)")
-	loopFile := fs.String("loop-file", "", "path to loop config JSON (optional; enables multi-phase mode)")
-	teamFile := fs.String("team-file", "", "path to team config JSON (optional; enables parallel-team mode)")
-	rosterFile := fs.String("roster-file", "", "path to roster JSON (direct selector or workflow fallback)")
-	rosterEntry := fs.String("roster-entry", "", "roster entry name for direct selection")
-	ponyConfig := fs.String("pony-config", "", "path to pony backend JSON config (required for --backend pony)")
-
-	if err := fs.Parse(args); err != nil {
-		return 1
+// RunCommand declares the run command's flag surface, in runOptions field
+// order. Handle is nil here; cmd/avenor attaches the handler, so this
+// package knows nothing of avenor's adapter.
+func RunCommand() *clicontract.Command {
+	return &clicontract.Command{
+		Name:  "run",
+		Short: "start one agent run and wait for it to settle",
+		Flags: []clicontract.Flag{
+			{Name: "agent", Kind: clicontract.String, Usage: "agent name"},
+			{Name: "label", Kind: clicontract.String, Usage: "free-form label for log correlation"},
+			{Name: "prompt-file", Kind: clicontract.String, Usage: "path to prompt file (mutually exclusive with --prompt)"},
+			{Name: "prompt", Kind: clicontract.String, Usage: "inline prompt text (mutually exclusive with --prompt-file)"},
+			{Name: "dir", Kind: clicontract.String, Usage: "working directory for the agent", Default: "."},
+			{Name: "resume", Kind: clicontract.String, Usage: "resume an existing session id"},
+			{Name: "server-url", Kind: clicontract.String, Usage: "long-lived ACP server endpoint"},
+			{Name: "on-event", Kind: clicontract.String, Usage: "path to write NDJSON events (optional; events are discarded if unset)"},
+			{Name: "permission-handler", Kind: clicontract.String, Usage: "permission handler, supports file:<path>"},
+			{Name: "sentinel-file", Kind: clicontract.String, Usage: "path to write a completion sentinel (also derives permission base unless --permission-handler is set)"},
+			{Name: "result-file", Kind: clicontract.String, Usage: "path to write the run's final assistant message as plain text (direct runs only; written before the sentinel)"},
+			{Name: "pid-file", Kind: clicontract.String, Usage: "path to write this process's pid at startup (removed on exit)"},
+			{Name: "timeout", Kind: clicontract.Duration, Usage: "overall session timeout"},
+			{Name: "progress-timeout", Kind: clicontract.Duration, Usage: "session progress timeout (fires if no event for duration)"},
+			{Name: "model", Kind: clicontract.String, Usage: "backend-specific model id"},
+			{Name: "thinking", Kind: clicontract.String, Usage: "thinking level (off, minimal, low, medium, high, xhigh, max)"},
+			{Name: "claude-mcp-wait", Kind: clicontract.Duration, Usage: "hold the first prompt until this long after launch so MCP servers connect first (claude backend, direct runs only; 0 = off, max 60s)"},
+			{Name: "backend", Kind: clicontract.String, Usage: "runtime backend", Default: DefaultBackend},
+			{Name: "run-id", Kind: clicontract.String, Usage: "correlation id for this run (generated if not set)"},
+			{Name: "max-retries", Kind: clicontract.Int, Usage: "maximum retry attempts on transient failure (0 = no retry)"},
+			{Name: "auto-approve", Kind: clicontract.Bool, Usage: "automatically approve all permission requests"},
+			{Name: "control-socket", Kind: clicontract.String, Usage: "unix socket path for control plane"},
+			{Name: "http-debug", Kind: clicontract.String, Usage: "http debug adapter bind address"},
+			{Name: "permission-claim-timeout", Kind: clicontract.Duration, Usage: "how long to wait for a connected socket client to answer a permission request before falling through to the file handler or 'none' resolver (0 = disabled: fall through only when all clients disconnect; use a non-zero value for unattended automation where client processes may hang)"},
+			{Name: "loop-file", Kind: clicontract.String, Usage: "path to loop config JSON (optional; enables multi-phase mode)"},
+			{Name: "team-file", Kind: clicontract.String, Usage: "path to team config JSON (optional; enables parallel-team mode)"},
+			{Name: "roster-file", Kind: clicontract.String, Usage: "path to roster JSON (direct selector or workflow fallback)"},
+			{Name: "roster-entry", Kind: clicontract.String, Usage: "roster entry name for direct selection"},
+			{Name: "pony-config", Kind: clicontract.String, Usage: "path to pony backend JSON config (required for --backend pony)"},
+		},
 	}
+}
 
+// RunInvocation maps a parsed run invocation to runOptions and executes the
+// run. It is the only invocation-to-options conversion.
+func RunInvocation(inv clicontract.Invocation, getenv func(string) string, stderr io.Writer) int {
 	opts := runOptions{
-		Agent:                  *agent,
-		Label:                  *label,
-		PromptFile:             *promptFile,
-		Prompt:                 *prompt,
-		Dir:                    *dir,
-		Resume:                 *resume,
-		ServerURL:              *serverURL,
-		OnEvent:                *onEvent,
-		PermissionHandler:      *permissionHandler,
-		SentinelFile:           *sentinelFile,
-		ResultFile:             *resultFile,
-		PIDFile:                *pidFile,
-		Timeout:                *timeout,
-		ProgressTimeout:        *progressTimeout,
-		Model:                  *model,
-		Thinking:               *thinking,
-		ClaudeMCPWait:          *claudeMCPWait,
-		RunID:                  *runIDFlag,
-		MaxRetries:             *maxRetries,
-		AutoApprove:            *autoApprove,
-		ControlSocket:          *controlSocket,
-		HTTPDebug:              *httpDebug,
-		PermissionClaimTimeout: *permClaimTimeout,
-		LoopFile:               *loopFile,
-		TeamFile:               *teamFile,
-		RosterFile:             *rosterFile,
-		RosterEntry:            *rosterEntry,
-		PonyConfig:             *ponyConfig,
-		Backend:                *backend,
+		Agent:                  inv.Flags["agent"],
+		Label:                  inv.Flags["label"],
+		PromptFile:             inv.Flags["prompt-file"],
+		Prompt:                 inv.Flags["prompt"],
+		Dir:                    inv.Flags["dir"],
+		Resume:                 inv.Flags["resume"],
+		ServerURL:              inv.Flags["server-url"],
+		OnEvent:                inv.Flags["on-event"],
+		PermissionHandler:      inv.Flags["permission-handler"],
+		SentinelFile:           inv.Flags["sentinel-file"],
+		ResultFile:             inv.Flags["result-file"],
+		PIDFile:                inv.Flags["pid-file"],
+		Timeout:                inv.Durations["timeout"],
+		ProgressTimeout:        inv.Durations["progress-timeout"],
+		Model:                  inv.Flags["model"],
+		Thinking:               inv.Flags["thinking"],
+		ClaudeMCPWait:          inv.Durations["claude-mcp-wait"],
+		Backend:                inv.Flags["backend"],
+		RunID:                  inv.Flags["run-id"],
+		MaxRetries:             inv.Ints["max-retries"],
+		AutoApprove:            inv.Bools["auto-approve"],
+		ControlSocket:          inv.Flags["control-socket"],
+		HTTPDebug:              inv.Flags["http-debug"],
+		PermissionClaimTimeout: inv.Durations["permission-claim-timeout"],
+		LoopFile:               inv.Flags["loop-file"],
+		TeamFile:               inv.Flags["team-file"],
+		RosterFile:             inv.Flags["roster-file"],
+		RosterEntry:            inv.Flags["roster-entry"],
+		PonyConfig:             inv.Flags["pony-config"],
+		BackendSet:             inv.Supplied["backend"],
 	}
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "backend" {
-			opts.BackendSet = true
-		}
-	})
 	return runWithOptions(opts, getenv, stderr)
 }
 

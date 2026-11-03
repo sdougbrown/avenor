@@ -3,8 +3,50 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestRunDeclaredHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeclared([]string{"run", "--help"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run --help exit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "--prompt-file") {
+		t.Fatalf("run --help stdout missing --prompt-file: %q", stdout.String())
+	}
+}
+
+// TestRunDeclaredFlagSyntaxRejectsBeforeSentinel pins the flag-syntax contract:
+// a command line that does not parse exits 2 and writes nothing, including the
+// sentinel file.
+func TestRunDeclaredFlagSyntaxRejectsBeforeSentinel(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"unknown flag":       {"--nope"},
+		"stray positional":   {"extra"},
+		"malformed duration": {"--timeout=notaduration"},
+		"malformed int":      {"--max-retries=notanint"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sentinel := filepath.Join(t.TempDir(), "done.env")
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"run", "--sentinel-file", sentinel, "--prompt", "x"}, extra...)
+			code := runDeclared(args, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("exit = %d, want 2; stderr: %s", code, stderr.String())
+			}
+			if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+				t.Fatalf("sentinel %s exists after flag-syntax rejection", sentinel)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
 
 func TestSchemaCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer

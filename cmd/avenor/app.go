@@ -7,23 +7,26 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/admission"
+	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/stable"
 	"github.com/sdougbrown/cli-contract"
 )
 
-// app declares the migrated Avenor command surface. run is the one command
-// still on its pre-library dispatch path until its migration lands; main.go
-// routes it directly in the meantime.
+// app declares the Avenor command surface; every command dispatches
+// through the library.
 func app() *clicontract.App {
+	runCmd := cli.RunCommand()
+	runCmd.Handle = handleRun
 	return &clicontract.App{
 		Name:                "avenor",
 		Version:             Version,
 		ErrorPrefix:         "avenor",
 		HandlerOwnedSignals: true,
-		RootLong:            "Avenor orchestrates agent runs. The run command is not listed here yet: it is still on its pre-library dispatch and works normally.",
+		RootLong:            "Avenor orchestrates agent runs.",
 
 		VersionTemplate: "avenor v{{.Version}}\n",
 		Commands: []*clicontract.Command{
+			runCmd,
 			{
 				Name:  "probe",
 				Short: "run a one-shot backend probe and write the transcript",
