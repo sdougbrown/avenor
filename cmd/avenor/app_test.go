@@ -25,8 +25,10 @@ func TestRunDeclaredHelp(t *testing.T) {
 // sentinel file.
 func TestRunDeclaredFlagSyntaxRejectsBeforeSentinel(t *testing.T) {
 	for name, extra := range map[string][]string{
-		"unknown flag":     {"--nope"},
-		"stray positional": {"extra"},
+		"unknown flag":       {"--nope"},
+		"stray positional":   {"extra"},
+		"malformed duration": {"--timeout=notaduration"},
+		"malformed int":      {"--max-retries=notanint"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			sentinel := filepath.Join(t.TempDir(), "done.env")
