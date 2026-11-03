@@ -13,7 +13,7 @@
 
 ## How to get to it (user POV)
 
-`avenor run` (or bare `avenor`) is the front door: start an agent with a
+`avenor run` is the front door: start an agent with a
 prompt, block until it finishes. Users pick a backend (`--backend`), aim it at
 a working directory (`--dir`), and optionally capture events and the sentinel.
 

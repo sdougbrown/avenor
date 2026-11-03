@@ -6,19 +6,18 @@ The `avenor` command-line tool runs agents, supervises them over time, inspects 
 
 Avenor operates in three modes:
 
-1. **Single run** — `avenor run` (or just `avenor` with no subcommand). Start an agent, wait for it to finish.
+1. **Single run** — `avenor run`. Start an agent, wait for it to finish.
 2. **Long-lived supervisor** — `avenor stable`. A process that lives for hours or days, spawning child agents on demand via the control plane.
 3. **Orchestration** — Combine `stable` + `control spawn/cancel/prompt` + `watch` to coordinate multi-phase workflows, permission handling, and real-time visibility.
 
-All modes produce NDJSON event streams on disk, which you query with `watch`. Permissions are answered via `answer` or the control plane.
+All modes produce NDJSON event streams on disk, which you query with `watch`. Permissions are answered via `answer` or the control plane. A bare `avenor` invocation prints the command list and exits 0.
 
 ## avenor run
 
-Default subcommand. Starts a single agent and blocks until it finishes or times out.
+Starts a single agent and blocks until it finishes or times out.
 
 ```
 avenor run [flags]
-avenor [flags]  # equivalent; explicit "run" is optional
 ```
 
 ### Flags
