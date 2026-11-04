@@ -118,12 +118,17 @@ export function makeMessageProvider(overrides: Partial<MessageProvider> = {}): M
   return provider
 }
 
-// The default budget scales under CI: runner load can starve the async turn
+// Test budgets scale under CI: runner load can starve the async turn
 // callbacks and poll timers these conditions wait on. A longer budget cannot
 // turn a failing predicate green — the predicate still has to become true
 // for the test to pass — so a masked flake costs a full CI round-trip while
-// a longer budget only slows genuine failures.
-const WAIT_BUDGET_MS = process.env.CI ? 10_000 : 2_000
+// a longer budget only slows genuine failures. Every budget in the suite
+// derives from scaleMs, so the CI policy has one home.
+export function scaleMs(base: number): number {
+	return process.env.CI ? base * 5 : base
+}
+
+const WAIT_BUDGET_MS = scaleMs(2_000)
 
 export async function waitFor(predicate: () => boolean, timeoutMs: number = WAIT_BUDGET_MS, intervalMs = 5): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -138,7 +143,7 @@ export async function waitFor(predicate: () => boolean, timeoutMs: number = WAIT
  * as a test failure instead of hanging the suite. The default budget scales
  * under CI — runner load can starve the async callbacks a settling promise
  * depends on, and the bound keeps the suite from hanging either way. */
-export async function settleWithin<T>(promise: Promise<T>, message: string, timeoutMs = process.env.CI ? 5_000 : 1_000): Promise<T> {
+export async function settleWithin<T>(promise: Promise<T>, message: string, timeoutMs = scaleMs(1_000)): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([

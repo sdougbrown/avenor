@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { messageTool as realMessageTool, RpcError } from '@dougbots/avenor-core'
-import { makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
+import { makeMessageProvider, scaleMs, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 interface HostAsk {
   message_id: string
@@ -143,7 +143,10 @@ describe('host inbound ask delivery', () => {
     })
     const harness = await startHostExtension(brokerReceiveTool)
     try {
-      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
+      // The bounded budget keeps the test's timing discrimination — the
+      // recovery must happen on the next poll, not after a slow retry chain —
+      // while scaling under CI for runner load.
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, scaleMs(500))
       expect(brokerReceiveTool.mock.calls.length).toBeGreaterThanOrEqual(2)
       const [body, options] = harness.sendUserMessage.mock.calls[0] as [string, { deliverAs: string }]
       expect(body).toContain('Ask from sub-agent')
