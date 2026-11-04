@@ -169,13 +169,14 @@ func TestRunPersistSessionsReachesStartOptions(t *testing.T) {
 // ephemeral request.
 func TestRunWorkflowPhaseRosterPersistSessions(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		flag    string
-		want    bool
-		wantNil bool
+		name        string
+		entryFields string
+		flag        string
+		want        *bool
 	}{
-		{name: "persisting entry fills the gap", want: true},
-		{name: "explicit flag wins over the entry", flag: "--persist-sessions=false", wantNil: true},
+		{name: "persisting entry fills the gap", entryFields: `,"persist_sessions":true`, want: boolPtr(true)},
+		{name: "explicit flag wins over the entry", entryFields: `,"persist_sessions":true`, flag: "--persist-sessions=false", want: boolPtr(false)},
+		{name: "entry without a choice inherits the environment", want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			oldNewProvider := newProvider
@@ -189,7 +190,7 @@ func TestRunWorkflowPhaseRosterPersistSessions(t *testing.T) {
 
 			dir := t.TempDir()
 			rosterPath := filepath.Join(dir, "roster.json")
-			contents := `{"horse":{"backend":"pi","model":"m","persist_sessions":true}}`
+			contents := `{"horse":{"backend":"pi","model":"m"` + tc.entryFields + `}}`
 			if err := os.WriteFile(rosterPath, []byte(contents), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -206,14 +207,14 @@ func TestRunWorkflowPhaseRosterPersistSessions(t *testing.T) {
 			if code := run(args, func(string) string { return "" }, &stderr); code != 0 {
 				t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
 			}
-			if tc.wantNil {
-				if got.PersistSessions == nil || *got.PersistSessions {
-					t.Fatalf("StartOptions.PersistSessions = %v, want the flag's explicit false", got.PersistSessions)
+			if tc.want == nil {
+				if got.PersistSessions != nil {
+					t.Fatalf("StartOptions.PersistSessions = %v, want nil (inherit the environment)", got.PersistSessions)
 				}
 				return
 			}
-			if got.PersistSessions == nil || !*got.PersistSessions {
-				t.Fatalf("StartOptions.PersistSessions = %v, want the entry's true", got.PersistSessions)
+			if got.PersistSessions == nil || *got.PersistSessions != *tc.want {
+				t.Fatalf("StartOptions.PersistSessions = %v, want %v", got.PersistSessions, *tc.want)
 			}
 		})
 	}

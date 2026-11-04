@@ -775,7 +775,7 @@ func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
 	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(), `{
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
-		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m"},
+		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m", "persist_sessions": true},
 		"thinking-guard": {"backend": "pi", "agent": "guard", "model": "m", "thinking": "high"},
 		"bad-thinking": {"backend": "agy", "agent": "guard", "model": "m", "thinking": "low"}
 	}`)
@@ -790,6 +790,9 @@ func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
 	if sel.PermissionDecider == nil || sel.PermissionDecider.Entry != "rm-guard" ||
 		sel.PermissionDecider.Agent != "rm-guard" || sel.PermissionDecider.Backend != "pi" {
 		t.Fatalf("selection.PermissionDecider = %+v, want rm-guard/pi", sel.PermissionDecider)
+	}
+	if sel.PermissionDecider.PersistSessions == nil || !*sel.PermissionDecider.PersistSessions {
+		t.Fatalf("decider persist_sessions = %v, want the decider entry's true", sel.PermissionDecider.PersistSessions)
 	}
 	if sel.Agent != "worker" || sel.RosterDigest == "" {
 		t.Fatalf("selection identity = %+v, want the worker entry and a roster digest", sel)

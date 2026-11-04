@@ -2614,3 +2614,38 @@ func TestSupervisorPublicAPIDeciderDeferLeavesRequestForHuman(t *testing.T) {
 		return h.deciderIdentityCount() == 1
 	})
 }
+
+// TestSupervisorPublicAPIDeciderCarriesPersistChoice pins the decider's
+// pass-through: the spawn-surface decider's persisted-session choice must
+// reach the decider runtime's start options, so an entry that forces
+// ephemeral stops writing pi session files on every permission request, and
+// one that forces persistence keeps its transcript.
+func TestSupervisorPublicAPIDeciderCarriesPersistChoice(t *testing.T) {
+	t.Parallel()
+	worker := itestDeliveryWorker("ses_dw_persist", "req_persist")
+	answered := make(chan error, 1)
+	var got runtime.StartOptions
+	var h *itestHarness
+	inner := itestAnsweringDecider(func() *itestHarness { return h }, "allow_once", answered)
+	decider := func(opts runtime.StartOptions) (runtime.Provider, error) {
+		got = opts
+		return inner(opts)
+	}
+	h = newItestHarness(t, Config{}, itestDeciderFactory(func(string) runtime.Provider { return worker }, decider))
+
+	deciderChoice := true
+	rt := h.spawn(map[string]any{
+		"label": "worker",
+		"permission_decider": map[string]any{
+			"entry": "guard", "backend": "pony", "agent": "guard", "model": "guard-model",
+			"persist_sessions": deciderChoice,
+		},
+	})
+	if err := itestRecv(t, answered, "decider answer"); err != nil {
+		t.Fatalf("decider answer: %v", err)
+	}
+	h.requirePermissionResponse(rt, "req_persist", "allow_once", "allow")
+	if got.PersistSessions == nil || !*got.PersistSessions {
+		t.Fatalf("decider start options = %+v, want PersistSessions true", got)
+	}
+}
