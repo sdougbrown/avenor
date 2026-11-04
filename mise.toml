@@ -47,7 +47,7 @@ depends = ["js-build"]
 # --timeout clears bun's 5s default per-test cap: the CI-scaled wait budgets
 # (scaleMs, 10s under CI) and the longest explicit per-test timeouts exceed it
 # under runner load. bunfig [test] timeout is not honored on bun 1.4.2.
-run = "for p in core mcp opencode pi escalation-bridge; do (cd \"packages/$p\" && bun test --timeout 30000) || exit 1; done"
+run = "for p in core mcp opencode pi escalation-bridge board; do (cd \"packages/$p\" && bun test --timeout 30000) || exit 1; done"
 
 [tasks.js-typecheck]
 description = "Typecheck all JS packages with tsc --noEmit"
