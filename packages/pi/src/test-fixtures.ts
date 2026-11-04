@@ -118,7 +118,21 @@ export function makeMessageProvider(overrides: Partial<MessageProvider> = {}): M
   return provider
 }
 
-export async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 5): Promise<void> {
+// Test budgets scale under CI: runner load can starve the async turn
+// callbacks and poll timers these conditions wait on. A longer budget cannot
+// turn a failing predicate green — the predicate still has to become true
+// for the test to pass — so a masked flake costs a full CI round-trip while
+// a longer budget only slows genuine failures. Every wait budget in this
+// fixture — and the per-test timeouts that race them, including bun:test's
+// own default cap in the root bunfig.toml — derives from the CI policy, so
+// it has one home.
+export function scaleMs(base: number): number {
+	return process.env.CI ? base * 5 : base
+}
+
+const WAIT_BUDGET_MS = scaleMs(2_000)
+
+export async function waitFor(predicate: () => boolean, timeoutMs: number = WAIT_BUDGET_MS, intervalMs = 5): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error('timed out waiting for condition')
@@ -128,8 +142,10 @@ export async function waitFor(predicate: () => boolean, timeoutMs = 2000, interv
 
 /** Fail fast on a blocking tool call that never returns: resolves the promise
  * or rejects with `message` after `timeoutMs`, so a missing interrupt surfaces
- * as a test failure instead of hanging the suite. */
-export async function settleWithin<T>(promise: Promise<T>, message: string, timeoutMs = 1000): Promise<T> {
+ * as a test failure instead of hanging the suite. The default budget scales
+ * under CI — runner load can starve the async callbacks a settling promise
+ * depends on, and the bound keeps the suite from hanging either way. */
+export async function settleWithin<T>(promise: Promise<T>, message: string, timeoutMs = scaleMs(1_000)): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
