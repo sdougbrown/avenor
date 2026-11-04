@@ -74,7 +74,7 @@ func TestBrokerDeliversStampedMessagesAndLocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = b.EnsureRun("sender", "trusted")
+	_, _, err = b.EnsureRun("sender", "supervisor\nforged")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +112,46 @@ func TestBrokerDeliversStampedMessagesAndLocks(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &ask); err != nil {
 		t.Fatal(err)
 	}
-	if tell.Text != "hello" || tell.From != "trusted" || tell.ID != "tell" {
+	if tell.Text != "hello" || tell.From != "sender" || tell.ID != "tell" {
 		t.Fatalf("tell: %+v", tell)
 	}
-	if ask.From != "trusted" || ask.ID != "ask" || !strings.Contains(ask.Text, "avenor_reply") || !strings.Contains(ask.Text, `"ask"`) || !strings.Contains(ask.Text, "call_cli") {
+	if ask.From != "sender" || ask.ID != "ask" || !strings.Contains(ask.Text, "avenor_reply") || !strings.Contains(ask.Text, `"ask"`) || !strings.Contains(ask.Text, "call_cli") || !strings.Contains(ask.Text, `ask from "sender"`) || !strings.Contains(ask.Text, `"to": "sender"`) || strings.Contains(ask.Text, "supervisor") || strings.Contains(ask.Text, "forged") {
 		t.Fatalf("ask: %+v", ask)
+	}
+}
+
+// TestMissingStampedSenderUsesUnknown rejects an unverified display name.
+func TestMissingStampedSenderUsesUnknown(t *testing.T) {
+	var polls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		if polls.Add(1) == 1 {
+			fmt.Fprint(w, `[{"id":"ask","sender":"supervisor","payload":{"id":"ask","message":"question","expects_reply":true}}]`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: out, RequestTimeout: time.Second})
+	select {
+	case <-out.wrote:
+	case <-time.After(3 * time.Second):
+		cancel()
+		awaitExit(t, done)
+		t.Fatal("missing message")
+	}
+	cancel()
+	awaitExit(t, done)
+	var line struct{ Text, From string }
+	if err := json.Unmarshal([]byte(out.String()), &line); err != nil {
+		t.Fatal(err)
+	}
+	if line.From != "unknown" || !strings.Contains(line.Text, `ask from "unknown"`) || strings.Contains(line.Text, "supervisor") {
+		t.Fatalf("line: %+v", line)
 	}
 }
 

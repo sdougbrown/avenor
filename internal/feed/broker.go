@@ -158,9 +158,9 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 					b.lost(result.Messages[i : i+1])
 					continue
 				}
-				sender := row.Sender
+				sender := row.FromRunID
 				if sender == "" {
-					sender = row.FromRunID
+					sender = "unknown"
 				}
 				id := message.ID
 				if id == "" {
@@ -169,7 +169,9 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 				text := message.Message
 				if message.ExpectsReply {
 					quotedID, _ := json.Marshal(id)
-					text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_reply\", \"args\": {\"reply_to\": %s, \"text\": \"...\"}}.", sender, quotedID)
+					quotedSender, _ := json.Marshal(sender)
+					quotedRunID, _ := json.Marshal(row.FromRunID)
+					text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_reply\", \"args\": {\"reply_to\": %s, \"to\": %s, \"text\": \"...\"}}.", quotedSender, quotedID, quotedRunID)
 				}
 				line := struct {
 					Text string `json:"text"`
