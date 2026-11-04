@@ -224,11 +224,13 @@ mock.module('@dougbots/avenor-core', () => ({
   observeRun,
   dial: dialMock,
   // The stub keeps the plugin's current-instance override but inherits the
-  // real statics (get, getInstance) so files loading after this one receive
-  // a complete Supervisor.
-  Supervisor: Object.assign(class extends coreModule.Supervisor {}, {
-    currentInstance: currentSupervisorMock,
-  }),
+  // real statics (get, getInstance) via the prototype chain — the real
+  // constructor is private, so the stub is built with Object.create rather
+  // than a subclass.
+  Supervisor: Object.assign(
+    Object.create(coreModule.Supervisor) as typeof coreModule.Supervisor,
+    { currentInstance: currentSupervisorMock },
+  ),
 }))
 const { AvenorPlugin, buildWaitingText, hostIdentityMetadata, terminalStatus } = await import('./plugin.js')
 const originalFetch = globalThis.fetch
