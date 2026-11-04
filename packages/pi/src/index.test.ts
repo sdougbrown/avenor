@@ -4223,5 +4223,5 @@ describe('avenor_spawn parent run id', () => {
       else process.env.AVENOR_BIN = previousBin
       fs.rmSync(home, { recursive: true, force: true })
     }
-  }, 20_000)
+  }, scaleMs(20_000))
 })
