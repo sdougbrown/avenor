@@ -353,7 +353,13 @@ type childRuntime struct {
 	// persisted session store: the resume gate reads it so a persisted run
 	// stays resumable even when the environment has since dropped the
 	// opt-in.
-	persistedSessions  bool
+	persistedSessions bool
+	// persistChoice is the spawn request's tri-state persisted-session
+	// choice (nil inherits the environment): phase attempts layer their
+	// entry's choice over it instead of re-deriving from the resolved
+	// record, which is pinned to the run's backend and would force a
+	// phase-selected pi attempt under a non-pi run.
+	persistChoice      *bool
 	roster             *rosterconfig.Config
 	parentID           string   // runtime ID of the parent agent, empty for top-level
 	children           []string // runtime IDs spawned by this runtime
@@ -1825,15 +1831,20 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		id: rtID,
 		// The labels are visible under s.controlMu at the moment the child
 		// becomes visible to the label scans.
-		label:                    params.Label,
-		displayName:              params.Label,
-		agent:                    params.Agent,
-		agentProfile:             params.AgentProfile,
-		model:                    params.Model,
-		thinking:                 params.Thinking,
-		backend:                  backend,
-		effectiveBackend:         backend,
+		label:            params.Label,
+		displayName:      params.Label,
+		agent:            params.Agent,
+		agentProfile:     params.AgentProfile,
+		model:            params.Model,
+		thinking:         params.Thinking,
+		backend:          backend,
+		effectiveBackend: backend,
+		// The recorded choice exists only where it can differ from the
+		// environment: pi. Non-pi backends resume across processes either way,
+		// so a resolved true recorded here would leak into phase attempts as a
+		// forced choice the operator never made.
 		persistedSessions:        factory.ResolvesPersistedSessions(backend, params.PersistSessions),
+		persistChoice:            params.PersistSessions,
 		effectiveAgent:           params.Agent,
 		effectiveModel:           params.Model,
 		rosterFile:               params.RosterFile,
@@ -2903,9 +2914,9 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			}
 
 			// The phase entry's persisted-session choice does not exist yet (the
-			// roster lever lands in the follow-up PR): the run's recorded choice is
-			// what phase attempts carry.
-			persistOpt := phasePersistChoice(nil, child.persistedSessions)
+			// roster lever lands in the follow-up PR): the run's request choice
+			// is what phase attempts carry, nil inheriting the environment.
+			persistOpt := phasePersistChoice(nil, child.persistChoice)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -3197,7 +3208,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			// The phase entry's persisted-session choice does not exist yet (the
 			// roster lever lands in the follow-up PR): the run's recorded choice is
 			// what phase attempts carry.
-			persistOpt := phasePersistChoice(nil, child.persistedSessions)
+			persistOpt := phasePersistChoice(nil, child.persistChoice)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -3685,15 +3696,14 @@ func (s *Supervisor) releaseSessionAttempt(attempt *sessionAttempt) {
 }
 
 // phasePersistChoice layers the phase entry's persisted-session choice over
-// the run's recorded choice: the entry wins when set, and the recorded
-// choice fills the gap so a phase attempt re-uses the session store its run
-// was spawned with instead of re-reading an environment that may have moved.
-func phasePersistChoice(entry *bool, recorded bool) *bool {
+// the run's request choice: the entry wins when set, and the run's request
+// (nil inheriting the environment) fills the gap so a phase attempt honors
+// what its run was spawned with instead of re-reading a moved environment.
+func phasePersistChoice(entry, recorded *bool) *bool {
 	if entry != nil {
 		return entry
 	}
-	on := recorded
-	return &on
+	return recorded
 }
 
 func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, model string, phase phaseconfig.Phase, loop bool) (rosterconfig.ResolvedSelection, error) {

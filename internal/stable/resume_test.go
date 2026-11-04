@@ -868,16 +868,19 @@ func TestResumePriorEphemeralWithEnvSet(t *testing.T) {
 func TestPhasePersistChoice(t *testing.T) {
 	on := true
 	off := false
-	if got := phasePersistChoice(&off, true); got == nil || *got {
-		t.Fatalf("phasePersistChoice(&false, true) = %v, want the entry's false", got)
+	if got := phasePersistChoice(&off, &on); got == nil || *got {
+		t.Fatalf("phasePersistChoice(&false, &true) = %v, want the entry's false", got)
 	}
-	if got := phasePersistChoice(&on, false); got == nil || !*got {
-		t.Fatalf("phasePersistChoice(&true, false) = %v, want the entry's true", got)
+	if got := phasePersistChoice(&on, nil); got == nil || !*got {
+		t.Fatalf("phasePersistChoice(&true, nil) = %v, want the entry's true", got)
 	}
-	if got := phasePersistChoice(nil, true); got == nil || !*got {
-		t.Fatalf("phasePersistChoice(nil, true) = %v, want the run's recorded true", got)
+	if got := phasePersistChoice(nil, &on); got == nil || !*got {
+		t.Fatalf("phasePersistChoice(nil, &true) = %v, want the run's request true", got)
 	}
-	if got := phasePersistChoice(nil, false); got == nil || *got {
-		t.Fatalf("phasePersistChoice(nil, false) = %v, want the run's recorded false", got)
+	if got := phasePersistChoice(nil, &off); got == nil || *got {
+		t.Fatalf("phasePersistChoice(nil, &false) = %v, want the run's request false", got)
+	}
+	if got := phasePersistChoice(nil, nil); got != nil {
+		t.Fatalf("phasePersistChoice(nil, nil) = %v, want nil (inherit the environment)", got)
 	}
 }
