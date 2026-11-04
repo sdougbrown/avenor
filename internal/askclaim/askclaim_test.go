@@ -103,3 +103,22 @@ func TestDefaultDirNormalizesBrokerIdentity(t *testing.T) {
 		t.Fatalf("identity collision: %q %q", a, b)
 	}
 }
+
+// TestAClaimedAskIsNotRecordedAgain checks one reply per ask: a second
+// delivery of an ask that was already claimed leaves it unclaimable.
+func TestAClaimedAskIsNotRecordedAgain(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "asks")
+	if err := Record(dir, "av1.ask", "rt_sender"); err != nil {
+		t.Fatal(err)
+	}
+	p := &Provider{Dir: dir}
+	if _, ok := p.ClaimAsk("av1.ask"); !ok {
+		t.Fatal("the first claim failed")
+	}
+	if err := Record(dir, "av1.ask", "rt_sender"); err != nil {
+		t.Fatal(err)
+	}
+	if asker, ok := p.ClaimAsk("av1.ask"); ok {
+		t.Fatalf("an ask claimed once was claimable again, for %q", asker)
+	}
+}

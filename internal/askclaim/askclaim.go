@@ -23,13 +23,19 @@ var messageIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 // validID reports whether id can name a claim file.
 func validID(id string) bool { return id != "." && id != ".." && messageIDPattern.MatchString(id) }
 
-// Record persists an inbound ask without replacing an existing record.
+// Record persists an inbound ask without replacing an existing record, and
+// records nothing for an ask that was already claimed.
 func Record(dir, messageID, askerRunID string) error {
 	if !validID(messageID) || dir == "" {
 		return fmt.Errorf("invalid ask record path")
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
+	}
+	// An ask that was already claimed has been answered or is being
+	// answered, so recording it again would make it claimable twice.
+	if _, err := os.Stat(filepath.Join(dir, messageID+".claimed")); err == nil {
+		return nil
 	}
 	path := filepath.Join(dir, messageID+".json")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
