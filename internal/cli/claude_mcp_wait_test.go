@@ -218,3 +218,59 @@ func TestRunWorkflowPhaseRosterPersistSessions(t *testing.T) {
 		})
 	}
 }
+
+// A direct roster run (no loop or workflow) applies the entry's
+// persisted-session choice like every other surface: the entry fills the
+// gap when the flag is absent, and an explicit flag wins in both
+// directions. A regression that drops the merge makes `avenor run
+// --roster-entry` ephemeral while the same entry persists everywhere else.
+func TestRunDirectRosterEntryPersistSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		entryFields string
+		flag        string
+		want        *bool
+	}{
+		{name: "persisting entry fills the gap", entryFields: `,"persist_sessions":true`, want: boolPtr(true)},
+		{name: "explicit flag wins over the entry", entryFields: `,"persist_sessions":true`, flag: "--persist-sessions=false", want: boolPtr(false)},
+		{name: "entry without a choice inherits the environment", want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldNewProvider := newProvider
+			provider := newScriptedProvider()
+			var got runtime.StartOptions
+			newProvider = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+				got = opts
+				return provider, nil
+			}
+			t.Cleanup(func() { newProvider = oldNewProvider })
+
+			dir := t.TempDir()
+			rosterPath := filepath.Join(dir, "roster.json")
+			contents := `{"horse":{"backend":"pi","model":"m"` + tc.entryFields + `}}`
+			if err := os.WriteFile(rosterPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"--dir", dir, "--roster-file", rosterPath, "--roster-entry", "horse", "--prompt", "noop"}
+			if tc.flag != "" {
+				args = append(args, tc.flag)
+			}
+			var stderr strings.Builder
+			if code := run(args, func(string) string { return "" }, &stderr); code != 0 {
+				t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			if tc.want == nil {
+				if got.PersistSessions != nil {
+					t.Fatalf("StartOptions.PersistSessions = %v, want nil (inherit the environment)", got.PersistSessions)
+				}
+				return
+			}
+			if got.PersistSessions == nil || *got.PersistSessions != *tc.want {
+				t.Fatalf("StartOptions.PersistSessions = %v, want %v", got.PersistSessions, *tc.want)
+			}
+		})
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

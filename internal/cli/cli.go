@@ -273,6 +273,12 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 		if opts.Thinking == "" {
 			opts.Thinking = entry.Thinking
 		}
+		// Same layering for the persisted-session choice: the entry's choice
+		// fills the gap only when the flag was not given, so a direct roster
+		// run persists like every other surface reading this entry.
+		if opts.PersistSessions == nil {
+			opts.PersistSessions = entry.PersistSessions
+		}
 		if opts.Agent != "" && opts.Model == "" {
 			resolved, resolveErr := resolveAgentModel(opts.Agent, opts.Backend, getenv)
 			if resolveErr != nil {
