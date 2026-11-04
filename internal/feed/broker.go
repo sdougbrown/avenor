@@ -53,6 +53,9 @@ func (b Broker) Run(ctx context.Context) int {
 
 // run owns the lock and the provider for the lifetime of the feed.
 func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
+	if parent == 1 {
+		return 0
+	}
 	if b.Log == nil {
 		b.Log = io.Discard
 	}
@@ -97,6 +100,7 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		return 1
 	}
 	if held {
+		fmt.Fprintln(b.Log, "feed broker: consumer lock is held")
 		return 0
 	}
 	defer unlock()

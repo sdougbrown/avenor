@@ -94,8 +94,10 @@ func TestBrokerDeliversStampedMessagesAndLocks(t *testing.T) {
 			t.Fatalf("no message: %s", logs.String())
 		}
 	}
-	if got := opts.Run(context.Background()); got != 0 {
-		t.Fatalf("second consumer returned %d", got)
+	lockCtx, stop := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer stop()
+	if got := opts.Run(lockCtx); got != 0 || lockCtx.Err() != nil {
+		t.Fatalf("second consumer returned %d, context %v", got, lockCtx.Err())
 	}
 	cancel()
 	if got := awaitExit(t, done); got != 0 {
@@ -283,7 +285,7 @@ func TestParentLossDuringPrepareAndParking(t *testing.T) {
 			hit := make(chan struct{}, 1)
 			release := make(chan struct{})
 			var parent atomic.Int32
-			parent.Store(1)
+			parent.Store(2)
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				hit <- struct{}{}
 				if !park {
@@ -295,7 +297,7 @@ func TestParentLossDuringPrepareAndParking(t *testing.T) {
 			logs := &lockedBuffer{}
 			b := Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Log: logs, RequestTimeout: 2 * time.Second}
 			done := make(chan int, 1)
-			go func() { done <- b.run(context.Background(), 1, func() int { return int(parent.Load()) }) }()
+			go func() { done <- b.run(context.Background(), 2, func() int { return int(parent.Load()) }) }()
 			select {
 			case <-hit:
 			case <-time.After(time.Second):
@@ -307,7 +309,7 @@ func TestParentLossDuringPrepareAndParking(t *testing.T) {
 					time.Sleep(time.Millisecond)
 				}
 			}
-			parent.Store(2)
+			parent.Store(3)
 			close(release)
 			if code := awaitExit(t, done); code != 0 {
 				t.Fatalf("exit %d", code)

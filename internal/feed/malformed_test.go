@@ -51,12 +51,12 @@ func TestMalformedPayloadDoesNotStopDelivery(t *testing.T) {
 				t.Fatalf("output: %q", output.String())
 			}
 			for i, want := range []string{"first", "second", "later"} {
-				var line struct{ Text string }
-				if err := json.Unmarshal([]byte(lines[i]), &line); err != nil || line.Text != want {
+				var line struct{ Text, ID string }
+				if err := json.Unmarshal([]byte(lines[i]), &line); err != nil || line.Text != want || line.ID != want {
 					t.Fatalf("line %d: %q, error %v", i, lines[i], err)
 				}
 			}
-			if got := logs.String(); got != "feed broker: undelivered message id \"bad\"\n" {
+			if got := logs.String(); !strings.Contains(got, `"bad"`) || strings.Contains(got, "bad payload") || strings.Contains(got, "first") || strings.Contains(got, "second") || strings.Contains(got, "later") {
 				t.Fatalf("log: %q", got)
 			}
 		})

@@ -92,13 +92,37 @@ func TestFlushBeforeNextRowAndPoll(t *testing.T) {
 	}
 }
 
+// TestInitParentDoesNotContactBroker treats an already reparented feed as stopped.
+func TestInitParentDoesNotContactBroker(t *testing.T) {
+	called := make(chan struct{}, 1)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+		fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+	}))
+	defer s.Close()
+	b := Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), RequestTimeout: time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if code := b.run(ctx, 1, func() int { return 1 }); code != 0 || ctx.Err() != nil {
+		t.Fatalf("exit %d context %v", code, ctx.Err())
+	}
+	select {
+	case <-called:
+		t.Fatal("broker contacted after reparenting")
+	default:
+	}
+}
+
 // TestParentAlreadyGoneDoesNotContactBroker verifies the first parent check.
 func TestParentAlreadyGoneDoesNotContactBroker(t *testing.T) {
 	called := make(chan struct{}, 1)
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called <- struct{}{} }))
 	defer s.Close()
 	b := Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir()}
-	if code := b.run(context.Background(), 1, func() int { return 2 }); code != 0 {
+	if code := b.run(context.Background(), 2, func() int { return 3 }); code != 0 {
 		t.Fatalf("exit %d", code)
 	}
 	select {

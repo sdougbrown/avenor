@@ -1,6 +1,7 @@
 package feed
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,11 @@ func TestGenerationMismatchRebuildsProvider(t *testing.T) {
 	}
 	cancel()
 	awaitExit(t, done)
-	if preflights.Load() < 2 || !strings.Contains(output.String(), "delivered") || !strings.Contains(logs.String(), "temporary broker error") {
+	var line struct{ ID, Text string }
+	if err := json.Unmarshal([]byte(strings.SplitN(output.String(), "\n", 2)[0]), &line); err != nil {
+		t.Fatal(err)
+	}
+	if preflights.Load() < 2 || line.ID != "later" || line.Text != "delivered" || logs.String() == "" || strings.Contains(logs.String(), line.Text) {
 		t.Fatalf("preflights=%d output=%q log=%q", preflights.Load(), output.String(), logs.String())
 	}
 }
