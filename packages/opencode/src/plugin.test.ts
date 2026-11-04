@@ -179,7 +179,18 @@ const dialMock = mock(async () => {
 
 const currentSupervisorMock = mock(() => ({ supervisorId: '/tmp/avenor.sock' }))
 
+// Snapshot the real core module before any mock is registered: the spread
+// below keeps every unoverridden export real, so the mocked surface stays
+// complete for the plugin's consumers.
+import * as coreModule from '../../core/src/index.js'
+
+// The mock replaces the shared core module for this package's tests: the
+// factory spreads the real module so unmocked members stay real, and the
+// overrides below stub only what the plugin exercises. tsconfig paths resolve
+// '@dougbots/avenor-core' to core's source (packages/opencode/tsconfig.json),
+// so tests run against source without a built dist.
 mock.module('@dougbots/avenor-core', () => ({
+  ...coreModule,
   THINKING_LEVELS,
   spawnTool: spawnToolMock,
   validateSpawnSelection,
@@ -212,9 +223,14 @@ mock.module('@dougbots/avenor-core', () => ({
   extractEventText,
   observeRun,
   dial: dialMock,
-  Supervisor: {
-    currentInstance: currentSupervisorMock,
-  },
+  // The stub keeps the plugin's current-instance override but inherits the
+  // real statics (get, getInstance) via the prototype chain — the real
+  // constructor is private, so the stub is built with Object.create rather
+  // than a subclass.
+  Supervisor: Object.assign(
+    Object.create(coreModule.Supervisor) as typeof coreModule.Supervisor,
+    { currentInstance: currentSupervisorMock },
+  ),
 }))
 const { AvenorPlugin, buildWaitingText, hostIdentityMetadata, terminalStatus } = await import('./plugin.js')
 const originalFetch = globalThis.fetch
@@ -261,10 +277,16 @@ async function flush(): Promise<void> {
  * that never reaches the observable fails the test instead of looping forever.
  * The budget scales under CI: runner load can starve the async callbacks the
  * predicate depends on, and a longer budget only slows genuine failures —
- * the predicate still has to become true for the test to pass.
+ * the predicate still has to become true for the test to pass. scaleMs
+ * mirrors packages/pi/src/test-fixtures.ts so the CI factor has one
+ * definition per policy change.
  */
+function scaleMs(base: number): number {
+  return process.env.CI ? base * 5 : base
+}
+
 async function waitFor(predicate: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + (process.env.CI ? 10_000 : 2_000)
+  const deadline = Date.now() + scaleMs(2_000)
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
     await flush()

@@ -656,15 +656,20 @@ describe('avenor_spawn parent run id in sub-agent mode', () => {
       deps: { spawnTool: spawnToolMock },
       extOptions: { subAgentEnv },
     })
+    try {
+      await h.registeredTools.avenor_spawn.execute(
+        't-nested',
+        { agent: 'mule', prompt: 'do the thing', wait: false },
+        undefined,
+        undefined,
+        { cwd: '/tmp' },
+      )
 
-    await h.registeredTools.avenor_spawn.execute(
-      't-nested',
-      { agent: 'mule', prompt: 'do the thing', wait: false },
-      undefined,
-      undefined,
-      { cwd: '/tmp' },
-    )
-
-    expect(spawnToolMock.mock.calls[0]?.[0]).not.toHaveProperty('parent_run_id')
+      expect(spawnToolMock.mock.calls[0]?.[0]).not.toHaveProperty('parent_run_id')
+    } finally {
+      // The sub-agent poll loop must not outlive the test: a leaked loop keeps
+      // firing into whatever fetch stub later tests install.
+      await h.eventHandlers.session_shutdown({}, {})
+    }
   })
 })

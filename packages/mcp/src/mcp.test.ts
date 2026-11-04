@@ -84,7 +84,15 @@ beforeEach(() => {
   workflowCalls.length = 0
 })
 
+// Snapshot the real core module before any mock is registered: the spread
+// below keeps every unoverridden export real, so the mocked surface stays
+// complete for the server's consumers.
+import * as coreModule from '../../core/src/index.js'
+
+// Mock the shared core module for this package's tests — same shape as
+// packages/opencode/src/plugin.test.ts.
 mock.module('@dougbots/avenor-core', () => ({
+  ...coreModule,
   spawnTool: mock(async () => ({})),
   statusTool: mock(async () => ({ runs: [], count: 0 })),
   resultTool: mock(async () => ({})),

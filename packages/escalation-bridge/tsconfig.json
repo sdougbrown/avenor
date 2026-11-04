@@ -1,4 +1,5 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "strict": true,
     "module": "ESNext",
@@ -6,9 +7,14 @@
     "target": "ESNext",
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "types": ["node", "bun"],
+    "types": [
+      "node",
+      "bun"
+    ],
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ]
 }
