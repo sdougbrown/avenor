@@ -24,6 +24,7 @@ func TestSpawnParamsFromArgs(t *testing.T) {
 		"--sentinel-file", "/tmp/done.env",
 		"--permission-handler", "file:/tmp/perm",
 		"--auto-approve",
+		"--persist-sessions",
 		"--timeout", "30",
 		"--max-retries", "2",
 	}, &stderr)
@@ -44,6 +45,7 @@ func TestSpawnParamsFromArgs(t *testing.T) {
 		"sentinel_file":      "/tmp/done.env",
 		"permission_handler": "file:/tmp/perm",
 		"auto_approve":       true,
+		"persist_sessions":   true,
 		"timeout":            30,
 		"max_retries":        2,
 	}

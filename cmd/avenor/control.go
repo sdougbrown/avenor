@@ -229,6 +229,9 @@ func spawnParamsFromInvocation(inv clicontract.Invocation) (map[string]any, erro
 	if inv.Bools["auto-approve"] {
 		params["auto_approve"] = true
 	}
+	if inv.Supplied["persist-sessions"] {
+		params["persist_sessions"] = inv.Bools["persist-sessions"]
+	}
 	if launchWrapper := launchWrapperFlag(inv.Events); len(launchWrapper) > 0 {
 		params["launch_wrapper"] = []string(launchWrapper)
 	}

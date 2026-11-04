@@ -67,6 +67,7 @@ export interface SpawnParams {
   attempt_id?: string
   on_event?: string
   auto_approve?: boolean
+  persist_sessions?: boolean
   [key: string]: unknown
 }
 

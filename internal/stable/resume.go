@@ -86,6 +86,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	backend := prior.resumeBackendLocked()
 	thinking := prior.thinking
 	agentProfile := prior.agentProfile
+	persistedSessions := prior.persistedSessions
 	dir := prior.dir
 	autoApprove := prior.autoApprove
 	rosterFile := prior.rosterFile
@@ -143,6 +144,15 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 			mcpOrigin:        req.MCP,
 		},
 	}
+	// The resume carries the prior run's recorded persisted-session choice
+	// unless the request set its own, in both directions: a persisted prior
+	// run stays resumable across process boundaries even when the
+	// environment has since dropped the opt-in, and an explicitly ephemeral
+	// prior run is refused at the gate instead of dying later with a
+	// misleading env-fix message.
+	if params.PersistSessions == nil {
+		params.PersistSessions = &persistedSessions
+	}
 	spawned, err := s.resumeOnce(prior, runID, params)
 	if err != nil {
 		var toolErr *router.ToolError
@@ -198,18 +208,19 @@ func (s *Supervisor) resumeOnce(prior *childRuntime, runID string, p SpawnParams
 	if warm {
 		return result, nil
 	}
-	// The gate asks whether the backend continuing this session resumes across
-	// processes. A roster-selected resume leaves Backend empty for the spawn
-	// validator, because the entry supplies it. The session mapping pins the
-	// entry to the identity the prior run launched with, so the gate reads that
-	// identity instead.
+	// The gate asks whether the backend continuing this session can resume
+	// across processes under the persisted-session choice this resume makes. A
+	// roster-selected resume leaves Backend empty for the spawn validator,
+	// because the entry supplies it. The session mapping pins the entry to the
+	// identity the prior run launched with, so the gate reads that identity
+	// instead.
 	gateBackend := p.Backend
 	if gateBackend == "" {
 		prior.mu.Lock()
 		gateBackend = prior.resumeBackendLocked()
 		prior.mu.Unlock()
 	}
-	if !factory.ResumesAcrossProcesses(gateBackend) {
+	if !factory.ResolvesPersistedSessions(gateBackend, p.PersistSessions) {
 		return result, notResumableError(runID, s.piResumeDeniedStatus(prior))
 	}
 	// Completion admission closes before provider teardown. Do not open the

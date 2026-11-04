@@ -369,6 +369,7 @@ func app() *clicontract.App {
 							{Name: "sentinel-file", Kind: clicontract.String, Usage: "path to write a completion sentinel"},
 							{Name: "permission-handler", Kind: clicontract.String, Usage: "permission handler, supports file:<path>"},
 							{Name: "auto-approve", Kind: clicontract.Bool, Usage: "automatically approve all permission requests"},
+							{Name: "persist-sessions", Kind: clicontract.Bool, Usage: "persist the backend session (pi: a session directory instead of --no-session, enabling cross-process resume; omitted inherits AVENOR_PI_SESSIONS, true and false force the choice)"},
 							{Name: "timeout", Kind: clicontract.Int, Usage: "overall session timeout in seconds"},
 							{Name: "max-retries", Kind: clicontract.Int, Usage: "maximum retry attempts on transient failure"},
 							{Name: "launch-wrapper", Kind: clicontract.Repeat, Usage: "opaque argv prefix in front of the backend command; repeatable, each use adds one element"},
