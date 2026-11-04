@@ -1,0 +1,7 @@
+# The CI-scaled wait budgets (scaleMs in packages/pi/src/test-fixtures.ts)
+# exceed bun:test's 5s default per-test cap under CI, which would resurface
+# the runner-load flake as a generic bun timeout. The default cap rises to
+# clear the largest scaled default budget (waitFor: 10s under CI) with
+# headroom; tests with their own explicit timeouts are unaffected.
+[test]
+timeout = 30000

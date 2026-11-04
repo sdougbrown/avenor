@@ -123,8 +123,9 @@ export function makeMessageProvider(overrides: Partial<MessageProvider> = {}): M
 // turn a failing predicate green — the predicate still has to become true
 // for the test to pass — so a masked flake costs a full CI round-trip while
 // a longer budget only slows genuine failures. Every wait budget in this
-// fixture — and the per-test timeouts that race them — derives from
-// scaleMs, so the CI policy has one home.
+// fixture — and the per-test timeouts that race them, including bun:test's
+// own default cap in the root bunfig.toml — derives from the CI policy, so
+// it has one home.
 export function scaleMs(base: number): number {
 	return process.env.CI ? base * 5 : base
 }
