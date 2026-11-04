@@ -1,0 +1,305 @@
+package feed
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
+)
+
+// lockedBuffer makes concurrently observed feed output safe for tests.
+type lockedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+	wrote chan struct{}
+}
+
+// Write records a completed feed line.
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n, e := b.Buffer.Write(p)
+	if b.wrote != nil {
+		select {
+		case b.wrote <- struct{}{}:
+		default:
+		}
+	}
+	return n, e
+}
+
+// String returns a snapshot of the recorded output.
+func (b *lockedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.Buffer.String() }
+
+// awaitExit bounds a test feed's shutdown.
+func awaitExit(t *testing.T, done <-chan int) int {
+	t.Helper()
+	select {
+	case code := <-done:
+		return code
+	case <-time.After(5 * time.Second):
+		t.Fatal("feed did not stop")
+		return -1
+	}
+}
+
+// startFeed starts a cancellable consumer and ensures it is joined.
+func startFeed(t *testing.T, b Broker) (context.CancelFunc, <-chan int) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() { done <- b.Run(ctx) }()
+	t.Cleanup(cancel)
+	return cancel, done
+}
+
+// TestBrokerDeliversStampedMessagesAndLocks exercises the real broker queue.
+func TestBrokerDeliversStampedMessagesAndLocks(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Stop()
+	token, _, err := b.EnsureRun("receiver", "receiver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = b.EnsureRun("sender", "trusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range []struct{ id, body string }{{"tell", `{"id":"tell","from":"forged","message":"hello"}`}, {"ask", `{"id":"ask","from":"forged","message":"question","expects_reply":true}`}} {
+		if err := b.SendTo("sender", "receiver", "agent_message", json.RawMessage(msg.body), msg.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output := &lockedBuffer{wrote: make(chan struct{}, 2)}
+	logs := &lockedBuffer{}
+	opts := Broker{RunID: "receiver", Token: token, BrokerURL: "http://" + b.Addr(), LockDir: t.TempDir(), Out: output, Log: logs, RequestTimeout: 300 * time.Millisecond}
+	cancel, done := startFeed(t, opts)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-output.wrote:
+		case <-time.After(4 * time.Second):
+			t.Fatalf("no message: %s", logs.String())
+		}
+	}
+	if got := opts.Run(context.Background()); got != 0 {
+		t.Fatalf("second consumer returned %d", got)
+	}
+	cancel()
+	if got := awaitExit(t, done); got != 0 {
+		t.Fatalf("exit %d", got)
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines: %q", output.String())
+	}
+	var tell, ask struct{ Text, From, ID string }
+	if err := json.Unmarshal([]byte(lines[0]), &tell); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &ask); err != nil {
+		t.Fatal(err)
+	}
+	if tell.Text != "hello" || tell.From != "trusted" || tell.ID != "tell" {
+		t.Fatalf("tell: %+v", tell)
+	}
+	if ask.From != "trusted" || ask.ID != "ask" || !strings.Contains(ask.Text, "avenor_reply") || !strings.Contains(ask.Text, `"ask"`) || !strings.Contains(ask.Text, "call_cli") {
+		t.Fatalf("ask: %+v", ask)
+	}
+}
+
+// TestDifferentBrokersDoNotShareLocks checks repeated run IDs across supervisors.
+func TestDifferentBrokersDoNotShareLocks(t *testing.T) {
+	var first, second atomic.Int32
+	handler := func(polls *atomic.Int32) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/sessions" {
+				fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+				return
+			}
+			if polls.Add(1) == 1 {
+				fmt.Fprint(w, `[{"id":"one","payload":{"message":"delivered"}}]`)
+				return
+			}
+			fmt.Fprint(w, `[]`)
+		}
+	}
+	a := httptest.NewServer(handler(&first))
+	defer a.Close()
+	c := httptest.NewServer(handler(&second))
+	defer c.Close()
+	dir := t.TempDir()
+	out1 := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	out2 := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	opts := Broker{RunID: "rt_1", Token: "x", BrokerURL: a.URL, LockDir: dir, Out: out1, RequestTimeout: 100 * time.Millisecond}
+	cancel, done := startFeed(t, opts)
+	defer cancel()
+	opts.BrokerURL = c.URL
+	opts.Out = out2
+	cancel2, done2 := startFeed(t, opts)
+	defer cancel2()
+	for _, out := range []*lockedBuffer{out1, out2} {
+		select {
+		case <-out.wrote:
+		case <-time.After(3 * time.Second):
+			t.Fatal("both brokers did not deliver a message")
+		}
+	}
+	cancel()
+	cancel2()
+	awaitExit(t, done)
+	awaitExit(t, done2)
+}
+
+// TestShutdownDrainsInflightPoll checks that cancellation does not abort drained rows.
+func TestShutdownDrainsInflightPoll(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var polls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		if polls.Add(1) == 1 {
+			close(entered)
+			<-release
+			fmt.Fprint(w, `[{"id":"one","from_run_id":"sender","payload":{"id":"one","message":"delivered"}}]`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	output := &lockedBuffer{}
+	opts := Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: output, RequestTimeout: 3 * time.Second}
+	cancel, done := startFeed(t, opts)
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("poll not started")
+	}
+	cancel()
+	close(release)
+	if code := awaitExit(t, done); code != 0 || !strings.Contains(output.String(), "delivered") {
+		t.Fatalf("code=%d output=%q", code, output.String())
+	}
+	if polls.Load() != 1 {
+		t.Fatalf("polls=%d", polls.Load())
+	}
+}
+
+// TestTerminalParksAndTransientRetries distinguishes refusal from outage.
+func TestTerminalParksAndTransientRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   int32
+	}{{"refusal", 403, 1}, {"outage", 503, 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var count atomic.Int32
+			hit := make(chan struct{}, 4)
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				count.Add(1)
+				hit <- struct{}{}
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, `{bad`)
+			}))
+			defer s.Close()
+			logs := &lockedBuffer{}
+			cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Log: logs, RequestTimeout: time.Second})
+			for i := int32(0); i < tc.want; i++ {
+				select {
+				case <-hit:
+				case <-time.After(4 * time.Second):
+					t.Fatal("missing request")
+				}
+			}
+			if tc.status == 403 {
+				time.Sleep(300 * time.Millisecond)
+				if count.Load() != 1 {
+					t.Fatalf("refusal retried: %d", count.Load())
+				}
+			}
+			cancel()
+			awaitExit(t, done)
+			if tc.status == 403 && strings.Count(logs.String(), "terminal") != 1 {
+				t.Fatalf("logs: %q", logs.String())
+			}
+		})
+	}
+}
+
+// TestParentLossDuringPrepareAndParking checks both blocking phases.
+func TestParentLossDuringPrepareAndParking(t *testing.T) {
+	for _, park := range []bool{false, true} {
+		t.Run(fmt.Sprint(park), func(t *testing.T) {
+			hit := make(chan struct{}, 1)
+			release := make(chan struct{})
+			var parent atomic.Int32
+			parent.Store(1)
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hit <- struct{}{}
+				if !park {
+					<-release
+				}
+				w.WriteHeader(403)
+			}))
+			defer s.Close()
+			logs := &lockedBuffer{}
+			b := Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Log: logs, RequestTimeout: 2 * time.Second}
+			done := make(chan int, 1)
+			go func() { done <- b.run(context.Background(), 1, func() int { return int(parent.Load()) }) }()
+			select {
+			case <-hit:
+			case <-time.After(time.Second):
+				t.Fatal("prepare not reached")
+			}
+			if park {
+				deadline := time.Now().Add(time.Second)
+				for !strings.Contains(logs.String(), "terminal") && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+			}
+			parent.Store(2)
+			close(release)
+			if code := awaitExit(t, done); code != 0 {
+				t.Fatalf("exit %d", code)
+			}
+		})
+	}
+}
+
+// failingWriter models a closed feed pipe.
+type failingWriter struct{}
+
+// Write refuses all output.
+func (failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// TestWriteFailureReportsAllUndeliveredIDs ensures drained rows are not silent.
+func TestWriteFailureReportsAllUndeliveredIDs(t *testing.T) {
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		fmt.Fprint(w, `[{"id":"first","payload":{"message":"secret"}},{"id":"second","payload":{"message":"secret"}}]`)
+	}))
+	defer s.Close()
+	logs := &lockedBuffer{}
+	code := (Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: failingWriter{}, Log: logs, RequestTimeout: time.Second}).Run(context.Background())
+	if code != 0 || !strings.Contains(logs.String(), "first") || !strings.Contains(logs.String(), "second") || strings.Contains(logs.String(), "secret") {
+		t.Fatalf("exit %d logs %q", code, logs.String())
+	}
+}
