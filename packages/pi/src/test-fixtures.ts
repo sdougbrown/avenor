@@ -118,7 +118,13 @@ export function makeMessageProvider(overrides: Partial<MessageProvider> = {}): M
   return provider
 }
 
-export async function waitFor(predicate: () => boolean, timeoutMs = 2000, intervalMs = 5): Promise<void> {
+// The default budget scales under CI: runner load can starve the async turn
+// callbacks and poll timers these conditions wait on, and a masked flake
+// costs a full CI round-trip while a longer budget only slows genuine
+// failures — the predicate still has to become true for the test to pass.
+const WAIT_BUDGET_MS = process.env.CI ? 10_000 : 2_000
+
+export async function waitFor(predicate: () => boolean, timeoutMs: number = WAIT_BUDGET_MS, intervalMs = 5): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error('timed out waiting for condition')
