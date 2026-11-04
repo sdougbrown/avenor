@@ -134,8 +134,10 @@ export async function waitFor(predicate: () => boolean, timeoutMs: number = WAIT
 
 /** Fail fast on a blocking tool call that never returns: resolves the promise
  * or rejects with `message` after `timeoutMs`, so a missing interrupt surfaces
- * as a test failure instead of hanging the suite. */
-export async function settleWithin<T>(promise: Promise<T>, message: string, timeoutMs = 1000): Promise<T> {
+ * as a test failure instead of hanging the suite. The default budget scales
+ * under CI for the same runner-load starvation the wait budget reasons
+ * about; it stays bounded either way. */
+export async function settleWithin<T>(promise: Promise<T>, message: string, timeoutMs = process.env.CI ? 5_000 : 1_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([

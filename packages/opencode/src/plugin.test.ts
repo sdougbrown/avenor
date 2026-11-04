@@ -259,9 +259,12 @@ async function flush(): Promise<void> {
 /**
  * Flush until the predicate holds, bounded by a deadline so a callback chain
  * that never reaches the observable fails the test instead of looping forever.
+ * The budget scales under CI for the same runner-load starvation the pi
+ * package's wait budget reasons about: the predicate still has to become
+ * true, so a longer budget only slows genuine failures.
  */
 async function waitFor(predicate: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 2000
+  const deadline = Date.now() + (process.env.CI ? 10_000 : 2_000)
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
     await flush()
