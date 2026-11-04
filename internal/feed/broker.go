@@ -147,11 +147,8 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 			for i, row := range result.Messages {
 				var message broker.AgentMessage
 				if decodeErr := json.Unmarshal(row.Payload, &message); decodeErr != nil || message.Message == "" {
-					b.lost(result.Messages[i:])
-					fmt.Fprintln(b.Log, "feed broker: invalid message payload")
-					_ = p.Close()
-					wait(0)
-					return 0
+					b.lost(result.Messages[i : i+1])
+					continue
 				}
 				sender := row.Sender
 				if sender == "" {
