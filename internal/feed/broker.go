@@ -227,5 +227,5 @@ func terminal(err error) bool {
 		}
 		return status.Status >= 400 && status.Status < 500
 	}
-	return errors.Is(err, localhttp.ErrUnsupportedLocalProtocol) || errors.Is(err, messaging.ErrAuthRejected) || errors.Is(err, messaging.ErrInvalidRequest) || errors.Is(err, messaging.ErrGenerationMismatch)
+	return errors.Is(err, localhttp.ErrUnsupportedLocalProtocol) || errors.Is(err, messaging.ErrAuthRejected) || errors.Is(err, messaging.ErrInvalidRequest)
 }
