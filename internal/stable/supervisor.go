@@ -4053,6 +4053,11 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 	fallbackAgent, fallbackModel := child.agent, child.model
 	fallbackProfile := child.agentProfile
 	label, dir, thinking := child.label, child.dir, child.thinking
+	// The retry relaunches with the choice the run launched with — the
+	// merged effective choice recorded at spawn — so the retried session
+	// matches the fact the resume gate reads instead of re-reading an
+	// environment that may have moved.
+	persistChoice := child.persistChoice
 	brokerToken := child.brokerToken
 	child.mu.Unlock()
 	_, mapped := s.sessionIdentity(resumeID)
@@ -4072,18 +4077,19 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		}
 	}
 	return cli.ResumeSession(ctx, provider, identity.Backend, runtime.StartOptions{
-		Agent:         identity.Agent,
-		AgentProfile:  identity.AgentProfile,
-		Label:         label,
-		Dir:           dir,
-		Model:         identity.Model,
-		Thinking:      thinking,
-		RuntimeID:     child.id,
-		Broker:        s.broker,
-		BrokerToken:   brokerToken,
-		LaunchWrapper: identity.LaunchWrapper,
-		Launch:        identity.Launch,
-		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
+		Agent:           identity.Agent,
+		AgentProfile:    identity.AgentProfile,
+		Label:           label,
+		Dir:             dir,
+		Model:           identity.Model,
+		Thinking:        thinking,
+		PersistSessions: persistChoice,
+		RuntimeID:       child.id,
+		Broker:          s.broker,
+		BrokerToken:     brokerToken,
+		LaunchWrapper:   identity.LaunchWrapper,
+		Launch:          identity.Launch,
+		Provenance:      runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }
 

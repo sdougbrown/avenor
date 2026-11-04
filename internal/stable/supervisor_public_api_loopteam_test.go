@@ -26,6 +26,8 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/pi"
+	"strings"
 )
 
 // itestWorkflowConfig writes a loop or team config file in the JSON shape
@@ -1609,5 +1611,42 @@ func TestResumeGateFollowsPhasePersistChoice(t *testing.T) {
 	}
 	if ids := provider.resumeIDs(); len(ids) != 1 || ids[0] != "ses_p1" {
 		t.Fatalf("Resume arguments = %v, want [ses_p1] (the phase's session)", ids)
+	}
+}
+
+// TestResumeGateRefusesPhaseEphemeralChoice pins the other direction of the
+// launch-time recording: a run under an environment opt-in whose phase
+// roster entry forces ephemeral records an ephemeral fact, so the gate
+// refuses the resume instead of admitting a session whose file no phase
+// ever wrote.
+func TestResumeGateRefusesPhaseEphemeralChoice(t *testing.T) {
+	t.Setenv(pi.SessionsEnv, "1")
+	provider := newItestProvider(
+		itestAttempt("ses_e1", itestSessionEnd("ses_e1", "end_turn", "only phase")),
+	)
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rosterPath := filepath.Join(t.TempDir(), "roster.json")
+	if err := os.WriteFile(rosterPath, []byte(`{"worker":{"backend":"pi","model":"m","persist_sessions":false}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop": []map[string]any{
+			{"name": "only", "prompt": "only work", "roster_entry": "worker"},
+		},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-ephemeral", "backend": "pi", "roster_file": rosterPath})
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+
+	child := h.sup.runtimeByID(rt)
+	child.mu.Lock()
+	runID := child.runID
+	child.mu.Unlock()
+	if _, err := h.sup.performResume(child, runID, messaging.ResumeRequest{Target: rt, Message: "again"}); err == nil || !strings.Contains(err.Error(), "not resumable") {
+		t.Fatalf("Resume of a phase-ephemeral run under env opt-in = %v, want the gate's not_resumable refusal", err)
+	}
+	if ids := provider.resumeIDs(); len(ids) != 0 {
+		t.Fatalf("Resume arguments = %v, want none (the gate refused before any session start)", ids)
 	}
 }
