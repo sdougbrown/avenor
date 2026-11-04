@@ -179,7 +179,19 @@ const dialMock = mock(async () => {
 
 const currentSupervisorMock = mock(() => ({ supervisorId: '/tmp/avenor.sock' }))
 
-mock.module('@dougbots/avenor-core', () => ({
+// Snapshot the real core module before any mock is registered: the spread
+// below keeps every unoverridden export real, so the facade's surface stays
+// complete for the plugin's consumers.
+import * as coreModule from '@dougbots/avenor-core'
+
+// The mock targets this package's own facade module, not the shared
+// '@dougbots/avenor-core' specifier: bun's module mocks are process-global,
+// and an `export *` facade would alias the shared specifier's slots, leaking
+// the mock into every other package's tests. The facade's owned consts (see
+// opencode-core-deps.ts) keep the leak from existing, so no teardown is
+// needed: the shared specifier stays real for consumers like pi.
+mock.module('./opencode-core-deps.js', () => ({
+  ...coreModule,
   THINKING_LEVELS,
   spawnTool: spawnToolMock,
   validateSpawnSelection,
@@ -212,9 +224,12 @@ mock.module('@dougbots/avenor-core', () => ({
   extractEventText,
   observeRun,
   dial: dialMock,
-  Supervisor: {
+  // The stub keeps the plugin's current-instance override but inherits the
+  // real statics (get, getInstance) so files loading after this one receive
+  // a complete Supervisor.
+  Supervisor: Object.assign(class extends coreModule.Supervisor {}, {
     currentInstance: currentSupervisorMock,
-  },
+  }),
 }))
 const { AvenorPlugin, buildWaitingText, hostIdentityMetadata, terminalStatus } = await import('./plugin.js')
 const originalFetch = globalThis.fetch

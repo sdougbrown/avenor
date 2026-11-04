@@ -31,7 +31,7 @@ import {
   type MessageProvider,
   type PeersRouterResult,
   validateSpawnSelection,
-} from '@dougbots/avenor-core'
+} from './mcp-core-deps.js'
 
 const LOCALHOST_ORIGINS = new Set(['localhost', '127.0.0.1', '[::1]'])
 

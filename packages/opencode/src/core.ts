@@ -44,7 +44,7 @@ import {
   THINKING_LEVELS,
   validateSpawnSelection,
   runWorkflowTool,
-} from '@dougbots/avenor-core'
+} from './opencode-core-deps.js'
 
 type TrackedRun = {
   runId: string

@@ -84,7 +84,17 @@ beforeEach(() => {
   workflowCalls.length = 0
 })
 
-mock.module('@dougbots/avenor-core', () => ({
+// Snapshot the real core module before any mock is registered: the spread
+// below keeps every unoverridden export real, so the facade's surface stays
+// complete for the server's consumers.
+import * as coreModule from '@dougbots/avenor-core'
+
+// Mock the package-local facade, not the shared specifier — see
+// packages/opencode/src/plugin.test.ts for the full rationale. The facade's
+// owned consts (see mcp-core-deps.ts) keep the mock from aliasing the shared
+// specifier's slots, so no teardown is needed.
+mock.module('./mcp-core-deps.js', () => ({
+  ...coreModule,
   spawnTool: mock(async () => ({})),
   statusTool: mock(async () => ({ runs: [], count: 0 })),
   resultTool: mock(async () => ({})),
