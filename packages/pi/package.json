@@ -32,7 +32,7 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "test": "bun test --timeout 30000",
+    "test": "bun test",
     "dev": "tsdown --watch"
   },
   "dependencies": {

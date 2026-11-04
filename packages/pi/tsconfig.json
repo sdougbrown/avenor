@@ -1,4 +1,5 @@
 {
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "strict": true,
     "module": "ESNext",
@@ -10,15 +11,7 @@
       "bun"
     ],
     "noEmit": true,
-    "skipLibCheck": true,
-    "paths": {
-      "@dougbots/avenor-core": [
-        "../core/src/index.ts"
-      ],
-      "@dougbots/avenor-core/*": [
-        "../core/src/*"
-      ]
-    }
+    "skipLibCheck": true
   },
   "include": [
     "src"

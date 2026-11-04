@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "paths": {
+      "@dougbots/avenor-core": ["./packages/core/src/index.ts"],
+      "@dougbots/avenor-core/*": ["./packages/core/src/*"]
+    }
+  }
+}
