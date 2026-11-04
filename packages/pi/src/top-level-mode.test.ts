@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test'
 import { messageTool } from '@dougbots/avenor-core'
-import { makeMessageProvider, startExtensionHarness, waitFor } from './test-fixtures.js'
+import { makeMessageProvider, scaleMs, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 function broker() {
   const previous = globalThis.fetch
@@ -269,7 +269,7 @@ test('a codeless 409 keeps polling, because that is another poll in flight', asy
   let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
   try {
     h = await startExtensionHarness({ deps: { messageTool }, extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 20 } })
-    await waitFor(() => polls > 2, 10000)
+    await waitFor(() => polls > 2, scaleMs(10_000))
     const peers = await h.registeredTools.avenor_peers.execute('p', {})
     expect(peers.details.peers.length).toBeGreaterThan(0)
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
@@ -293,7 +293,7 @@ test('a refused registration ends the session instead of re-registering every ti
       extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 100 },
     })
     // A refused registration is not retried: the broker will answer the same way.
-    await waitFor(() => h!.emitted.some(([channel]) => channel === 'avenor:peer:error'), 10000)
+    await waitFor(() => h!.emitted.some(([channel]) => channel === 'avenor:peer:error'), scaleMs(10_000))
     await Bun.sleep(400)
     expect(registrations).toBe(1)
     await expect(h.registeredTools.avenor_peers.execute('p', {})).rejects.toThrow('identity is unavailable')
@@ -319,7 +319,7 @@ test('a registration retried from the poll tick reports as a registration', asyn
     })
     // Wait past the first report, which comes from session start, so the tick has
     // retried the registration at least twice and labelled it itself.
-    await waitFor(() => h!.emitted.filter(([channel]) => channel === 'avenor:peer:error').length >= 3, 10000)
+    await waitFor(() => h!.emitted.filter(([channel]) => channel === 'avenor:peer:error').length >= 3, scaleMs(10_000))
     // The same failure must not be filed under two operations depending on which
     // path hit it: `operation` is part of the payload companion extensions key on.
     const operations = h.emitted
@@ -418,11 +418,11 @@ test('a new failure episode raises a fresh notice after the broker recovers', as
     await waitFor(() => pollNotices().length === 1)
     // The episode has to reach its floor of three failures before a clean tick
     // counts as recovery, so the broker coming back means nothing until then.
-    await waitFor(() => failures >= 3, 10000)
+    await waitFor(() => failures >= 3, scaleMs(10_000))
     failing = false
-    await waitFor(() => h!.notify.mock.calls.some(call => String(call[0]).includes('poll recovered')), 10000)
+    await waitFor(() => h!.notify.mock.calls.some(call => String(call[0]).includes('poll recovered')), scaleMs(10_000))
     failing = true
-    await waitFor(() => pollNotices().length === 2, 10000)
+    await waitFor(() => pollNotices().length === 2, scaleMs(10_000))
     expect(pollNotices()).toHaveLength(2)
   } finally { await h?.eventHandlers.session_shutdown({}, {}); await Bun.sleep(250); b.restore() }
 }, 20000)
