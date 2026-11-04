@@ -2,6 +2,8 @@ package askclaim
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +71,40 @@ func TestClaimWithExistingClaimedFileDoesNotWin(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(dir, "id.claimed"))
 	if err != nil || !strings.Contains(string(raw), "first") {
 		t.Fatalf("claimed %q error %v", raw, err)
+	}
+}
+
+// TestRecordRejectsDifferentAsker preserves existing pending and claimed records.
+func TestRecordRejectsDifferentAsker(t *testing.T) {
+	for _, claimed := range []bool{false, true} {
+		t.Run(fmt.Sprint(claimed), func(t *testing.T) {
+			dir := t.TempDir()
+			if err := Record(dir, "id", "first"); err != nil {
+				t.Fatal(err)
+			}
+			p := &Provider{Dir: dir}
+			name := "id.json"
+			if claimed {
+				if _, ok := p.ClaimAsk("id"); !ok {
+					t.Fatal("claim failed")
+				}
+				name = "id.claimed"
+			}
+			before, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Record(dir, "id", "second"); !errors.Is(err, ErrAskerMismatch) {
+				t.Fatalf("error %v", err)
+			}
+			after, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil || string(before) != string(after) {
+				t.Fatalf("record changed: %q error %v", after, err)
+			}
+			if err := Record(dir, "id", "first"); err != nil {
+				t.Fatalf("same asker: %v", err)
+			}
+		})
 	}
 }
 

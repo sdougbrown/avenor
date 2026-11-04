@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -20,6 +21,9 @@ import (
 // messageIDPattern restricts record names to a single safe path component.
 var messageIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// ErrAskerMismatch reports an existing ask with a different stamped asker.
+var ErrAskerMismatch = errors.New("ask claim: asker mismatch")
+
 // validID reports whether id can name a claim file.
 func validID(id string) bool { return id != "." && id != ".." && messageIDPattern.MatchString(id) }
 
@@ -32,15 +36,39 @@ func Record(dir, messageID, askerRunID string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	// An ask that was already claimed has been answered or is being
-	// answered, so recording it again would make it claimable twice.
-	if _, err := os.Stat(filepath.Join(dir, messageID+".claimed")); err == nil {
-		return nil
-	}
 	path := filepath.Join(dir, messageID+".json")
+	claimed := filepath.Join(dir, messageID+".claimed")
+	check := func() (bool, error) {
+		found := false
+		for _, name := range []string{claimed, path} {
+			raw, err := os.ReadFile(name)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return false, err
+			}
+			found = true
+			var record struct {
+				AskerRunID string `json:"asker_run_id"`
+			}
+			if err := json.Unmarshal(raw, &record); err != nil {
+				return false, err
+			}
+			if record.AskerRunID != askerRunID {
+				return false, ErrAskerMismatch
+			}
+		}
+		return found, nil
+	}
+	found, err := check()
+	if err != nil || found {
+		return err
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if os.IsExist(err) {
-		return nil
+		_, err = check()
+		return err
 	}
 	if err != nil {
 		return err
