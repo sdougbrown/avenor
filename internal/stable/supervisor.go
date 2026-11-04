@@ -2913,7 +2913,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
 
-			persistOpt := phasePersistChoice(selection.PersistSessions, child.persistChoice)
+			persistOpt := phasePersistChoice(child.persistChoice, selection.PersistSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -3202,7 +3202,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if resumeErr != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
-			persistOpt := phasePersistChoice(selection.PersistSessions, child.persistChoice)
+			persistOpt := phasePersistChoice(child.persistChoice, selection.PersistSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -3689,15 +3689,15 @@ func (s *Supervisor) releaseSessionAttempt(attempt *sessionAttempt) {
 	s.sessionIdentityMu.Unlock()
 }
 
-// phasePersistChoice layers the phase entry's persisted-session choice over
-// the run's request choice: the entry wins when set, and the run's request
-// (nil inheriting the environment) fills the gap so a phase attempt honors
-// what its run was spawned with instead of re-reading a moved environment.
-func phasePersistChoice(entry, recorded *bool) *bool {
-	if entry != nil {
-		return entry
+// phasePersistChoice layers the phase entry's persisted-session choice under
+// the run's explicit choice: an explicit run-level request wins — matching the
+// thinking merge beside it, the CLI loop merge, and the direct-spawn merge —
+// the entry's choice fills the gap, and nil on both inherits the environment.
+func phasePersistChoice(recorded, entry *bool) *bool {
+	if recorded != nil {
+		return recorded
 	}
-	return recorded
+	return entry
 }
 
 func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, model string, phase phaseconfig.Phase, loop bool) (rosterconfig.ResolvedSelection, error) {

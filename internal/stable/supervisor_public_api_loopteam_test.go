@@ -1503,3 +1503,61 @@ func TestSupervisorPublicAPILoopPhaseCarriesPersistedChoice(t *testing.T) {
 		t.Fatalf("phase start options = %+v, want the run's persisted choice", provider.startOpts[0])
 	}
 }
+
+// TestSupervisorPublicAPILoopPhaseRosterPersistLayersRunOverEntry proves the
+// loop phase attempt layers the phase roster entry's persist_sessions choice
+// under the run's explicit one: a persisting entry persists when the spawn
+// sets no choice, and an explicitly ephemeral run stays ephemeral even under
+// a persisting entry — matching the CLI loop merge and the thinking merge,
+// and keeping the phase attempts inside what the run's resume gate honors.
+func TestSupervisorPublicAPILoopPhaseRosterPersistLayersRunOverEntry(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		params map[string]any
+		want   *bool
+	}{
+		{name: "persisting entry fills the gap", params: map[string]any{"label": "loop-roster-persist"}, want: boolPtr(true)},
+		{name: "explicit ephemeral wins over the entry", params: map[string]any{"label": "loop-roster-ephemeral", "persist_sessions": false}, want: boolPtr(false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newItestProvider(
+				itestAttempt("ses_loop_r1", itestSessionEnd("ses_loop_r1", "end_turn", "only phase")),
+			)
+			h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+			rosterPath := filepath.Join(t.TempDir(), "roster.json")
+			if err := os.WriteFile(rosterPath, []byte(`{"worker":{"backend":"itest","model":"m","persist_sessions":true}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file := itestWorkflowConfig(t, "loop", map[string]any{
+				"max_iterations": 1,
+				"loop": []map[string]any{
+					{"name": "only", "prompt": "only work", "roster_entry": "worker"},
+				},
+			})
+			params := tc.params
+			params["roster_file"] = rosterPath
+			rt := h.spawnWorkflow("loop", file, params)
+
+			h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+			provider.mu.Lock()
+			defer provider.mu.Unlock()
+			if len(provider.startOpts) != 1 {
+				t.Fatalf("provider starts recorded = %d, want 1", len(provider.startOpts))
+			}
+			got := provider.startOpts[0].PersistSessions
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("phase PersistSessions = %v, want nil", got)
+				}
+				return
+			}
+			if got == nil || *got != *tc.want {
+				t.Fatalf("phase PersistSessions = %v, want %v", got, *tc.want)
+			}
+		})
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

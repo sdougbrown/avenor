@@ -161,3 +161,60 @@ func TestRunPersistSessionsReachesStartOptions(t *testing.T) {
 		t.Fatalf("StartOptions.PersistSessions = %v, want true", got.PersistSessions)
 	}
 }
+
+// A phase roster entry's persist_sessions choice is a default that the
+// explicit run-level flag overrides, mirroring the thinking merge: a
+// regression that reverts the fallback (or the precedence) would make CLI
+// loop runs ignore a persisting entry, or silently override an explicit
+// ephemeral request.
+func TestRunWorkflowPhaseRosterPersistSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		flag    string
+		want    bool
+		wantNil bool
+	}{
+		{name: "persisting entry fills the gap", want: true},
+		{name: "explicit flag wins over the entry", flag: "--persist-sessions=false", wantNil: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldNewProvider := newProvider
+			provider := newScriptedProvider()
+			var got runtime.StartOptions
+			newProvider = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+				got = opts
+				return provider, nil
+			}
+			t.Cleanup(func() { newProvider = oldNewProvider })
+
+			dir := t.TempDir()
+			rosterPath := filepath.Join(dir, "roster.json")
+			contents := `{"horse":{"backend":"pi","model":"m","persist_sessions":true}}`
+			if err := os.WriteFile(rosterPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loopPath := filepath.Join(dir, "loop.json")
+			if err := os.WriteFile(loopPath, []byte(`{"pre":[{"name":"work","prompt":"work","roster_entry":"horse"}]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"--dir", dir, "--loop-file", loopPath, "--roster-file", rosterPath, "--prompt", "noop"}
+			if tc.flag != "" {
+				args = append(args, tc.flag)
+			}
+			var stderr strings.Builder
+			if code := run(args, func(string) string { return "" }, &stderr); code != 0 {
+				t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			if tc.wantNil {
+				if got.PersistSessions == nil || *got.PersistSessions {
+					t.Fatalf("StartOptions.PersistSessions = %v, want the flag's explicit false", got.PersistSessions)
+				}
+				return
+			}
+			if got.PersistSessions == nil || !*got.PersistSessions {
+				t.Fatalf("StartOptions.PersistSessions = %v, want the entry's true", got.PersistSessions)
+			}
+		})
+	}
+}
