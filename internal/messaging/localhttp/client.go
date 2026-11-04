@@ -496,7 +496,11 @@ func envelopeOf(status int, raw []byte) (envelope, error) {
 		return body, nil
 	}
 	if err := json.Unmarshal(trimmed, &body); err != nil {
-		return envelope{Status: status}, fmt.Errorf("%w: %v", ErrUnsupportedLocalProtocol, err)
+		wrapped := fmt.Errorf("%w: %v", ErrUnsupportedLocalProtocol, err)
+		if status != http.StatusOK {
+			return envelope{Status: status}, &StatusError{Status: status, err: wrapped}
+		}
+		return envelope{Status: status}, wrapped
 	}
 	body.Status = status
 	return body, nil
