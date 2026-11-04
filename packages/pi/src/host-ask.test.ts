@@ -143,7 +143,7 @@ describe('host inbound ask delivery', () => {
     })
     const harness = await startHostExtension(brokerReceiveTool)
     try {
-      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0, 500)
+      await waitFor(() => harness.sendUserMessage.mock.calls.length > 0)
       expect(brokerReceiveTool.mock.calls.length).toBeGreaterThanOrEqual(2)
       const [body, options] = harness.sendUserMessage.mock.calls[0] as [string, { deliverAs: string }]
       expect(body).toContain('Ask from sub-agent')

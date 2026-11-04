@@ -119,9 +119,10 @@ export function makeMessageProvider(overrides: Partial<MessageProvider> = {}): M
 }
 
 // The default budget scales under CI: runner load can starve the async turn
-// callbacks and poll timers these conditions wait on, and a masked flake
-// costs a full CI round-trip while a longer budget only slows genuine
-// failures — the predicate still has to become true for the test to pass.
+// callbacks and poll timers these conditions wait on. A longer budget cannot
+// turn a failing predicate green — the predicate still has to become true
+// for the test to pass — so a masked flake costs a full CI round-trip while
+// a longer budget only slows genuine failures.
 const WAIT_BUDGET_MS = process.env.CI ? 10_000 : 2_000
 
 export async function waitFor(predicate: () => boolean, timeoutMs: number = WAIT_BUDGET_MS, intervalMs = 5): Promise<void> {
@@ -135,8 +136,8 @@ export async function waitFor(predicate: () => boolean, timeoutMs: number = WAIT
 /** Fail fast on a blocking tool call that never returns: resolves the promise
  * or rejects with `message` after `timeoutMs`, so a missing interrupt surfaces
  * as a test failure instead of hanging the suite. The default budget scales
- * under CI for the same runner-load starvation the wait budget reasons
- * about; it stays bounded either way. */
+ * under CI — runner load can starve the async callbacks a settling promise
+ * depends on, and the bound keeps the suite from hanging either way. */
 export async function settleWithin<T>(promise: Promise<T>, message: string, timeoutMs = process.env.CI ? 5_000 : 1_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
