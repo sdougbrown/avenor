@@ -292,15 +292,18 @@ test('a refused registration ends the session instead of re-registering every ti
       deps: { messageTool },
       extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 100 },
     })
-    // A refused registration is not retried: the broker will answer the same way.
+    // A refused registration is not retried: the broker will answer the same
+    // way, and the session ends — no further poll ticks fire, so a grace
+    // window (scaled for runner load) is what gives an in-flight re-register
+    // tick the chance to surface before the negative assertion.
     await waitFor(() => h!.emitted.some(([channel]) => channel === 'avenor:peer:error'), scaleMs(10_000))
-    await Bun.sleep(400)
+    await Bun.sleep(scaleMs(400))
     expect(registrations).toBe(1)
     await expect(h.registeredTools.avenor_peers.execute('p', {})).rejects.toThrow('identity is unavailable')
     const last = h.emitted.filter(([channel]) => channel === 'avenor:peer:error').at(-1)?.[1] as Record<string, unknown>
     expect(last).toMatchObject({ operation: 'register', terminal: true })
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
-}, 20000)
+}, scaleMs(20_000))
 
 test('a registration retried from the poll tick reports as a registration', async () => {
   const b = broker()
@@ -331,7 +334,7 @@ test('a registration retried from the poll tick reports as a registration', asyn
     expect(notices.some(text => text.includes('central peer registration failed'))).toBe(true)
     expect(notices.some(text => text.includes('central broker poll'))).toBe(false)
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
-}, 20000)
+}, scaleMs(20_000))
 
 test('a refused session name is a notice on the peer channel, not raw stderr', async () => {
   const b = broker()
@@ -388,7 +391,7 @@ test('a failed turn publication notifies once per episode and re-arms after a su
     await h.eventHandlers.turn_end({ message: { content: 'fourth', stopReason: 'stop' } })
     await waitFor(() => publishNotices().length === 2)
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
-}, 20000)
+}, scaleMs(20_000))
 
 test('a new failure episode raises a fresh notice after the broker recovers', async () => {
   const b = broker()
@@ -425,7 +428,7 @@ test('a new failure episode raises a fresh notice after the broker recovers', as
     await waitFor(() => pollNotices().length === 2, scaleMs(10_000))
     expect(pollNotices()).toHaveLength(2)
   } finally { await h?.eventHandlers.session_shutdown({}, {}); await Bun.sleep(250); b.restore() }
-}, 20000)
+}, scaleMs(20_000))
 
 test('a retirement the broker never confirms is a notice, not raw stderr', async () => {
   const b = broker()
