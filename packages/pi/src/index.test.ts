@@ -20,7 +20,7 @@ import extensionFactory, {
   statusSupervisorId,
 } from './index.js'
 import { findLiveStatusForTrackedRun } from './types.js'
-import { makeInspectResult, makeMessageProvider, settleWithin, startExtensionHarness, waitFor } from './test-fixtures.js'
+import { makeInspectResult, makeMessageProvider, scaleMs, settleWithin, startExtensionHarness, waitFor } from './test-fixtures.js'
 
 async function withoutAmbientAgentProfile<T>(run: () => Promise<T>): Promise<T> {
   const previous = process.env.PI_AGENT_PROFILE
