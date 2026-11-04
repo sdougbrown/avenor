@@ -35,6 +35,8 @@ const (
 	SurfacePiChild      Surface = "pi-child"
 	SurfaceOpenCode     Surface = "opencode"
 	SurfaceMCPTS        Surface = "mcp-ts"
+	// SurfaceFeed identifies the broker-backed feed surface.
+	SurfaceFeed Surface = "feed"
 )
 
 // ResolutionMatch reports how a resolver matched the addressed target.

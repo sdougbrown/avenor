@@ -7,7 +7,7 @@
     },
     "surface": {
       "type": "string",
-      "description": "Model-facing surface: mcp | channeltools | sidecar | pi-host | pi-child | opencode | mcp-ts."
+      "description": "Model-facing surface: mcp | channeltools | sidecar | pi-host | pi-child | opencode | mcp-ts | feed."
     },
     "targetLive": {
       "type": "boolean",
