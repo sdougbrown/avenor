@@ -3,20 +3,16 @@ package feed
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/childmessaging"
 	"github.com/sdougbrown/avenor/internal/durablefile"
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -38,6 +34,8 @@ type Broker struct {
 	RequestTimeout time.Duration
 	// LockDir holds persistent advisory lock files.
 	LockDir string
+	// AsksDir holds the claims for delivered asks.
+	AsksDir string
 	// Out receives feed records.
 	Out io.Writer
 	// Log receives diagnostics without message text.
@@ -72,29 +70,16 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 	if b.Out == nil {
 		b.Out = io.Discard
 	}
-	u, err := url.Parse(b.BrokerURL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	key, err := askclaim.BrokerKey(b.BrokerURL, b.RunID)
+	if err != nil {
 		fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 		return 1
 	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	u.Host = strings.ToLower(u.Host)
-	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
-		u.Host = u.Hostname()
-		if strings.Contains(u.Host, ":") {
-			u.Host = "[" + u.Host + "]"
-		}
-	} else if u.Port() != "" {
-		u.Host = net.JoinHostPort(u.Hostname(), u.Port())
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	u.RawPath = ""
-	sum := sha256.Sum256([]byte(u.String() + "\x00" + b.RunID))
 	if err := os.MkdirAll(b.LockDir, 0700); err != nil {
 		fmt.Fprintln(b.Log, "feed broker: cannot create lock directory:", err)
 		return 1
 	}
-	unlock, held, err := durablefile.TryLock(filepath.Join(b.LockDir, hex.EncodeToString(sum[:])+".lock"))
+	unlock, held, err := durablefile.TryLock(filepath.Join(b.LockDir, key+".lock"))
 	if err != nil {
 		fmt.Fprintln(b.Log, "feed broker: cannot lock:", err)
 		return 1
@@ -172,10 +157,12 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 				}
 				text := message.Message
 				if message.ExpectsReply {
+					if err := askclaim.Record(b.AsksDir, id, row.FromRunID); err != nil {
+						fmt.Fprintf(b.Log, "feed broker: failed to record ask id %q\n", id)
+					}
 					quotedID, _ := json.Marshal(id)
 					quotedSender, _ := json.Marshal(sender)
-					quotedRunID, _ := json.Marshal(row.FromRunID)
-					text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_reply\", \"args\": {\"reply_to\": %s, \"to\": %s, \"text\": \"...\"}}.", quotedSender, quotedID, quotedRunID)
+					text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_reply\", \"args\": {\"reply_to\": %s, \"text\": \"...\"}}.", quotedSender, quotedID)
 				}
 				line := struct {
 					Text string `json:"text"`

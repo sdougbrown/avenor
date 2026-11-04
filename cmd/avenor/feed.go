@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/appdir"
+	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/feed"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/cli-contract"
@@ -26,6 +27,7 @@ func feedCommand() *clicontract.Command {
 			{Name: "limit", Kind: clicontract.Int, Usage: "maximum messages per poll", Default: 8},
 			{Name: "request-timeout", Kind: clicontract.Duration, Usage: "maximum poll duration", Default: 15 * time.Second},
 			{Name: "lock-dir", Kind: clicontract.String, Usage: "feed lock directory"},
+			{Name: "asks-dir", Kind: clicontract.String, Usage: "inbound ask claim directory"},
 		}, Handle: handleFeedBroker,
 	}}}
 }
@@ -39,8 +41,9 @@ func handleFeedBroker(ctx context.Context, inv clicontract.Invocation, stderr io
 		return nil, usageErrorf("avenor feed broker: broker URL, run id, and token are required")
 	}
 	lockDir := orDefault(inv.Flags["lock-dir"], filepath.Join(appdir.StateHome(), "feed-locks"))
+	asksDir := orDefault(inv.Flags["asks-dir"], askclaim.DefaultDir(appdir.StateHome(), brokerURL, runID))
 	signal.Ignore(syscall.SIGPIPE)
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return exitCode((feed.Broker{RunID: runID, Token: token, BrokerURL: brokerURL, Limit: inv.Ints["limit"], RequestTimeout: inv.Durations["request-timeout"], LockDir: lockDir, Out: os.Stdout, Log: stderr}).Run(ctx)), nil
+	return exitCode((feed.Broker{RunID: runID, Token: token, BrokerURL: brokerURL, Limit: inv.Ints["limit"], RequestTimeout: inv.Durations["request-timeout"], LockDir: lockDir, AsksDir: asksDir, Out: os.Stdout, Log: stderr}).Run(ctx)), nil
 }

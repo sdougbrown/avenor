@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -85,7 +87,8 @@ func TestBrokerDeliversStampedMessagesAndLocks(t *testing.T) {
 	}
 	output := &lockedBuffer{wrote: make(chan struct{}, 2)}
 	logs := &lockedBuffer{}
-	opts := Broker{RunID: "receiver", Token: token, BrokerURL: "http://" + b.Addr(), LockDir: t.TempDir(), Out: output, Log: logs, RequestTimeout: 300 * time.Millisecond}
+	asksDir := filepath.Join(t.TempDir(), "asks")
+	opts := Broker{RunID: "receiver", Token: token, BrokerURL: "http://" + b.Addr(), LockDir: t.TempDir(), AsksDir: asksDir, Out: output, Log: logs, RequestTimeout: 300 * time.Millisecond}
 	cancel, done := startFeed(t, opts)
 	for i := 0; i < 2; i++ {
 		select {
@@ -117,8 +120,58 @@ func TestBrokerDeliversStampedMessagesAndLocks(t *testing.T) {
 	if tell.Text != "hello" || tell.From != "sender" || tell.ID != "tell" {
 		t.Fatalf("tell: %+v", tell)
 	}
-	if ask.From != "sender" || ask.ID != "ask" || !strings.Contains(ask.Text, "avenor_reply") || !strings.Contains(ask.Text, `"ask"`) || !strings.Contains(ask.Text, "call_cli") || !strings.Contains(ask.Text, `ask from "sender"`) || !strings.Contains(ask.Text, `"to": "sender"`) || strings.Contains(ask.Text, "supervisor") || strings.Contains(ask.Text, "forged") {
+	if ask.From != "sender" || ask.ID != "ask" || !strings.Contains(ask.Text, "avenor_reply") || !strings.Contains(ask.Text, `"ask"`) || !strings.Contains(ask.Text, "call_cli") || !strings.Contains(ask.Text, `ask from "sender"`) || strings.Contains(ask.Text, `"to":`) || strings.Contains(ask.Text, "supervisor") || strings.Contains(ask.Text, "forged") {
 		t.Fatalf("ask: %+v", ask)
+	}
+	raw, err := os.ReadFile(filepath.Join(asksDir, "ask.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record struct {
+		MessageID  string `json:"message_id"`
+		AskerRunID string `json:"asker_run_id"`
+	}
+	if err := json.Unmarshal(raw, &record); err != nil || record.MessageID != "ask" || record.AskerRunID != "sender" {
+		t.Fatalf("record %+v error %v", record, err)
+	}
+	if _, err := os.Stat(filepath.Join(asksDir, "tell.json")); !os.IsNotExist(err) {
+		t.Fatalf("tell created a record: %v", err)
+	}
+}
+
+// TestAskRecordFailureDoesNotLoseDelivery reports only the message ID.
+func TestAskRecordFailureDoesNotLoseDelivery(t *testing.T) {
+	var polls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		if polls.Add(1) == 1 {
+			fmt.Fprint(w, `[{"id":"ask-id","from_run_id":"sender","payload":{"id":"ask-id","message":"private text","expects_reply":true}}]`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	logs := &lockedBuffer{}
+	badDir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(badDir, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), AsksDir: badDir, Out: out, Log: logs, RequestTimeout: time.Second})
+	select {
+	case <-out.wrote:
+	case <-time.After(3 * time.Second):
+		cancel()
+		awaitExit(t, done)
+		t.Fatal("no delivery")
+	}
+	cancel()
+	awaitExit(t, done)
+	if !strings.Contains(out.String(), "private text") || !strings.Contains(logs.String(), "ask-id") || strings.Contains(logs.String(), "private text") {
+		t.Fatalf("output=%q log=%q", out.String(), logs.String())
 	}
 }
 
