@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -14,7 +15,7 @@ func TestRecordClaimAndRestore(t *testing.T) {
 	if err := Record(dir, "av1.ask", "rt_sender"); err != nil {
 		t.Fatal(err)
 	}
-	if err := Record(dir, "av1.ask", "different"); err != nil {
+	if err := Record(dir, "av1.ask", "rt_sender"); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "av1.ask.json"))
@@ -46,6 +47,28 @@ func TestRecordClaimAndRestore(t *testing.T) {
 	p.RestoreAsk("av1.ask", "attacker")
 	if sender, ok := p.ClaimAsk("av1.ask"); !ok || sender != "rt_sender" {
 		t.Fatalf("restored claim %q %v", sender, ok)
+	}
+}
+
+// TestClaimWithExistingClaimedFileDoesNotWin preserves the original claim.
+func TestClaimWithExistingClaimedFileDoesNotWin(t *testing.T) {
+	dir := t.TempDir()
+	if err := Record(dir, "id", "first"); err != nil {
+		t.Fatal(err)
+	}
+	p := &Provider{Dir: dir}
+	if _, ok := p.ClaimAsk("id"); !ok {
+		t.Fatal("first claim failed")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "id.json"), []byte(`{"asker_run_id":"second"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if asker, ok := p.ClaimAsk("id"); ok || asker != "" {
+		t.Fatalf("second claim %q %v", asker, ok)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "id.claimed"))
+	if err != nil || !strings.Contains(string(raw), "first") {
+		t.Fatalf("claimed %q error %v", raw, err)
 	}
 }
 
