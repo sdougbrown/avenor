@@ -6,9 +6,22 @@
     "target": "ESNext",
     "esModuleInterop": true,
     "resolveJsonModule": true,
-    "types": ["node", "bun"],
+    "types": [
+      "node",
+      "bun"
+    ],
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": {
+      "@dougbots/avenor-core": [
+        "../core/src/index.ts"
+      ],
+      "@dougbots/avenor-core/*": [
+        "../core/src/*"
+      ]
+    }
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ]
 }
