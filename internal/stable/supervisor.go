@@ -356,9 +356,10 @@ type childRuntime struct {
 	persistedSessions bool
 	// persistChoice is the spawn request's tri-state persisted-session
 	// choice (nil inherits the environment): phase attempts layer their
-	// entry's choice over it instead of re-deriving from the resolved
-	// record, which is pinned to the run's backend and would force a
-	// phase-selected pi attempt under a non-pi run.
+	// entry's choice under it — rosterconfig.MergePersistChoice — instead of
+	// re-deriving from the resolved record, which is pinned to the run's
+	// backend and would force a phase-selected pi attempt under a non-pi
+	// run.
 	persistChoice      *bool
 	roster             *rosterconfig.Config
 	parentID           string   // runtime ID of the parent agent, empty for top-level
@@ -2913,10 +2914,7 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 				return looprunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
 
-			// The phase entry's persisted-session choice does not exist yet (the
-			// roster lever lands in the follow-up PR): the run's request choice
-			// is what phase attempts carry, nil inheriting the environment.
-			persistOpt := phasePersistChoice(nil, child.persistChoice)
+			persistOpt := rosterconfig.MergePersistChoice(child.persistChoice, selection.PersistSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -2970,6 +2968,10 @@ func (s *Supervisor) runLoopChild(ctx context.Context, child *childRuntime, cfg 
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
+			// The attempt launched with the phase's effective choice: record the
+			// resolved fact on the child so the resume gate matches the session
+			// the phases actually wrote.
+			s.recordSessionPersistFact(child, identity.Backend, persistOpt)
 			attempt, err := s.registerSessionAttempt(session.SessionID, identity, provider, resumeID)
 			if err != nil {
 				return looprunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, err
@@ -3205,10 +3207,7 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if resumeErr != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1}, resumeErr
 			}
-			// The phase entry's persisted-session choice does not exist yet (the
-			// roster lever lands in the follow-up PR): the run's recorded choice is
-			// what phase attempts carry.
-			persistOpt := phasePersistChoice(nil, child.persistChoice)
+			persistOpt := rosterconfig.MergePersistChoice(child.persistChoice, selection.PersistSessions)
 			startOpts := runtime.StartOptions{
 				Agent:           identity.Agent,
 				AgentProfile:    identity.AgentProfile,
@@ -3262,6 +3261,10 @@ func (s *Supervisor) runTeamChild(ctx context.Context, child *childRuntime, cfg 
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, fmt.Errorf("start session: %w", err)
 			}
+			// The attempt launched with the phase's effective choice: record the
+			// resolved fact on the child so the resume gate matches the session
+			// the phases actually wrote.
+			s.recordSessionPersistFact(child, identity.Backend, persistOpt)
 			attempt, err := s.registerSessionAttempt(session.SessionID, identity, provider, resumeID)
 			if err != nil {
 				return teamrunner.PhaseAttemptResult{ExitCode: 1, BrokerRunID: brokerRunID}, err
@@ -3695,15 +3698,15 @@ func (s *Supervisor) releaseSessionAttempt(attempt *sessionAttempt) {
 	s.sessionIdentityMu.Unlock()
 }
 
-// phasePersistChoice layers the phase entry's persisted-session choice over
-// the run's request choice: the entry wins when set, and the run's request
-// (nil inheriting the environment) fills the gap so a phase attempt honors
-// what its run was spawned with instead of re-reading a moved environment.
-func phasePersistChoice(entry, recorded *bool) *bool {
-	if entry != nil {
-		return entry
-	}
-	return recorded
+// recordSessionPersistFact records the resolved persistence of a launched
+// attempt onto its child. The resume gate reads this fact; a phase's
+// entry-layered choice can differ from the run-level choice the child was
+// spawned with, and without the update a persisted phase session is refused
+// at the gate, or a gate admit dies later on a session file no phase wrote.
+func (s *Supervisor) recordSessionPersistFact(child *childRuntime, backend string, choice *bool) {
+	child.mu.Lock()
+	child.persistedSessions = factory.ResolvesPersistedSessions(backend, choice)
+	child.mu.Unlock()
 }
 
 func resolveStablePhaseSelection(roster *rosterconfig.Config, backend, agent, model string, phase phaseconfig.Phase, loop bool) (rosterconfig.ResolvedSelection, error) {
@@ -4050,6 +4053,11 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 	fallbackAgent, fallbackModel := child.agent, child.model
 	fallbackProfile := child.agentProfile
 	label, dir, thinking := child.label, child.dir, child.thinking
+	// The retry relaunches with the choice the run launched with — the
+	// merged effective choice recorded at spawn — so the retried session
+	// matches the fact the resume gate reads instead of re-reading an
+	// environment that may have moved.
+	persistChoice := child.persistChoice
 	brokerToken := child.brokerToken
 	child.mu.Unlock()
 	_, mapped := s.sessionIdentity(resumeID)
@@ -4069,18 +4077,19 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		}
 	}
 	return cli.ResumeSession(ctx, provider, identity.Backend, runtime.StartOptions{
-		Agent:         identity.Agent,
-		AgentProfile:  identity.AgentProfile,
-		Label:         label,
-		Dir:           dir,
-		Model:         identity.Model,
-		Thinking:      thinking,
-		RuntimeID:     child.id,
-		Broker:        s.broker,
-		BrokerToken:   brokerToken,
-		LaunchWrapper: identity.LaunchWrapper,
-		Launch:        identity.Launch,
-		Provenance:    runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
+		Agent:           identity.Agent,
+		AgentProfile:    identity.AgentProfile,
+		Label:           label,
+		Dir:             dir,
+		Model:           identity.Model,
+		Thinking:        thinking,
+		PersistSessions: persistChoice,
+		RuntimeID:       child.id,
+		Broker:          s.broker,
+		BrokerToken:     brokerToken,
+		LaunchWrapper:   identity.LaunchWrapper,
+		Launch:          identity.Launch,
+		Provenance:      runtime.DirectLaunchProvenance(child.id, label, launchAttempt),
 	}, resumeID)
 }
 
@@ -5306,6 +5315,10 @@ func (s *Supervisor) resolveDirectSpawnIdentity(params SpawnParams) (SpawnParams
 			return params, backend, err
 		}
 		params.launchInput = entry.Input
+		// The roster's persisted-session choice applies when the spawn did not
+		// set its own; the nil-vs-explicit distinction is what lets a spawn
+		// force ephemeral under an entry that persists.
+		params.PersistSessions = rosterconfig.MergePersistChoice(params.PersistSessions, entry.PersistSessions)
 	} else {
 		// No roster entry selects a launch: a backend that starts a configured
 		// binary still resolves its default here.
@@ -6516,6 +6529,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
+		params.PersistSessions = ec.Selection.PersistSessions
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
@@ -6577,6 +6591,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
+		params.PersistSessions = ec.Selection.PersistSessions
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
@@ -6639,6 +6654,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Backend = ec.Selection.Backend
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
+		params.PersistSessions = ec.Selection.PersistSessions
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}

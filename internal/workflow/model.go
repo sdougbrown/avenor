@@ -353,6 +353,11 @@ type PermissionDecider struct {
 	Backend  string `json:"backend,omitempty"`
 	Agent    string `json:"agent,omitempty"`
 	Model    string `json:"model,omitempty"`
+	// PersistSessions carries the decider entry's persisted-session choice
+	// (nil inherits the environment): without it a decider entry that forces
+	// ephemeral still writes pi session files whenever the environment opts
+	// in, and one that forces persistence keeps no decider transcript.
+	PersistSessions *bool `json:"persist_sessions,omitempty"`
 }
 
 // PermissionModelDecider is the resolved direct-model decider target for a
@@ -375,6 +380,10 @@ type ExecutionSelection struct {
 	Model        string `json:"model,omitempty"`
 	Thinking     string `json:"thinking,omitempty"`
 	RosterDigest string `json:"roster_digest,omitempty"`
+	// PersistSessions carries the roster entry's persisted-session choice:
+	// nil inherits the environment, true and false force the choice for the
+	// node's runtime (pi: a session directory instead of --no-session).
+	PersistSessions *bool `json:"persist_sessions,omitempty"`
 	// AutoApprove carries the assignment's unattended permission policy:
 	// every permission request is resolved as allow and no file permission
 	// handler is derived for the spawned runtime.

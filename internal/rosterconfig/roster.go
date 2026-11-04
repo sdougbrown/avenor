@@ -31,6 +31,11 @@ type Entry struct {
 	Model    string `json:"model,omitempty"`
 	Thinking string `json:"thinking,omitempty"`
 	backendlaunch.Input
+	// PersistSessions opts runs of this entry into a persisted session
+	// store where the backend supports it (pi: a session directory instead
+	// of --no-session). Nil inherits the environment; true and false force
+	// the choice for the entry's runs unless the spawn sets its own.
+	PersistSessions *bool `json:"persist_sessions,omitempty"`
 }
 
 // Config is the top-level roster map, keyed by roster entry name.
@@ -176,6 +181,9 @@ type ResolvedSelection struct {
 	// Launch is the executable identity the selected backend resolves from its
 	// roster entry. It is zero for backends that start no configured binary.
 	Launch backendlaunch.Spec
+	// PersistSessions carries the selected roster entry's persisted-session
+	// choice; nil when the entry sets none.
+	PersistSessions *bool
 }
 
 // Resolve applies roster and phase selection precedence without mutating any
@@ -199,11 +207,12 @@ func Resolve(input ResolveInput) (ResolvedSelection, error) {
 			return ResolvedSelection{}, err
 		}
 		return ResolvedSelection{
-			Backend:  input.Roster.Backend,
-			Agent:    input.Roster.Agent,
-			Model:    input.Roster.Model,
-			Thinking: input.Roster.Thinking,
-			Launch:   launch,
+			Backend:         input.Roster.Backend,
+			Agent:           input.Roster.Agent,
+			Model:           input.Roster.Model,
+			Thinking:        input.Roster.Thinking,
+			Launch:          launch,
+			PersistSessions: input.Roster.PersistSessions,
 		}, nil
 	}
 
@@ -232,4 +241,17 @@ func Resolve(input ResolveInput) (ResolvedSelection, error) {
 
 func hasValue(value string) bool {
 	return strings.TrimSpace(value) != ""
+}
+
+// MergePersistChoice layers the spawn request's tri-state persisted-session
+// choice over the roster entry's: an explicit request wins — matching every
+// sibling identity merge (thinking, backend, model) — the entry's choice
+// fills the gap, and nil on both inherits the environment. Every surface
+// that reads a roster entry's persist_sessions merges through here, so the
+// precedence has one home.
+func MergePersistChoice(request, entry *bool) *bool {
+	if request != nil {
+		return request
+	}
+	return entry
 }

@@ -179,15 +179,36 @@ func sameSelection(a, b *ExecutionSelection) bool {
 	if !samePermissionModelDecider(a.PermissionModelDecider, b.PermissionModelDecider) {
 		return false
 	}
+	if !samePersistChoice(a.PersistSessions, b.PersistSessions) {
+		return false
+	}
 	x, y := *a, *b
 	x.PermissionDecider, y.PermissionDecider = nil, nil
 	x.PermissionModelDecider, y.PermissionModelDecider = nil, nil
+	x.PersistSessions, y.PersistSessions = nil, nil
 	return x == y
 }
 
 // samePermissionDecider reports whether two decider targets are identical.
 // Two nils are the same; a nil and a non-nil are not.
 func samePermissionDecider(a, b *PermissionDecider) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	x, y := *a, *b
+	x.PersistSessions, y.PersistSessions = nil, nil
+	if x != y {
+		return false
+	}
+	return samePersistChoice(a.PersistSessions, b.PersistSessions)
+}
+
+// samePersistChoice reports whether two tri-state persisted-session choices
+// are identical. Two nils are the same; a nil and a non-nil are not; the
+// pinned selection and a freshly resolved one unmarshal into separate
+// pointers, so pointer identity would wrongly reject every re-dispatch of a
+// node whose entry sets the choice.
+func samePersistChoice(a, b *bool) bool {
 	if a == nil || b == nil {
 		return a == b
 	}

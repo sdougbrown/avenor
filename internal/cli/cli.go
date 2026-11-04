@@ -273,6 +273,11 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 		if opts.Thinking == "" {
 			opts.Thinking = entry.Thinking
 		}
+		// Same layering for the persisted-session choice, through the one
+		// merge every surface shares: the entry's choice fills the gap only
+		// when the flag was not given, so a direct roster run persists like
+		// every other surface reading this entry.
+		opts.PersistSessions = rosterconfig.MergePersistChoice(opts.PersistSessions, entry.PersistSessions)
 		if opts.Agent != "" && opts.Model == "" {
 			resolved, resolveErr := resolveAgentModel(opts.Agent, opts.Backend, getenv)
 			if resolveErr != nil {
@@ -580,7 +585,7 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 			fmt.Fprintf(stderr, "avenor: %v\n", err)
 			return attemptResult{exitCode: 1}
 		}
-		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: opts.Label, Dir: opts.Dir, ServerURL: discovery.URL, Thinking: selection.Thinking, PersistSessions: opts.PersistSessions, Launch: selection.Launch, Provenance: provenance}
+		startOptions := runtime.StartOptions{Agent: selection.Agent, Model: selection.Model, Label: opts.Label, Dir: opts.Dir, ServerURL: discovery.URL, Thinking: selection.Thinking, PersistSessions: rosterconfig.MergePersistChoice(opts.PersistSessions, selection.PersistSessions), Launch: selection.Launch, Provenance: provenance}
 		return runAttempt(ctx, attemptConfig{
 			startOptions:           startOptions,
 			backend:                selection.Backend,
