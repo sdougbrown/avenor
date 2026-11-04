@@ -41,6 +41,9 @@ var ErrUnsupportedLocalProtocol = fmt.Errorf(
 	messaging.ErrUnsupportedProtocol,
 )
 
+// ErrResponseTooLarge reports a broker response exceeding the response cap.
+var ErrResponseTooLarge = httpbase.ErrResponseTooLarge
+
 // Transport is the local HTTP messaging transport.
 type Transport struct {
 	*httpbase.Client

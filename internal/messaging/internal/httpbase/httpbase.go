@@ -29,6 +29,9 @@ const (
 // never follows one, so credentials cannot be offered to another host.
 var ErrRedirect = errors.New("messaging http: redirect refused")
 
+// ErrResponseTooLarge reports a response exceeding the configured response cap.
+var ErrResponseTooLarge = errors.New("messaging http: response too large")
+
 // Fence is the wire form of an ask fence. Both adapters decode it and report
 // it through the shared type.
 type Fence struct {
@@ -126,7 +129,7 @@ func (c *Client) Do(ctx context.Context, req *http.Request, timeout time.Duratio
 		return resp.StatusCode, nil, err
 	}
 	if len(raw) > MaxResponseBytes {
-		return resp.StatusCode, nil, fmt.Errorf("%w: response body exceeds %d bytes", c.malformed, MaxResponseBytes)
+		return resp.StatusCode, nil, fmt.Errorf("%w: %w: response body exceeds %d bytes", c.malformed, ErrResponseTooLarge, MaxResponseBytes)
 	}
 	return resp.StatusCode, raw, nil
 }

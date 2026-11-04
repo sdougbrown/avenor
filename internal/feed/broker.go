@@ -123,6 +123,7 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 			}
 		}
 	}
+	limit := b.Limit
 	for alive() && ctx.Err() == nil {
 		p, err := childmessaging.NewMessageProvider(messaging.SurfaceFeed, childmessaging.Options{RunID: b.RunID, Token: b.Token, BrokerURL: b.BrokerURL})
 		if err != nil {
@@ -139,11 +140,18 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		for err == nil && alive() && ctx.Err() == nil {
 			requestCtx, cancel = context.WithTimeout(context.Background(), b.RequestTimeout)
 			var result messaging.ReceiveResult
-			result, err = p.Receive(requestCtx, messaging.ReceiveRequest{Generation: p.Generation(), Timeout: b.RequestTimeout, Limit: b.Limit})
+			result, err = p.Receive(requestCtx, messaging.ReceiveRequest{Generation: p.Generation(), Timeout: b.RequestTimeout, Limit: limit})
 			cancel()
+			if errors.Is(err, localhttp.ErrResponseTooLarge) {
+				fmt.Fprintln(b.Log, "feed broker: drained batch exceeded response cap; rows lost (ids unknown)")
+				limit = 1
+				err = nil
+				continue
+			}
 			if err != nil {
 				break
 			}
+			limit = b.Limit
 			for i, row := range result.Messages {
 				var message broker.AgentMessage
 				if decodeErr := json.Unmarshal(row.Payload, &message); decodeErr != nil || message.Message == "" {
@@ -220,6 +228,9 @@ func (b Broker) lost(rows []messaging.InboundMessage) {
 
 // terminal classifies typed HTTP statuses before their wrapped sentinels.
 func terminal(err error) bool {
+	if errors.Is(err, localhttp.ErrResponseTooLarge) {
+		return false
+	}
 	var status *localhttp.StatusError
 	if errors.As(err, &status) {
 		if status.Status == http.StatusConflict || status.Status == http.StatusTooManyRequests {
