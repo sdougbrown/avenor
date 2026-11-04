@@ -577,11 +577,12 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 			return nil, fmt.Errorf("node assignment: permission_policy.decider: %w", err)
 		}
 		selection.PermissionDecider = &workflow.PermissionDecider{
-			Entry:    assignment.PermissionPolicy.Decider,
-			Thinking: entry.Thinking,
-			Backend:  entry.Backend,
-			Agent:    entry.Agent,
-			Model:    entry.Model,
+			Entry:           assignment.PermissionPolicy.Decider,
+			Thinking:        entry.Thinking,
+			Backend:         entry.Backend,
+			Agent:           entry.Agent,
+			Model:           entry.Model,
+			PersistSessions: entry.PersistSessions,
 		}
 	}
 	if assignment.PermissionPolicy != nil && assignment.PermissionPolicy.DeciderModel != nil {

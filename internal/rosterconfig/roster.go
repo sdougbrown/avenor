@@ -242,3 +242,16 @@ func Resolve(input ResolveInput) (ResolvedSelection, error) {
 func hasValue(value string) bool {
 	return strings.TrimSpace(value) != ""
 }
+
+// MergePersistChoice layers the spawn request's tri-state persisted-session
+// choice over the roster entry's: an explicit request wins — matching every
+// sibling identity merge (thinking, backend, model) — the entry's choice
+// fills the gap, and nil on both inherits the environment. Every surface
+// that reads a roster entry's persist_sessions merges through here, so the
+// precedence has one home.
+func MergePersistChoice(request, entry *bool) *bool {
+	if request != nil {
+		return request
+	}
+	return entry
+}

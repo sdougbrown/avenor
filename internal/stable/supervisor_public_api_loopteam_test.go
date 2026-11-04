@@ -24,6 +24,7 @@ import (
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
@@ -1561,3 +1562,52 @@ func TestSupervisorPublicAPILoopPhaseRosterPersistLayersRunOverEntry(t *testing.
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestResumeGateFollowsPhasePersistChoice proves the resume gate reads the
+// persistence the phases actually launched with: a loop run whose phase
+// roster entry persists, on a run that set no choice of its own, stays
+// resumable after the parked runtime expires — the gate's recorded fact was
+// updated by the phase attempt, not left at the ephemeral run-level default.
+// Without the update the gate refuses the resume even though the session
+// file exists.
+func TestResumeGateFollowsPhasePersistChoice(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(
+		itestAttempt("ses_p1", itestSessionEnd("ses_p1", "end_turn", "only phase")),
+		itestAttempt("ses_p1", itestSessionEnd("ses_p1", "end_turn", "resumed")),
+	)
+	h := newItestHarness(t, Config{ParkedRuntimeTimeout: 20 * time.Millisecond}, itestSingleProvider(provider))
+
+	rosterPath := filepath.Join(t.TempDir(), "roster.json")
+	if err := os.WriteFile(rosterPath, []byte(`{"worker":{"backend":"pi","model":"m","persist_sessions":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := itestWorkflowConfig(t, "loop", map[string]any{
+		"max_iterations": 1,
+		"loop": []map[string]any{
+			{"name": "only", "prompt": "only work", "roster_entry": "worker"},
+		},
+	})
+	rt := h.spawnWorkflow("loop", file, map[string]any{"label": "loop-gate", "backend": "pi", "roster_file": rosterPath})
+	h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+	h.awaitCondition("runtime expired", func() bool {
+		child := h.sup.runtimeByID(rt)
+		child.mu.Lock()
+		defer child.mu.Unlock()
+		return child.lc.isCompleted()
+	})
+
+	// The workflow child leaves the broker on completion, so drive the resume
+	// gate through the supervisor's own entry point; the gate is what the fix
+	// pins.
+	child := h.sup.runtimeByID(rt)
+	child.mu.Lock()
+	runID := child.runID
+	child.mu.Unlock()
+	if _, err := h.sup.performResume(child, runID, messaging.ResumeRequest{Target: rt, Message: "again"}); err != nil {
+		t.Fatalf("Resume of a phase-persisted run = %v, want the gate to admit it", err)
+	}
+	if ids := provider.resumeIDs(); len(ids) != 1 || ids[0] != "ses_p1" {
+		t.Fatalf("Resume arguments = %v, want [ses_p1] (the phase's session)", ids)
+	}
+}

@@ -618,13 +618,14 @@ avenor_status for runtime_id %q (dispatched for label %q). Then either:
 Never answer blindly: allow only requests the task plainly needs.`,
 		decider.Entry, runtimeID, requestID, optionsJSON, runtimeID, label, runtimeID, requestID)
 	params := SpawnParams{
-		Prompt:   prompt,
-		Dir:      scratchDir,
-		Label:    deciderLabel,
-		Agent:    decider.Agent,
-		Model:    decider.Model,
-		Backend:  decider.Backend,
-		Thinking: decider.Thinking,
+		Prompt:          prompt,
+		Dir:             scratchDir,
+		Label:           deciderLabel,
+		Agent:           decider.Agent,
+		Model:           decider.Model,
+		Backend:         decider.Backend,
+		Thinking:        decider.Thinking,
+		PersistSessions: decider.PersistSessions,
 		// The decider must never block on its own permission prompts.
 		AutoApprove: true,
 		// Marks the run as a permission decider so it ends after its single

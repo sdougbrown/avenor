@@ -353,6 +353,11 @@ type PermissionDecider struct {
 	Backend  string `json:"backend,omitempty"`
 	Agent    string `json:"agent,omitempty"`
 	Model    string `json:"model,omitempty"`
+	// PersistSessions carries the decider entry's persisted-session choice
+	// (nil inherits the environment): without it a decider entry that forces
+	// ephemeral still writes pi session files whenever the environment opts
+	// in, and one that forces persistence keeps no decider transcript.
+	PersistSessions *bool `json:"persist_sessions,omitempty"`
 }
 
 // PermissionModelDecider is the resolved direct-model decider target for a

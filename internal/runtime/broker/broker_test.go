@@ -3234,6 +3234,7 @@ func getSessions(addr, runID, token string) (*http.Response, error) {
 	req.Header.Set(messaging.HeaderRunToken, token)
 	return http.DefaultClient.Do(req)
 }
+
 // recordingSeam records the fire-and-forget tells that pass through it and
 // delegates everything else to the seam it wraps.
 type recordingSeam struct {

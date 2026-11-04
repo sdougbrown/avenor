@@ -752,3 +752,42 @@ func TestSameSelectionComparesModelDeciderByContent(t *testing.T) {
 		t.Fatal("a swapped decider variant must fail the selection-conflict check")
 	}
 }
+
+// TestSameSelectionComparesPersistSessionsByContent pins the re-dispatch
+// guard for the persisted-session choice: the pinned selection and a freshly
+// resolved one unmarshal into separate pointers, so a persisting entry must
+// compare by content — pointer identity would fail every re-dispatch of a
+// node whose entry sets the choice.
+func TestSameSelectionComparesPersistSessionsByContent(t *testing.T) {
+	t.Parallel()
+	pinned := &ExecutionSelection{PersistSessions: boolPtr(true)}
+	fresh := &ExecutionSelection{PersistSessions: boolPtr(true)}
+	if !sameSelection(pinned, fresh) {
+		t.Fatal("identical persist choices must compare equal despite distinct pointers")
+	}
+	if sameSelection(pinned, &ExecutionSelection{PersistSessions: boolPtr(false)}) {
+		t.Fatal("a changed persist choice must fail the selection-conflict check")
+	}
+	if sameSelection(pinned, &ExecutionSelection{}) {
+		t.Fatal("a dropped persist choice must fail the selection-conflict check")
+	}
+	if sameSelection(&ExecutionSelection{}, pinned) {
+		t.Fatal("an added persist choice must fail the selection-conflict check")
+	}
+}
+
+// TestSamePermissionDeciderComparesPersistSessionsByContent pins the decider
+// content equality over its tri-state persist choice.
+func TestSamePermissionDeciderComparesPersistSessionsByContent(t *testing.T) {
+	t.Parallel()
+	pinned := &PermissionDecider{Entry: "rm-guard", PersistSessions: boolPtr(false)}
+	fresh := &PermissionDecider{Entry: "rm-guard", PersistSessions: boolPtr(false)}
+	if !samePermissionDecider(pinned, fresh) {
+		t.Fatal("identical deciders must compare equal despite distinct persist pointers")
+	}
+	if samePermissionDecider(pinned, &PermissionDecider{Entry: "rm-guard", PersistSessions: boolPtr(true)}) {
+		t.Fatal("a changed decider persist choice must fail the equality check")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
