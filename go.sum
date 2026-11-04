@@ -22,8 +22,8 @@ github.com/sdougbrown/cli-contract v0.5.0 h1:yhE2mu4CHjoCUzjvfqgMqQTXHZa7fcokKxs
 github.com/sdougbrown/cli-contract v0.5.0/go.mod h1:+a2rSY4b3JzSWgqaY81Pl8xQaVzMTWcW2m+dH+YsoyY=
 github.com/sdougbrown/cli-registry v0.1.1 h1:y+ciPIS1lPm0DFCm0iCEQ/sVBd82RVVp3QS6Uy/r+QU=
 github.com/sdougbrown/cli-registry v0.1.1/go.mod h1:6Eu42h9COF8QgCjU8fRxrYe07BB+1EK0LInwdhRTpWc=
-github.com/sdougbrown/poo v0.1.0 h1:ywXm143rW7LYkl27jOJ1F6sVUYdBbLn6SEg2G6yfyyY=
-github.com/sdougbrown/poo v0.1.0/go.mod h1:mmviQOFsrjRBleYAQL8pmJcOZYWHLoVkgN6czMEG2qE=
+github.com/sdougbrown/poo v0.2.0 h1:QzUyWrx+1hWcsF5dsIVQkk4kI6Zr9uU3pRczNuSt8T0=
+github.com/sdougbrown/poo v0.2.0/go.mod h1:mmviQOFsrjRBleYAQL8pmJcOZYWHLoVkgN6czMEG2qE=
 github.com/segmentio/asm v1.1.3 h1:WM03sfUOENvvKexOLp+pCqgb/WDjsi7EK8gIsICtzhc=
 github.com/segmentio/asm v1.1.3/go.mod h1:Ld3L4ZXGNcSLRg4JBsZ3//1+f/TjYl0Mzen/DQy1EJg=
 github.com/segmentio/encoding v0.5.4 h1:OW1VRern8Nw6ITAtwSZ7Idrl3MXCFwXHPgqESYfvNt0=
