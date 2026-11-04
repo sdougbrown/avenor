@@ -122,10 +122,10 @@ export function makeMessageProvider(overrides: Partial<MessageProvider> = {}): M
 // callbacks and poll timers these conditions wait on. A longer budget cannot
 // turn a failing predicate green — the predicate still has to become true
 // for the test to pass — so a masked flake costs a full CI round-trip while
-// a longer budget only slows genuine failures. Every wait budget in this
-// fixture — and the per-test timeouts that race them, including bun:test's
-// own default cap in the root bunfig.toml — derives from the CI policy, so
-// it has one home.
+// a longer budget only slows genuine failures. Wait budgets in this fixture
+// derive from scaleMs; bun:test's default per-test cap rides along via the
+// --timeout 30000 flag in mise.toml's js-test task (unscaled — it clears the
+// largest scaled budget with headroom at either factor).
 export function scaleMs(base: number): number {
 	return process.env.CI ? base * 5 : base
 }

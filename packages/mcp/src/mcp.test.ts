@@ -85,15 +85,13 @@ beforeEach(() => {
 })
 
 // Snapshot the real core module before any mock is registered: the spread
-// below keeps every unoverridden export real, so the facade's surface stays
+// below keeps every unoverridden export real, so the mocked surface stays
 // complete for the server's consumers.
-import * as coreModule from '@dougbots/avenor-core'
+import * as coreModule from '../../core/src/index.js'
 
-// Mock the package-local facade, not the shared specifier — see
-// packages/opencode/src/plugin.test.ts for the full rationale. The facade's
-// owned consts (see mcp-core-deps.ts) keep the mock from aliasing the shared
-// specifier's slots, so no teardown is needed.
-mock.module('./mcp-core-deps.js', () => ({
+// Mock the shared core module for this package's tests — same shape as
+// packages/opencode/src/plugin.test.ts.
+mock.module('@dougbots/avenor-core', () => ({
   ...coreModule,
   spawnTool: mock(async () => ({})),
   statusTool: mock(async () => ({ runs: [], count: 0 })),
