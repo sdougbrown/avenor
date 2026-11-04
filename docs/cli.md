@@ -339,6 +339,34 @@ Then spawn runtimes via `avenor control spawn`. See [stable.md](stable.md),
 [messaging.md](messaging.md#running-a-hub) and
 [control-protocol.md](control-protocol.md) for full details.
 
+## avenor message
+
+Send broker messages as the current child run, not as the supervisor:
+
+```sh
+avenor message tell --text "Status update" [--target supervisor]
+avenor message ask --text "Question?" [--target supervisor] [--timeout-ms 30000]
+avenor message reply --reply-to MESSAGE_ID --to ASKER_RUN_ID --text "Answer"
+```
+
+`--target` accepts a broker run ID or label and defaults to `supervisor`.
+For a reply to an ask, `--to` must be the asker's broker run ID. Omit `--to`
+when replying to a tell; the broker finds its sender from the message ID. A
+wrong `--to` with no matching ask edge delivers the reply to that run as an
+ordinary message and does not answer the original ask.
+
+Each command uses `AVENOR_BROKER_URL`, `AVENOR_BROKER_TOKEN` and
+`AVENOR_RUN_ID`, or the respective `--broker-url`, `--token` and `--run-id`
+flags. Prefer the environment for the token: command arguments can be visible
+to other processes. A non-negative `--timeout-ms` is capped at 600000; zero
+or omission uses the shared default of 600 seconds.
+
+Results are JSON with `action`, `outcome`, `text` and, where applicable,
+`message_id` and `reply`. Router outcomes exit 0, including `timed-out`: the
+ask remains open for a later reply. Refusals and transport errors exit 1;
+invalid arguments or missing credentials exit 2. See [messaging.md](messaging.md)
+for the transport and addressing rules.
+
 ## avenor control
 
 Send commands to a running supervisor or standalone run with a control socket. The supervisor must be listening on `--control-socket`.

@@ -69,6 +69,19 @@ spawns start a separate supervisor whose broker has no reader for this session.
 These children need an address supplied in the brief; the extension does not
 forward their asks to the parent.
 
+## Child CLI messages
+
+A child with broker credentials can use `avenor message tell`, `ask` and
+`reply` to route messages as its own run. The commands use the same router as
+other messaging surfaces. The CLI reference documents their flags and exit
+codes: [avenor message](cli.md#avenor-message).
+
+For an ask, pass the sender's broker run ID as `--to` when replying. Without
+`--to`, the broker resolves a reply to a tell from the message ID. If `--to`
+names a run with no matching ask edge, the broker delivers the reply to that
+run as a plain message (`sent`); the original ask remains unanswered. A
+`timed-out` ask exits 0 and remains open to a later reply.
+
 ## Transport contract
 
 ```go
