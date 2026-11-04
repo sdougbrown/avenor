@@ -170,7 +170,13 @@ func TestAskRecordFailureDoesNotLoseDelivery(t *testing.T) {
 	}
 	cancel()
 	awaitExit(t, done)
-	if !strings.Contains(out.String(), "private text") || !strings.Contains(logs.String(), "ask-id") || strings.Contains(logs.String(), "private text") {
+	var line struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &line); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(line.Text, "private text") || !strings.HasSuffix(line.Text, `This message is an ask from "sender", but it cannot be answered here.`) || strings.Contains(line.Text, "avenor_reply") || !strings.Contains(logs.String(), "ask-id") || strings.Contains(logs.String(), "private text") {
 		t.Fatalf("output=%q log=%q", out.String(), logs.String())
 	}
 }

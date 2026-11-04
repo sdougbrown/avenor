@@ -157,12 +157,14 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 				}
 				text := message.Message
 				if message.ExpectsReply {
+					quotedSender, _ := json.Marshal(sender)
 					if err := askclaim.Record(b.AsksDir, id, row.FromRunID); err != nil {
 						fmt.Fprintf(b.Log, "feed broker: failed to record ask id %q\n", id)
+						text += fmt.Sprintf("\n\nThis message is an ask from %s, but it cannot be answered here.", quotedSender)
+					} else {
+						quotedID, _ := json.Marshal(id)
+						text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_reply\", \"args\": {\"reply_to\": %s, \"text\": \"...\"}}.", quotedSender, quotedID)
 					}
-					quotedID, _ := json.Marshal(id)
-					quotedSender, _ := json.Marshal(sender)
-					text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_reply\", \"args\": {\"reply_to\": %s, \"text\": \"...\"}}.", quotedSender, quotedID)
 				}
 				line := struct {
 					Text string `json:"text"`
