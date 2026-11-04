@@ -479,7 +479,7 @@ func TestSurfaceVocabulary(t *testing.T) {
 		string(SurfaceMCP): true, string(SurfaceChanneltools): true,
 		string(SurfaceSidecar): true, string(SurfacePiHost): true,
 		string(SurfacePiChild): true, string(SurfaceOpenCode): true,
-		string(SurfaceMCPTS): true,
+		string(SurfaceMCPTS): true, string(SurfaceFeed): true,
 	}
 	cases, err := LoadConformanceCases("../../schemas/message_route.conformance.json")
 	if err != nil {
