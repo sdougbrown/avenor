@@ -509,6 +509,18 @@ func (e envelope) fenceAck() messaging.FenceAck {
 	return e.Fence.Ack()
 }
 
+// StatusError reports an HTTP status with its existing local protocol classification.
+type StatusError struct {
+	Status int
+	err    error
+}
+
+// Error returns the classified error message.
+func (e *StatusError) Error() string { return e.err.Error() }
+
+// Unwrap returns the classified error.
+func (e *StatusError) Unwrap() error { return e.err }
+
 // statusError classifies a response the messaging envelope does not describe.
 // The local router's auth layer answers before a messaging handler, so only a
 // 401 there is a credential rejection; a 403 is the router's not-ask-target
@@ -517,13 +529,15 @@ func statusError(e envelope) error {
 	if e.Status == http.StatusOK {
 		return nil
 	}
+	var err error
 	if e.Status == http.StatusUnauthorized {
-		return fmt.Errorf("%w: local broker rejected the run token", messaging.ErrAuthRejected)
+		err = fmt.Errorf("%w: local broker rejected the run token", messaging.ErrAuthRejected)
+	} else if e.Error != "" {
+		err = fmt.Errorf("%w: local broker answered %d: %s", ErrUnsupportedLocalProtocol, e.Status, e.Error)
+	} else {
+		err = fmt.Errorf("%w: local broker answered %d without a messaging result", ErrUnsupportedLocalProtocol, e.Status)
 	}
-	if e.Error != "" {
-		return fmt.Errorf("%w: local broker answered %d: %s", ErrUnsupportedLocalProtocol, e.Status, e.Error)
-	}
-	return fmt.Errorf("%w: local broker answered %d without a messaging result", ErrUnsupportedLocalProtocol, e.Status)
+	return &StatusError{Status: e.Status, err: err}
 }
 
 // unenvelopedOutcome reports the outcome for a response the messaging envelope
