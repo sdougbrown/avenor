@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -41,7 +42,15 @@ func handleFeedBroker(ctx context.Context, inv clicontract.Invocation, stderr io
 		return nil, usageErrorf("avenor feed broker: broker URL, run id, and token are required")
 	}
 	lockDir := orDefault(inv.Flags["lock-dir"], filepath.Join(appdir.StateHome(), "feed-locks"))
-	asksDir := orDefault(inv.Flags["asks-dir"], askclaim.DefaultDir(appdir.StateHome(), brokerURL, runID))
+	asksDir := inv.Flags["asks-dir"]
+	if asksDir == "" {
+		var err error
+		asksDir, err = askclaim.DefaultDir(appdir.StateHome(), brokerURL, runID)
+		if err != nil {
+			fmt.Fprintln(stderr, "feed broker: invalid broker URL")
+			return exitCode(1), nil
+		}
+	}
 	signal.Ignore(syscall.SIGPIPE)
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

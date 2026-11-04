@@ -156,10 +156,33 @@ func TestInvalidMessageIDDoesNotTouchFilesystem(t *testing.T) {
 // TestDefaultDirNormalizesBrokerIdentity checks equivalent and separate brokers.
 func TestDefaultDirNormalizesBrokerIdentity(t *testing.T) {
 	root := t.TempDir()
-	a := DefaultDir(root, "http://EXAMPLE.com:80/", "rt_1")
-	b := DefaultDir(root, "http://example.com", "rt_1")
-	if a != b || a == DefaultDir(root, "http://example.com:81", "rt_1") || a == DefaultDir(root, "http://example.com", "rt_2") {
+	a, err := DefaultDir(root, "http://EXAMPLE.com:80/", "rt_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := DefaultDir(root, "http://example.com", "rt_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := DefaultDir(root, "http://example.com:81", "rt_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := DefaultDir(root, "http://example.com", "rt_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b || a == c || a == d {
 		t.Fatalf("identity collision: %q %q", a, b)
+	}
+}
+
+// TestDefaultDirRejectsInvalidBroker rejects the same URLs as BrokerKey.
+func TestDefaultDirRejectsInvalidBroker(t *testing.T) {
+	for _, raw := range []string{"not-a-url", "http://user:secret@example.com", "http://example.com/?query=x"} {
+		if dir, err := DefaultDir(t.TempDir(), raw, "r"); err == nil || dir != "" {
+			t.Fatalf("url %q returned %q, %v", raw, dir, err)
+		}
 	}
 }
 

@@ -38,7 +38,10 @@ func TestFeedAskDirectory(t *testing.T) {
 			}))
 			defer s.Close()
 			root := t.TempDir()
-			asksDir := askclaim.DefaultDir(filepath.Join(root, "avenor"), s.URL, "r")
+			asksDir, err := askclaim.DefaultDir(filepath.Join(root, "avenor"), s.URL, "r")
+			if err != nil {
+				t.Fatal(err)
+			}
 			customDir := ""
 			if custom {
 				customDir = filepath.Join(root, "custom")
@@ -87,6 +90,20 @@ func TestFeedAskDirectory(t *testing.T) {
 				t.Fatalf("exit: %v; stderr %q", err, stderr.String())
 			}
 		})
+	}
+}
+
+// TestFeedRejectsInvalidBrokerURL checks both default and custom ask directories.
+func TestFeedRejectsInvalidBrokerURL(t *testing.T) {
+	for _, custom := range []bool{false, true} {
+		args := []string{"feed", "broker", "--broker-url", "invalid-url", "--run-id", "r", "--token", "t"}
+		if custom {
+			args = append(args, "--asks-dir", t.TempDir())
+		}
+		var out, stderr bytes.Buffer
+		if code := runDeclared(args, &out, &stderr); code != 1 || out.Len() != 0 {
+			t.Fatalf("custom=%v exit=%d stdout=%q stderr=%q", custom, code, out.String(), stderr.String())
+		}
 	}
 }
 

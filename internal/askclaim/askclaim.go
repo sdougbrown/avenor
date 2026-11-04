@@ -152,12 +152,11 @@ func BrokerKey(brokerURL, runID string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// DefaultDir returns the claim directory for a broker and receiving run.
-func DefaultDir(stateHome, brokerURL, runID string) string {
+// DefaultDir returns the claim directory for a valid broker and receiving run.
+func DefaultDir(stateHome, brokerURL, runID string) (string, error) {
 	key, err := BrokerKey(brokerURL, runID)
 	if err != nil {
-		sum := sha256.Sum256([]byte(brokerURL + "\x00" + runID))
-		key = hex.EncodeToString(sum[:])
+		return "", err
 	}
-	return filepath.Join(stateHome, "feed-asks", key)
+	return filepath.Join(stateHome, "feed-asks", key), nil
 }
