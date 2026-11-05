@@ -2851,8 +2851,16 @@ func (x brokerBackend) Receive(sender string, limit int) ([]messaging.InboundMes
 		if sender == "" {
 			sender = am.From
 		}
+		// The payload id stays authoritative, and the envelope id fills in when
+		// the payload carries none: a surface that queues its correlation id on
+		// the envelope only (the Pi host tell) still names the id a reply
+		// correlates against.
+		messageID := am.ID
+		if messageID == "" {
+			messageID = msg.ID
+		}
 		out = append(out, messaging.InboundMessage{
-			MessageID: am.ID,
+			MessageID: messageID,
 			FromRunID: msg.FromRunID,
 			Sender:    sender,
 			Kind:      msg.Type,

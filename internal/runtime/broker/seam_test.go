@@ -635,6 +635,62 @@ func TestLocalMessengerReceiveDrainsBoundedAgentMessages(t *testing.T) {
 	}
 }
 
+// TestLocalMessengerReceiveNamesEnvelopeOnlyTell pins that the public receive
+// path names a message whose surface queued its id on the envelope only (the Pi
+// host tell), while a payload id keeps naming the message it always did. The
+// payload is handed back exactly as it was queued.
+func TestLocalMessengerReceiveNamesEnvelopeOnlyTell(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	ctx := context.Background()
+
+	// A surface can name its tell's id on the envelope only: /send reads both
+	// and queues the payload as the sender wrote it.
+	status, body := postAuthBroker(t, b.Addr(), "/send", "sender", senderToken, map[string]any{
+		"from_run_id": "sender",
+		"to_run_id":   "target",
+		"type":        "agent_message",
+		"message_id":  "av1.m.envelope",
+		"payload":     map[string]any{"from_run_id": "sender", "message": "fyi"},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("/send = %d %v, want the tell queued", status, body)
+	}
+
+	// A payload id stays authoritative when a row carries both.
+	payloadID := json.RawMessage(`{"id":"av1.m.payload","from_run_id":"sender","message":"fyi"}`)
+	if err := b.SendTo("sender", "target", "agent_message", payloadID, "av1.m.envelope-two"); err != nil {
+		t.Fatalf("queue payload-id tell: %v", err)
+	}
+
+	res, err := b.LocalMessenger().Receive(ctx, messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "target"}})
+	if err != nil {
+		t.Fatalf("receive: %v", err)
+	}
+	if len(res.Messages) != 2 {
+		t.Fatalf("receive = %d messages, want 2", len(res.Messages))
+	}
+	if got := res.Messages[0].MessageID; got != "av1.m.envelope" {
+		t.Fatalf("envelope-only message id = %q, want the queued envelope id", got)
+	}
+	if got := res.Messages[1].MessageID; got != "av1.m.payload" {
+		t.Fatalf("payload message id = %q, want the payload id to stay authoritative", got)
+	}
+	// The envelope id names the message; it is not written into the payload.
+	var queued struct {
+		ID      string `json:"id"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(res.Messages[0].Payload, &queued); err != nil {
+		t.Fatalf("envelope-only payload: %v", err)
+	}
+	if queued.ID != "" || queued.Message != "fyi" {
+		t.Fatalf("envelope-only payload = %s, want the sent body with no id added", res.Messages[0].Payload)
+	}
+	if got := string(res.Messages[1].Payload); got != string(payloadID) {
+		t.Fatalf("payload-id payload = %s, want the queued payload untouched", got)
+	}
+}
+
 // TestLocalMessengerPreflightReportsTheStoreGeneration pins that the direct
 // seam's preflight reports the shared protocol and the store's actual
 // generation, following a reset that rotates it.
