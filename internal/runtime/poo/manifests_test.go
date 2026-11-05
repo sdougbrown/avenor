@@ -164,13 +164,14 @@ func TestPublishManifestsPrunesOldDigests(t *testing.T) {
 	base := filepath.Dir(filepath.Dir(current.feeds))
 	old := filepath.Join(base, strings.Repeat("a", 64))
 	fresh := filepath.Join(base, strings.Repeat("b", 64))
-	for _, dir := range []string{old, fresh} {
+	nonHex := filepath.Join(base, "G"+strings.Repeat("0", 63))
+	for _, dir := range []string{old, fresh, nonHex} {
 		if err := os.Mkdir(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	past := time.Now().Add(-8 * 24 * time.Hour)
-	for _, dir := range []string{old, filepath.Dir(current.feeds)} {
+	for _, dir := range []string{old, nonHex, filepath.Dir(current.feeds)} {
 		if err := os.Chtimes(dir, past, past); err != nil {
 			t.Fatal(err)
 		}
@@ -181,7 +182,7 @@ func TestPublishManifestsPrunesOldDigests(t *testing.T) {
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Fatalf("old digest remains: %v", err)
 	}
-	for _, dir := range []string{fresh, filepath.Dir(current.feeds)} {
+	for _, dir := range []string{fresh, nonHex, filepath.Dir(current.feeds)} {
 		if _, err := os.Stat(dir); err != nil {
 			t.Fatalf("kept digest %s: %v", dir, err)
 		}
