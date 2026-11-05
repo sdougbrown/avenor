@@ -605,10 +605,22 @@ func TestMessagingMissingRunIsNotFallback(t *testing.T) {
 	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "missing", "token", true
 	p := NewWithOptions(opts)
 	defer p.Close()
-	_, err := p.Start(context.Background(), avruntime.StartOptions{})
-	var unavailable *avruntime.MessagingUnavailableError
-	if err == nil || !strings.Contains(err.Error(), "broker has no run record for missing") || errors.As(err, &unavailable) {
-		t.Fatalf("error = %v, want provisioning error", err)
+	on := true
+	for _, tc := range []struct {
+		name      string
+		messaging *bool
+	}{
+		{"default", nil},
+		{"explicit", &on},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The resolved messaging state accompanies an explicit request.
+			_, err := p.Start(context.Background(), avruntime.StartOptions{Messaging: tc.messaging, MessagingOn: true})
+			var unavailable *avruntime.MessagingUnavailableError
+			if err == nil || !strings.Contains(err.Error(), "broker has no run record for missing") || errors.As(err, &unavailable) {
+				t.Fatalf("error = %v, want provisioning error without fallback", err)
+			}
+		})
 	}
 }
 

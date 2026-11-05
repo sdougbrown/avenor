@@ -273,6 +273,9 @@ func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, b
 			err = &messagingFailure{reason: "the run has no broker identity"}
 		} else if opts.MessagingOn {
 			if _, ok := opts.Broker.LastPolled(opts.RuntimeID); !ok {
+				// A missing record violates a provisioning invariant, not a poo
+				// messaging capability. Return a retryable error rather than
+				// misreporting a version failure or hiding it with fallback.
 				err = fmt.Errorf("broker has no run record for %s", opts.RuntimeID)
 			}
 		}
