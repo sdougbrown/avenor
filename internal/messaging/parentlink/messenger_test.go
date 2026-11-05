@@ -74,7 +74,7 @@ func TestMessengerRoutesALocalTargetLocally(t *testing.T) {
 		return http.StatusOK, `{}`
 	})
 	local := newStubMessenger()
-	local.reachable["run-local"] = true
+	local.holds["run-local"] = true
 	local.sendResult = messaging.SendResult{Outcome: messaging.OutcomeSent, MessageID: "msg-1"}
 	messenger := newTestMessenger(t, local, parent)
 
@@ -127,7 +127,7 @@ func TestMessengerReachableFollowsTheParent(t *testing.T) {
 		return http.StatusOK, `{"generation":"gen-a"}`
 	})
 	local := newStubMessenger()
-	local.reachable["run-local"] = true
+	local.holds["run-local"] = true
 
 	withParent := newTestMessenger(t, local, parent)
 	if !withParent.Reachable("run-local") {
@@ -320,7 +320,7 @@ func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
 	})
 	local := newStubMessenger()
 	local.peers = []messaging.Peer{{RunID: "run-collide"}}
-	local.reachable["run-collide"] = true
+	local.holds["run-collide"] = true
 	messenger := newTestMessenger(t, local, parent)
 	ctx := testContext(t)
 	if err := messenger.Start(ctx); err != nil {
