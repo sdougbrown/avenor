@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/sdougbrown/avenor/internal/messaging"
 	"net"
 	"net/url"
 	"os"
@@ -86,8 +87,15 @@ func Record(dir, messageID, askerRunID string) error {
 
 // BrokerKey hashes a normalized broker URL and run ID for local identity files.
 func BrokerKey(brokerURL, runID string) (string, error) {
-	u, err := url.Parse(brokerURL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	// The transport takes only a root URL, so the key accepts exactly
+	// what messaging.ParseBrokerURL does: a URL the feed cannot poll gets
+	// no lock and no asks directory.
+	root, err := messaging.ParseBrokerURL(brokerURL)
+	if err != nil || root == "" {
+		return "", fmt.Errorf("invalid broker URL")
+	}
+	u, err := url.Parse(root)
+	if err != nil {
 		return "", fmt.Errorf("invalid broker URL")
 	}
 	u.Scheme = strings.ToLower(u.Scheme)

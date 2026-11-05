@@ -127,7 +127,7 @@ func TestDefaultDirNormalizesBrokerIdentity(t *testing.T) {
 
 // TestDefaultDirRejectsInvalidBroker rejects the same URLs as BrokerKey.
 func TestDefaultDirRejectsInvalidBroker(t *testing.T) {
-	for _, raw := range []string{"not-a-url", "http://user:secret@example.com", "http://example.com/?query=x"} {
+	for _, raw := range []string{"not-a-url", "http://user:secret@example.com", "http://example.com/?query=x", "http://example.com:8080/api", ""} {
 		if dir, err := DefaultDir(t.TempDir(), raw, "r"); err == nil || dir != "" {
 			t.Fatalf("url %q returned %q, %v", raw, dir, err)
 		}
