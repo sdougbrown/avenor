@@ -254,7 +254,8 @@ contract, and no worker handoff exists.
 
 An assignment may set `messaging` to enable or disable poo messaging for a
 `run` node. Omitted defaults off for workflow nodes. Loop and team nodes refuse
-`messaging: true` with `messaging is not supported for loop and team phases`;
+`messaging: true` with `messaging is not supported for loop and team phases`
+when the template registers and again at dispatch for manual selections;
 explicit `false` is accepted. Poo messaging is not available at launch yet.
 
 ### Permission policy

@@ -63,6 +63,9 @@ func TestManualStartMessagingRefusalReleasesKey(t *testing.T) {
 func TestWorkflowAssignmentMessagingDispatch(t *testing.T) {
 	for _, kind := range []string{"run", "loop", "team"} {
 		for _, on := range []bool{false, true} {
+			if kind != "run" && on {
+				continue
+			}
 			t.Run(fmt.Sprintf("%s-%v", kind, on), func(t *testing.T) {
 				name := fmt.Sprintf("message-%s-%v", kind, on)
 				file := ""
@@ -87,12 +90,6 @@ func TestWorkflowAssignmentMessagingDispatch(t *testing.T) {
 				out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
 				if err != nil {
 					t.Fatal(err)
-				}
-				if kind != "run" && on {
-					if out.Kind != DispatchStartFailed || out.Detail != "messaging is not supported for loop and team phases" {
-						t.Fatalf("outcome: %+v", out)
-					}
-					return
 				}
 				if out.Kind != Dispatched {
 					t.Fatalf("outcome: %+v", out)
