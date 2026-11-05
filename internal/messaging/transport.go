@@ -79,6 +79,10 @@ type Seam interface {
 	Tell(ctx context.Context, req TellRequest) error
 	// Reachable reports whether runID can be reached from here.
 	Reachable(runID string) bool
+	// Holds reports whether this seam holds a record for runID, whatever the
+	// run's peer lease says. A target the seam holds is the seam's to answer
+	// or refuse, so a forward never carries it past this broker.
+	Holds(runID string) bool
 }
 
 // IncompletePeerListing is the reason a peer listing that could not be

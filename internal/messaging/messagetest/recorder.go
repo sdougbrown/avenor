@@ -15,11 +15,12 @@ type RecordedSend struct {
 
 // Recorder is a messaging.Seam that records the operations it serves and
 // forwards them to the seam it wraps, so a test can observe that a broker
-// path reached the messaging seam. ReachableFunc, when set, answers Reachable
-// instead of the wrapped seam.
+// path reached the messaging seam. ReachableFunc and HoldsFunc, when set,
+// answer Reachable and Holds instead of the wrapped seam.
 type Recorder struct {
 	Local         messaging.Seam
 	ReachableFunc func(runID string) bool
+	HoldsFunc     func(runID string) bool
 
 	mu        sync.Mutex
 	sends     []RecordedSend
@@ -70,6 +71,13 @@ func (r *Recorder) Reachable(runID string) bool {
 		return r.ReachableFunc(runID)
 	}
 	return r.Local.Reachable(runID)
+}
+
+func (r *Recorder) Holds(runID string) bool {
+	if r.HoldsFunc != nil {
+		return r.HoldsFunc(runID)
+	}
+	return r.Local.Holds(runID)
 }
 
 func (r *Recorder) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {

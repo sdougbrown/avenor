@@ -2971,6 +2971,13 @@ func (m localMessenger) Reachable(runID string) bool {
 	return m.broker.Reachable(runID)
 }
 
+// Holds reports whether this broker holds a record for runID, whatever the
+// run's peer lease says. A held target stays this broker's to answer or
+// refuse: a send that names it is never forwarded to a parent.
+func (m localMessenger) Holds(runID string) bool {
+	return m.broker.GetRun(runID) != nil
+}
+
 func (m localMessenger) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {
 	msgs, err := m.broker.store.Receive(req.Sender.RunID, messaging.ReceiveLimit(req.Limit))
 	return messaging.ReceiveResult{Messages: msgs, Generation: m.broker.store.Generation()}, err

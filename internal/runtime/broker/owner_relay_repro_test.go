@@ -2,10 +2,12 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/messagetest"
 	"github.com/sdougbrown/avenor/internal/messaging/parentlink"
 )
 
@@ -79,44 +81,56 @@ func TestOwnerTellToAChildOwnedRun(t *testing.T) {
 	}
 
 	// The control owner sends as the supervisor identity, both target spellings
-	// the resolution could produce.
+	// the resolution could produce, each pinning the store's generation.
+	generation := parent.Store().Generation()
+	now := time.Now()
 	for _, target := range []string{"claude-x", parentlink.ParentRunKey("child-1", "claude-x")} {
+		id, err := messaging.NewMsgID(now, time.Time{})
+		if err != nil {
+			t.Fatalf("mint message id: %v", err)
+		}
 		res, err := rootMessenger.Send(ctx, messaging.SendRequest{
-			From:      messaging.Identity{RunID: "supervisor"},
-			To:        messaging.Identity{RunID: target},
-			MessageID: "av1.owner.1",
-			Body:      `{"message":"hello from the host"}`,
-			NoReply:   true,
+			From:       messaging.Identity{RunID: "supervisor"},
+			To:         messaging.Identity{RunID: target},
+			MessageID:  id,
+			Generation: generation,
+			Body:       `{"message":"hello from the host"}`,
+			NoReply:    true,
 		})
 		t.Logf("tell to %q: outcome=%q err=%v", target, res.Outcome, err)
 	}
 
-	// And the ask shape, for completeness.
+	// The ask shape, for completeness.
+	askID, err := messaging.NewMsgID(now, time.Time{})
+	if err != nil {
+		t.Fatalf("mint ask id: %v", err)
+	}
 	res, err := rootMessenger.Send(ctx, messaging.SendRequest{
-		From:      messaging.Identity{RunID: "supervisor"},
-		To:        messaging.Identity{RunID: parentlink.ParentRunKey("child-1", "claude-x")},
-		MessageID: "av1.owner.2",
-		Body:      `{"message":"ask from the host"}`,
+		From:       messaging.Identity{RunID: "supervisor"},
+		To:         messaging.Identity{RunID: parentlink.ParentRunKey("child-1", "claude-x")},
+		MessageID:  askID,
+		Generation: generation,
+		Body:       `{"message":"ask from the host"}`,
 	})
 	t.Logf("ask: outcome=%q err=%v", res.Outcome, err)
 }
 
 // The live system's second failure shape: the host and the target live on the
 // SAME branch broker, but the target's peer consumer stopped polling, so the
-// record reads unavailable. The seam then forwards the send to the parent even
-// though the target is a run this broker owns — and a parent cannot route a
-// plain run id it only holds behind a namespaced claim key. This test pins
-// what happens today so the fix has a red to turn green.
+// record reads unavailable. The send must stay here — answered or refused by
+// this broker's own store — and never travel to the parent, which cannot route
+// a plain run id it only holds behind a namespaced claim key.
 func TestOwnerTellToAnIdleLocalRunIsNotForwardedUpward(t *testing.T) {
 	parent := New("")
 	if err := parent.Start(); err != nil {
 		t.Fatalf("start parent broker: %v", err)
 	}
 	t.Cleanup(func() { _ = parent.Stop() })
+	rootLocal := &messagetest.Recorder{Local: parent.LocalMessenger()}
 	rootMessenger, err := parentlink.New(parentlink.Options{
 		ChildID:    "root",
 		Generation: func() string { return parent.Store().Generation() },
-	}, parent.LocalMessenger())
+	}, rootLocal)
 	if err != nil {
 		t.Fatalf("build root messenger: %v", err)
 	}
@@ -131,6 +145,7 @@ func TestOwnerTellToAnIdleLocalRunIsNotForwardedUpward(t *testing.T) {
 	if _, err := child.CreateRun("claude-y", "claude-y"); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
+	childLocal := &messagetest.Recorder{Local: child.LocalMessenger()}
 	childLink, err := parentlink.New(parentlink.Options{
 		ParentURL:  "http://" + parent.Addr(),
 		Token:      "parent-token",
@@ -139,7 +154,7 @@ func TestOwnerTellToAnIdleLocalRunIsNotForwardedUpward(t *testing.T) {
 		Runs:       func() []messaging.RunClaim { return child.ParentRunClaims() },
 		Generation: func() string { return child.Store().Generation() },
 		RetireRun:  func(runID, token string) { child.DeleteRunIfToken(runID, token) },
-	}, child.LocalMessenger())
+	}, childLocal)
 	if err != nil {
 		t.Fatalf("build child link: %v", err)
 	}
@@ -163,14 +178,39 @@ func TestOwnerTellToAnIdleLocalRunIsNotForwardedUpward(t *testing.T) {
 	// idle Claude session does after the parked timeout.
 	parkUnavailable(t, child, "claude-y")
 
+	tellID, err := messaging.NewMsgID(time.Now(), time.Time{})
+	if err != nil {
+		t.Fatalf("mint tell id: %v", err)
+	}
 	res, err := childLink.Send(ctx, messaging.SendRequest{
-		From:      messaging.Identity{RunID: "supervisor"},
-		To:        messaging.Identity{RunID: "claude-y"},
-		MessageID: "av1.owner.3",
-		Body:      `{"message":"hello from the host"}`,
-		NoReply:   true,
+		From:       messaging.Identity{RunID: "supervisor"},
+		To:         messaging.Identity{RunID: "claude-y"},
+		MessageID:  tellID,
+		Generation: child.Store().Generation(),
+		Body:       `{"message":"hello from the host"}`,
+		NoReply:    true,
 	})
-	t.Logf("tell to an idle local run: outcome=%q err=%v", res.Outcome, err)
+	if err == nil {
+		t.Fatalf("tell to an idle local run = (%+v, nil), want a local refusal", res)
+	}
+	if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("tell to an idle local run err = %v, want ErrTargetUnavailable", err)
+	}
+	if res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("tell outcome = %q, want %q", res.Outcome, messaging.OutcomeNotSent)
+	}
+	// The send stayed here: the local seam served it and the parent never saw it.
+	for _, sent := range childLocal.Sends() {
+		if sent.Request.To.RunID != "claude-y" {
+			t.Fatalf("the local seam was asked for %q, want the idle local target only", sent.Request.To.RunID)
+		}
+	}
+	if len(childLocal.Sends()) != 1 {
+		t.Fatalf("the local seam saw %d sends, want the one idle local send", len(childLocal.Sends()))
+	}
+	if len(rootLocal.Sends()) != 0 {
+		t.Fatalf("the parent was asked for %d sends, want nothing forwarded", len(rootLocal.Sends()))
+	}
 }
 
 // parkUnavailable marks runID's peer unavailable on its own broker, the way a

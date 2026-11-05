@@ -81,12 +81,15 @@ func (m *Messenger) Close() error {
 }
 
 // Send admits an ask locally, in a child's queue through a relay, or in the
-// parent broker's store when no branch here can answer it.
+// parent broker's store when no branch here can answer it. A run the local
+// broker holds a record for is answered or refused here even when its peer
+// lease has expired: the target lives on this broker, so the send never
+// travels upward.
 func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	if m.registry.Owns(req.To.RunID) {
 		return m.sendToChild(ctx, req)
 	}
-	if m.up == nil || m.local.Reachable(req.To.RunID) {
+	if m.up == nil || m.local.Reachable(req.To.RunID) || m.local.Holds(req.To.RunID) {
 		return m.local.Send(ctx, req)
 	}
 	return m.up.Send(ctx, req)
@@ -159,12 +162,13 @@ func (m *Messenger) Reply(ctx context.Context, req messaging.ReplyRequest) (mess
 	return m.up.Reply(ctx, req)
 }
 
-// Tell publishes a fire-and-forget message.
+// Tell publishes a fire-and-forget message. A run the local broker holds a
+// record for is published or refused here, the same rule a send follows.
 func (m *Messenger) Tell(ctx context.Context, req messaging.TellRequest) error {
 	if m.registry.Owns(req.ToRunID) {
 		return m.down.Tell(ctx, req)
 	}
-	if m.up == nil || m.local.Reachable(req.ToRunID) {
+	if m.up == nil || m.local.Reachable(req.ToRunID) || m.local.Holds(req.ToRunID) {
 		return m.local.Tell(ctx, req)
 	}
 	return m.up.Tell(ctx, req)
@@ -173,12 +177,19 @@ func (m *Messenger) Tell(ctx context.Context, req messaging.TellRequest) error {
 // Reachable reports whether runID can be reached from here. A branch with a
 // parent reports every target it cannot answer itself as reachable: the parent
 // is the authority on what its descendants own, and the ask that follows carries
-// the refusal back. A local target never leaves this broker.
+// the refusal back. A run the local broker holds a record for is a local target
+// whatever its peer lease says, so it never leaves this broker.
 func (m *Messenger) Reachable(runID string) bool {
-	if m.local.Reachable(runID) || m.registry.Owns(runID) {
+	if m.local.Reachable(runID) || m.local.Holds(runID) || m.registry.Owns(runID) {
 		return true
 	}
 	return m.up != nil
+}
+
+// Holds reports whether the local seam holds a record for runID, whatever the
+// run's peer lease says.
+func (m *Messenger) Holds(runID string) bool {
+	return m.local.Holds(runID)
 }
 
 // Peers lists the participants reachable from here: this broker's own runs,
