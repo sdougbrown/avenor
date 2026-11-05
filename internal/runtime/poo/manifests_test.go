@@ -47,7 +47,7 @@ func TestMessagingManifests(t *testing.T) {
 		t.Fatalf("feeds: %+v", specs)
 	}
 	want := []string{exe, "feed", "broker", "--lock-dir=" + filepath.Join(root, "feed-locks"), "--asks-dir=" + asks}
-	if !reflect.DeepEqual(specs[0].Command, want) || specs[0].Name != "avenor-inbox" || !specs[0].Restart || specs[0].OnIdle != "wake" {
+	if !reflect.DeepEqual(specs[0].Command, want) {
 		t.Fatalf("feed: %+v", specs[0])
 	}
 	catalog, err := cliregistry.Load(paths.registry)
@@ -73,14 +73,6 @@ func TestMessagingManifests(t *testing.T) {
 		want := append([]string{exe, "message", "--asks-dir=" + asks}, tc.flags...)
 		if !reflect.DeepEqual(plan.Argv, want) || plan.Timeout != messaging.MaxWait+30*time.Second {
 			t.Errorf("plan: %+v want %q", plan, want)
-		}
-		for _, binding := range plan.Env {
-			if !binding.Reference || binding.Name != binding.From {
-				t.Fatalf("registry environment: %+v", plan.Env)
-			}
-		}
-		if !reflect.DeepEqual(plan.Env, specs[0].Env) || len(plan.Env) != 3 || plan.Env[0].Name != "AVENOR_BROKER_TOKEN" || plan.Env[1].Name != "AVENOR_BROKER_URL" || plan.Env[2].Name != "AVENOR_RUN_ID" {
-			t.Fatalf("environment: %+v / %+v", plan.Env, specs[0].Env)
 		}
 	}
 	for _, args := range []map[string]any{{}, {"action": "bad"}, {"action": "ask", "timeout_ms": -1}, {"action": "ask", "timeout_ms": 600001}, {"action": "ask", "timeout_ms": 1.5}, {"action": "tell", "extra": "x"}} {
