@@ -657,7 +657,8 @@ func (c *client) answerPermission(sessionID, requestID string, response runtime.
 
 // deliver fans an event out to the session's subscribers. It holds events
 // until the first subscriber attaches or the prompt's acceptance is recorded;
-// events between subscriptions belong to an unattended run and are not replayed.
+// events between subscriptions belong to an unattended run and are not replayed,
+// except permission requests and their answers.
 func (c *client) deliver(ev events.Event) {
 	c.mu.Lock()
 	if c.subs == nil {
@@ -668,7 +669,7 @@ func (c *client) deliver(ev events.Event) {
 	// names it, and a subscriber attaches only after Start returns: both are
 	// held here and flushed when someone is listening.
 	if c.holds[ev.SessionID] > 0 || len(c.subs[ev.SessionID]) == 0 {
-		if c.holds[ev.SessionID] > 0 || !c.subscribed[ev.SessionID] {
+		if c.holds[ev.SessionID] > 0 || !c.subscribed[ev.SessionID] || ev.Event == "permission.request" || ev.Event == "avenor.permission.answered" {
 			c.held[ev.SessionID] = appendBounded(c.held[ev.SessionID], ev)
 		}
 		c.mu.Unlock()
