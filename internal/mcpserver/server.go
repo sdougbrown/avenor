@@ -157,6 +157,7 @@ type spawnArgs struct {
 	LaunchWrapper  []string `json:"launch_wrapper,omitempty" jsonschema:"optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion."`
 	AutoApprove    bool     `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
 	PersistSession *bool    `json:"persist_sessions,omitempty" jsonschema:"optional persist the run's backend session (pi: a session directory instead of --no-session, enabling post-hoc transcripts and cross-process resume). Omitted inherits the supervisor's AVENOR_PI_SESSIONS environment; true and false force the choice for this run"`
+	Messaging      *bool    `json:"messaging,omitempty" jsonschema:"optional let a poo child send and receive Avenor messages; defaults on for a delegation spawn, and off for a workflow node, a loop or team phase, and a permission-decider run"`
 }
 
 // UnmarshalJSON makes the Go MCP spawn tool a strict raw boundary: unknown
@@ -1169,6 +1170,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	if args.PersistSession != nil {
 		params["persist_sessions"] = *args.PersistSession
+	}
+	if args.Messaging != nil {
+		params["messaging"] = *args.Messaging
 	}
 	if args.ServerURL != "" {
 		params["server_url"] = args.ServerURL

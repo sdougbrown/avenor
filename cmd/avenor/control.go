@@ -232,6 +232,9 @@ func spawnParamsFromInvocation(inv clicontract.Invocation) (map[string]any, erro
 	if inv.Supplied["persist-sessions"] {
 		params["persist_sessions"] = inv.Bools["persist-sessions"]
 	}
+	if inv.Supplied["messaging"] {
+		params["messaging"] = inv.Bools["messaging"]
+	}
 	if launchWrapper := launchWrapperFlag(inv.Events); len(launchWrapper) > 0 {
 		params["launch_wrapper"] = []string(launchWrapper)
 	}

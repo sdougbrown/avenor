@@ -158,6 +158,7 @@ type SpawnParams struct {
 	// of --no-session). Nil inherits the supervisor's AVENOR_PI_SESSIONS
 	// environment; true and false force the choice for this run.
 	PersistSessions *bool  `json:"persist_sessions,omitempty"`
+	Messaging       *bool  `json:"messaging,omitempty"`
 	ServerURL       string `json:"server_url,omitempty"`
 	Backend         string `json:"backend,omitempty"`
 	// LaunchWrapper is an opaque argv prefix placed in front of the backend
@@ -266,7 +267,8 @@ type resumeSpawn struct {
 	// mcpOrigin marks a resume an MCP surface drove. The cold arm gates the
 	// inherited launch such a resume re-execs; a trusted caller's resume does
 	// not pay for the extra read.
-	mcpOrigin bool
+	mcpOrigin   bool
+	messagingOn *bool
 }
 
 type SpawnResult struct {
@@ -361,6 +363,8 @@ type childRuntime struct {
 	// backend and would force a phase-selected pi attempt under a non-pi
 	// run.
 	persistChoice      *bool
+	messagingChoice    *bool
+	messagingOn        bool
 	roster             *rosterconfig.Config
 	parentID           string   // runtime ID of the parent agent, empty for top-level
 	children           []string // runtime IDs spawned by this runtime
@@ -1752,6 +1756,9 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}
 	workflowMode := spawnIsWorkflow(params)
 	if workflowMode {
+		if params.Messaging != nil && *params.Messaging {
+			return SpawnResult{}, fmt.Errorf("messaging is not supported for loop and team phases")
+		}
 		if params.RosterEntry != "" {
 			return SpawnResult{}, fmt.Errorf("roster_entry is not valid with loop_file or team_file")
 		}
@@ -1782,6 +1789,14 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 	}
 	if params.Dir == "" {
 		params.Dir = "."
+	}
+
+	resolvedMessaging := params.WorkflowID == "" && !workflowMode && !params.permissionDeciderRun
+	if params.Messaging != nil {
+		resolvedMessaging = *params.Messaging
+	}
+	if params.resume.messagingOn != nil {
+		resolvedMessaging = *params.resume.messagingOn
 	}
 
 	// The admission reservation already holds the tree slot and one local
@@ -1846,6 +1861,8 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		// forced choice the operator never made.
 		persistedSessions:        factory.ResolvesPersistedSessions(backend, params.PersistSessions),
 		persistChoice:            params.PersistSessions,
+		messagingChoice:          params.Messaging,
+		messagingOn:              resolvedMessaging,
 		effectiveAgent:           params.Agent,
 		effectiveModel:           params.Model,
 		rosterFile:               params.RosterFile,
@@ -2114,6 +2131,8 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		Model:           params.Model,
 		Thinking:        params.Thinking,
 		PersistSessions: params.PersistSessions,
+		Messaging:       child.messagingChoice,
+		MessagingOn:     child.messagingOn,
 		LaunchWrapper:   params.LaunchWrapper,
 		Launch:          params.launch,
 		RuntimeID:       rtID,
@@ -4058,6 +4077,7 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 	// matches the fact the resume gate reads instead of re-reading an
 	// environment that may have moved.
 	persistChoice := child.persistChoice
+	messagingChoice, messagingOn := child.messagingChoice, child.messagingOn
 	brokerToken := child.brokerToken
 	child.mu.Unlock()
 	_, mapped := s.sessionIdentity(resumeID)
@@ -4084,6 +4104,8 @@ func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, re
 		Model:           identity.Model,
 		Thinking:        thinking,
 		PersistSessions: persistChoice,
+		Messaging:       messagingChoice,
+		MessagingOn:     messagingOn,
 		RuntimeID:       child.id,
 		Broker:          s.broker,
 		BrokerToken:     brokerToken,
@@ -6530,6 +6552,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PersistSessions = ec.Selection.PersistSessions
+		params.Messaging = ec.Selection.Messaging
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
@@ -6592,6 +6615,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PersistSessions = ec.Selection.PersistSessions
+		params.Messaging = ec.Selection.Messaging
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
@@ -6655,6 +6679,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PersistSessions = ec.Selection.PersistSessions
+		params.Messaging = ec.Selection.Messaging
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}

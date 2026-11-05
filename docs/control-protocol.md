@@ -316,6 +316,7 @@ Params:
 - `permission_handler` (string) — how to handle permission requests (e.g. `"file:/path"` to poll files, or omit to use `auto_approve`).
 - `auto_approve` (bool) — auto-resolve all permission requests. Overrides file handler if both are set.
 - `persist_sessions` (bool) — opt this run into a persisted backend session (pi: a session directory instead of `--no-session`, enabling post-hoc transcripts and cross-process resume). Omitted inherits the supervisor's `AVENOR_PI_SESSIONS` environment; explicit values force the choice for the run.
+- `messaging` (bool) — request poo messaging. Omitted defaults on for delegation spawns and off for workflow nodes, loop or team phases, and permission-decider runs. Explicit true is refused for loop and team spawns. The switch is carried per run but is not wired to poo launch yet. The supervisor `resume` operation preserves it; a raw `spawn` with `session_id` uses the caller's `messaging` choice or its default instead. `avenor run --resume` treats it as off and may fail to resume a poo session created with messaging on if its recorded tools are unavailable.
 - `timeout` (string) — total run timeout as a Go duration (`30s`, `5m`, etc.).
 - `max_retries` (int) — max retries after transient backend errors.
 - `loop_file` (string) — path to a loop config JSON file (advanced multi-phase mode).

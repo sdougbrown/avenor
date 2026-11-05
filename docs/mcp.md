@@ -237,6 +237,8 @@ This server registers tool names **without** the `avenor_` prefix: `spawn`, `sta
 
 Starts a new run.
 
+The supervisor `resume` operation preserves the run's messaging choice. A raw `spawn` with `session_id` uses the caller's `messaging` choice or its default instead. `avenor run --resume` has no supervisor choice and treats messaging as off; a poo session created with messaging on may fail to resume when its recorded tools are unavailable.
+
 **Required:**
 - `repo_dir` — working directory for the run
 
@@ -248,6 +250,7 @@ Starts a new run.
 - `timeout` — timeout as seconds or duration (e.g., `"90s"`, `"5m"`, `"1h"`)
 - `model` — model to use
 - `backend` — runtime backend (e.g., `"opencode-http"`, `"opencode-acp"`, `"codex-app-server"`, `"agy"`)
+- `messaging` — request poo messaging on or off. Omitted defaults on for delegation spawns and off for workflow nodes, loop or team phases, and permission-decider runs. True is refused for loop and team spawns. The switch is carried per run; poo messaging is not wired at launch yet.
 - `roster_file` / `roster_entry` — optional roster selector pair
 - `server_url` — server URL for opencode-http backend
 - `launch_wrapper` — optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion (see [backends.md](backends.md#mcp-surfaces-operator-allowlist))

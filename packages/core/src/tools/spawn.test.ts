@@ -21,6 +21,7 @@ type ForwardingCase = {
   rosterFile?: string
   rosterEntry?: string
   persistSessions?: boolean
+  messaging?: boolean
 }
 
 const forwardingCases: ForwardingCase[] = [
@@ -37,6 +38,8 @@ const forwardingCases: ForwardingCase[] = [
   },
   { name: 'persist sessions', args: { persistSessions: true }, persistSessions: true },
   { name: 'persist sessions false', args: { persistSessions: false }, persistSessions: false },
+  { name: 'messaging on', args: { messaging: true }, messaging: true },
+  { name: 'messaging off', args: { messaging: false }, messaging: false },
 ]
 
 function assertForwardedParams(
@@ -48,6 +51,7 @@ function assertForwardedParams(
     rosterFile?: string
     rosterEntry?: string
     persistSessions?: boolean
+    messaging?: boolean
   },
 ): void {
   expect(received).toBeDefined()
@@ -72,6 +76,11 @@ function assertForwardedParams(
     expect(Object.hasOwn(received, 'persist_sessions')).toBe(false)
   } else {
     expect(received.persist_sessions).toBe(expected.persistSessions)
+  }
+  if (expected.messaging === undefined) {
+    expect(Object.hasOwn(received, 'messaging')).toBe(false)
+  } else {
+    expect(received.messaging).toBe(expected.messaging)
   }
   if (expected.rosterFile === undefined) {
     expect(Object.hasOwn(received, 'roster_file')).toBe(false)

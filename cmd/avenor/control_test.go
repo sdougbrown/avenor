@@ -56,6 +56,28 @@ func TestSpawnParamsFromArgs(t *testing.T) {
 	}
 }
 
+func TestSpawnMessagingFlagTriState(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		want    any
+		present bool
+	}{
+		{"omitted", nil, nil, false},
+		{"on", []string{"--messaging"}, true, true},
+		{"off", []string{"--messaging=false"}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			params, code := spawnParamsFromArgs(append([]string{"--prompt", "work"}, tc.args...), &stderr)
+			got, present := params["messaging"]
+			if code != 0 || present != tc.present || got != tc.want {
+				t.Fatalf("code=%d messaging=%v present=%v stderr=%s", code, got, present, stderr.String())
+			}
+		})
+	}
+}
+
 func TestSpawnParamsFromArgsAllowsModelWithoutAgent(t *testing.T) {
 	var stderr bytes.Buffer
 	params, code := spawnParamsFromArgs([]string{

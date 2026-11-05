@@ -2308,6 +2308,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         roster_entry: Type.Optional(Type.String({ description: 'Roster entry to select. Requires roster_file unless a roster context is configured; disables agent, model, and backend' })),
         server_url: Type.Optional(Type.String({ description: 'Backend server URL' })),
         persist_sessions: Type.Optional(Type.Boolean({ description: 'Persist the backend session (pi: a session directory instead of --no-session, enabling cross-process resume). Omitted inherits the supervisor environment; true and false force the choice for this run' })),
+        messaging: Type.Optional(Type.Boolean({ description: 'Let a poo child send and receive Avenor messages; defaults on for a delegation spawn, and off for a workflow node, a loop or team phase, and a permission-decider run' })),
         supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
         wait: Type.Optional(Type.Boolean({ description: 'Block until complete (default true)' })),
       }),
@@ -2358,6 +2359,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           ...(agentProfile !== undefined ? { agentProfile } : {}),
           ...(params.server_url !== undefined ? { serverUrl: params.server_url } : {}),
           ...(params.persist_sessions !== undefined ? { persistSessions: params.persist_sessions } : {}),
+          ...(params.messaging !== undefined ? { messaging: params.messaging } : {}),
           ...(params.supervisor_id !== undefined ? { supervisorId: params.supervisor_id } : {}),
           ...(parentRunId !== undefined ? { parent_run_id: parentRunId } : {}),
         })

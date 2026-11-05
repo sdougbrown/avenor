@@ -183,6 +183,10 @@ func ValidateTemplate(template Template) error {
 		if err := validateOutputSources(node); err != nil {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
+		if node.Assignment != nil && node.Assignment.Messaging != nil && *node.Assignment.Messaging &&
+			(node.Action.Kind == ActionLoop || node.Action.Kind == ActionTeam) {
+			return fmt.Errorf("invalid workflow template: node %q: messaging is not supported for loop and team phases", node.ID)
+		}
 		if err := validateAssignmentPermissionPolicy(node.Assignment); err != nil {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}

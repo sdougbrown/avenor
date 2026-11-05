@@ -919,6 +919,7 @@ func svalidateWorkflowProfileAssignment(raw json.RawMessage, path, schemaPath st
 		"agent":             true,
 		"auto_approve":      true,
 		"backend":           true,
+		"messaging":         true,
 		"model":             true,
 		"permission_policy": true,
 		"role":              true,
@@ -959,6 +960,15 @@ func svalidateWorkflowProfileAssignment(raw json.RawMessage, path, schemaPath st
 		case "string":
 			var sv string
 			_ = json.Unmarshal(r, &sv)
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
+	}
+	if r, ok := m["messaging"]; ok {
+		fpath := path + "/" + escapePtr("messaging")
+		fspath := schemaPath + "/properties/" + escapePtr("messaging")
+		switch WorkflowProfileStructuralKind(r) {
+		case "boolean":
 		default:
 			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
 		}
@@ -3594,6 +3604,8 @@ func (v WorkflowProfileAssignment) validate(path string, issues *[]Issue) {
 	}
 	if v.Backend != nil {
 	}
+	if v.Messaging != nil {
+	}
 	if v.Model != nil {
 	}
 	if v.PermissionPolicy != nil {
@@ -4050,6 +4062,7 @@ type WorkflowProfileAssignment struct {
 	Agent            *string                                    "json:\"agent,omitempty\""
 	AutoApprove      *bool                                      "json:\"auto_approve,omitempty\""
 	Backend          *string                                    "json:\"backend,omitempty\""
+	Messaging        *bool                                      "json:\"messaging,omitempty\""
 	Model            *string                                    "json:\"model,omitempty\""
 	PermissionPolicy *WorkflowProfileAssignmentPermissionPolicy "json:\"permission_policy,omitempty\""
 	Role             *string                                    "json:\"role,omitempty\""
@@ -4071,6 +4084,7 @@ func (v *WorkflowProfileAssignment) UnmarshalJSON(data []byte) error {
 		case "agent":
 		case "auto_approve":
 		case "backend":
+		case "messaging":
 		case "model":
 		case "permission_policy":
 		case "role":
@@ -4094,6 +4108,11 @@ func (v *WorkflowProfileAssignment) UnmarshalJSON(data []byte) error {
 	if r, ok := raw["backend"]; ok {
 		if len(r) == 4 && string(r) == "null" {
 			return fmt.Errorf("field \"backend\" must not be null")
+		}
+	}
+	if r, ok := raw["messaging"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"messaging\" must not be null")
 		}
 	}
 	if r, ok := raw["model"]; ok {
@@ -4149,47 +4168,54 @@ func (v *WorkflowProfileAssignment) UnmarshalJSON(data []byte) error {
 		}
 		next.Backend = &decoded2
 	}
-	if encoded, ok := raw["model"]; ok {
-		var decoded3 string
+	if encoded, ok := raw["messaging"]; ok {
+		var decoded3 bool
 		if err := json.Unmarshal(encoded, &decoded3); err != nil {
 			return err
 		}
-		next.Model = &decoded3
+		next.Messaging = &decoded3
 	}
-	if encoded, ok := raw["permission_policy"]; ok {
-		var decoded4 WorkflowProfileAssignmentPermissionPolicy
+	if encoded, ok := raw["model"]; ok {
+		var decoded4 string
 		if err := json.Unmarshal(encoded, &decoded4); err != nil {
 			return err
 		}
-		next.PermissionPolicy = &decoded4
+		next.Model = &decoded4
 	}
-	if encoded, ok := raw["role"]; ok {
-		var decoded5 string
+	if encoded, ok := raw["permission_policy"]; ok {
+		var decoded5 WorkflowProfileAssignmentPermissionPolicy
 		if err := json.Unmarshal(encoded, &decoded5); err != nil {
 			return err
 		}
-		next.Role = &decoded5
+		next.PermissionPolicy = &decoded5
 	}
-	if encoded, ok := raw["roster_entry"]; ok {
+	if encoded, ok := raw["role"]; ok {
 		var decoded6 string
 		if err := json.Unmarshal(encoded, &decoded6); err != nil {
 			return err
 		}
-		next.RosterEntry = &decoded6
+		next.Role = &decoded6
 	}
-	if encoded, ok := raw["roster_file"]; ok {
+	if encoded, ok := raw["roster_entry"]; ok {
 		var decoded7 string
 		if err := json.Unmarshal(encoded, &decoded7); err != nil {
 			return err
 		}
-		next.RosterFile = &decoded7
+		next.RosterEntry = &decoded7
 	}
-	if encoded, ok := raw["thinking"]; ok {
+	if encoded, ok := raw["roster_file"]; ok {
 		var decoded8 string
 		if err := json.Unmarshal(encoded, &decoded8); err != nil {
 			return err
 		}
-		next.Thinking = &decoded8
+		next.RosterFile = &decoded8
+	}
+	if encoded, ok := raw["thinking"]; ok {
+		var decoded9 string
+		if err := json.Unmarshal(encoded, &decoded9); err != nil {
+			return err
+		}
+		next.Thinking = &decoded9
 	}
 	*v = WorkflowProfileAssignment(next)
 	return nil

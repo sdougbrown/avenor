@@ -179,13 +179,14 @@ func sameSelection(a, b *ExecutionSelection) bool {
 	if !samePermissionModelDecider(a.PermissionModelDecider, b.PermissionModelDecider) {
 		return false
 	}
-	if !samePersistChoice(a.PersistSessions, b.PersistSessions) {
+	if !samePersistChoice(a.PersistSessions, b.PersistSessions) || !samePersistChoice(a.Messaging, b.Messaging) {
 		return false
 	}
 	x, y := *a, *b
 	x.PermissionDecider, y.PermissionDecider = nil, nil
 	x.PermissionModelDecider, y.PermissionModelDecider = nil, nil
 	x.PersistSessions, y.PersistSessions = nil, nil
+	x.Messaging, y.Messaging = nil, nil
 	return x == y
 }
 

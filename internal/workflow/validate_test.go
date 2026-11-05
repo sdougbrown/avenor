@@ -25,6 +25,37 @@ const validTemplateJSON = `{
   "composition_limits": {"max_depth": 4, "max_children": 32}
 }`
 
+func TestValidateTemplateMessaging(t *testing.T) {
+	for _, kind := range []string{"run", "loop", "team"} {
+		for _, on := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s-%v", kind, on), func(t *testing.T) {
+				data := mutateTemplate(t, func(template map[string]any) {
+					node := template["nodes"].([]any)[1].(map[string]any)
+					action := map[string]any{"type": kind}
+					switch kind {
+					case "run":
+						action["prompt"] = "work"
+					case "loop":
+						action["loop_file"] = "loop.json"
+					case "team":
+						action["team_file"] = "team.json"
+					}
+					node["action"] = action
+					node["assignment"] = map[string]any{"messaging": on}
+				})
+				err := ValidateTemplateJSON(data)
+				if on && kind != "run" {
+					if err == nil || !strings.Contains(err.Error(), "messaging is not supported for loop and team phases") {
+						t.Fatalf("validation error = %v", err)
+					}
+				} else if err != nil {
+					t.Fatalf("validation error = %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestValidateTemplateJSON(t *testing.T) {
 	t.Parallel()
 	if err := ValidateTemplateJSON([]byte(validTemplateJSON)); err != nil {

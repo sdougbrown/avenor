@@ -19,6 +19,7 @@ export interface SpawnToolArgs {
   agentProfile?: string
   backend?: string
   persistSessions?: boolean
+  messaging?: boolean
   rosterFile?: string
   rosterEntry?: string
   serverUrl?: string
@@ -78,6 +79,9 @@ async function executeSpawnTool(
   }
   if (args.persistSessions !== undefined) {
     baseParams.persist_sessions = args.persistSessions
+  }
+  if (args.messaging !== undefined) {
+    baseParams.messaging = args.messaging
   }
 
   if (args.supervisorId) {

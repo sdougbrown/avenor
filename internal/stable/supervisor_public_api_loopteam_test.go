@@ -1477,6 +1477,33 @@ func TestSupervisorPublicAPILoopStatusRunningBetweenAttempts(t *testing.T) {
 	}
 }
 
+func TestLoopAndTeamMessagingOff(t *testing.T) {
+	for _, kind := range []string{"loop", "team"} {
+		for _, explicit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s-explicit-%v", kind, explicit), func(t *testing.T) {
+				provider := newItestProvider(itestAttempt("ses_phase", itestSessionEnd("ses_phase", "end_turn", "done")))
+				h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+				config := map[string]any{kind: []map[string]any{{"name": "worker", "prompt": "work"}}}
+				if kind == "loop" {
+					config["max_iterations"] = 1
+				}
+				file := itestWorkflowConfig(t, kind, config)
+				params := map[string]any{"label": "phase"}
+				if explicit {
+					params["messaging"] = false
+				}
+				rt := h.spawnWorkflow(kind, file, params)
+				h.requireWorkflowEnd(rt, "done", "end_turn", 0)
+				provider.mu.Lock()
+				defer provider.mu.Unlock()
+				if len(provider.startOpts) != 1 || provider.startOpts[0].MessagingOn || provider.startOpts[0].Messaging != nil {
+					t.Fatalf("phase options = %+v", provider.startOpts)
+				}
+			})
+		}
+	}
+}
+
 // TestSupervisorPublicAPILoopPhaseCarriesPersistedChoice proves a loop phase
 // attempt's start options carry the run's recorded persisted-session choice:
 // a spawn with persist_sessions set lands in the provider's Start options for
