@@ -79,13 +79,13 @@ var _ runtime.Provider = (*Provider)(nil)
 func (p *Provider) RecoveredDenialIsCompletion() bool { return true }
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	p.mu.Lock()
 	merged := runtime.MergeStartOptions(p.opts, opts)
+	open := len(p.sessions)
+	p.mu.Unlock()
 	if err := runtime.ValidateThinkingForBackend(backendID, merged.Thinking); err != nil {
 		return runtime.Session{}, err
 	}
-	p.mu.Lock()
-	open := len(p.sessions)
-	p.mu.Unlock()
 	if open > 0 {
 		return runtime.Session{}, errOneSession
 	}
@@ -182,8 +182,8 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	// The launch is the identity the session was created with: the supervisor
 	// resolves it from the session's own record before this provider exists, so
 	// the process that resumes is the one the session belongs to.
-	merged := runtime.MergeStartOptions(p.opts, runtime.StartOptions{})
 	p.mu.Lock()
+	merged := runtime.MergeStartOptions(p.opts, runtime.StartOptions{})
 	st := p.sessions[sessionID]
 	c := p.client
 	other := len(p.sessions) > 0 && st == nil
