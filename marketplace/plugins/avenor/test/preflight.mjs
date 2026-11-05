@@ -24,12 +24,12 @@
 // older by id), 6b a timed-out ask is classified from the wire facts, 9b a
 // failed /poll-control pauses the loop without killing it, 11a a broker-less
 // session stays off with one reason line, 11b a
-// partial listing refuses every ref, 11c one ask reads one listing, 11d a
-// stale self-minted name is reminted then registered, 11e a failed wait keeps
-// its ask open for a late answer, 11f the reply action answers an inbound tell
-// by message id without reading a listing that hides the peer, 11g a tell
-// pinned to a replaced generation is still refused, 11h a flood of inbound
-// tells cannot forget an open ask (the next send still rides its edge).
+// partial listing refuses every ref, 11c one ask reads one listing, 11d the
+// reply action answers an inbound tell by message id without reading a listing
+// that hides the peer, 11e a tell pinned to a replaced generation is still
+// refused, 11f a flood of inbound tells cannot forget an open ask (the next
+// send still rides its edge), 11g a stale self-minted name is reminted then
+// registered, 11h a failed wait keeps its ask open for a late answer.
 //
 // Every wait is a deadline-bounded poll, not a fixed sleep.
 //
@@ -907,7 +907,7 @@ if (listingsRead !== 1) {
 }
 await drainProbe()
 
-console.log('=== 11f. the reply action answers an inbound tell by message id, with no listing ===')
+console.log('=== 11d. the reply action answers an inbound tell by message id, with no listing ===')
 // The broker resolves a tell's recorded return route by message id.
 // Even an empty directory must not prevent the reply or require a listing read.
 let tellReplyListings = 0
@@ -956,7 +956,7 @@ if (tellReplyBody.reply_to !== tellReplyID || tellReplyRow.from_run_id !== tellR
   process.exit(1)
 }
 
-console.log('=== 11g. a replaced generation still refuses the tell ===')
+console.log('=== 11e. a replaced generation still refuses the tell ===')
 // A stale generation must be refused rather than retargeted to a replacement.
 const replacedListing = await probeSessions()
 const staleRunId = freshRunId('claude-stale')
@@ -978,7 +978,7 @@ if (!staleSend || staleSend.isDelivered !== false ||
   process.exit(1)
 }
 
-console.log('=== 11h. an open ask survives a flood of inbound tells ===')
+console.log('=== 11f. an open ask survives a flood of inbound tells ===')
 // Tell chatter must not evict an unanswered ask's correlation and turn its
 // answer into an unrelated tell.
 const floodRunId = freshRunId('claude-flood')
@@ -1032,7 +1032,7 @@ if (!floodWaitShape.ok || !floodWaitBody.includes('the answer after the flood') 
 }
 await drainProbe()
 
-console.log('=== 11d. a stale self-minted name is reminted once, then registered ===')
+console.log('=== 11g. a stale self-minted name is reminted once, then registered ===')
 // A self-minted `claude-<hex>` can collide with a record the broker still holds
 // from an earlier session, which this session cannot authenticate against. One
 // refusal on that basis mints a fresh suffix and retries; the session then owns
@@ -1078,7 +1078,7 @@ if (!remintRow || refusedRow) {
   process.exit(1)
 }
 
-console.log('=== 11e. a failed wait keeps its ask open, so a late answer still lands ===')
+console.log('=== 11h. a failed wait keeps its ask open, so a late answer still lands ===')
 // A cut wait reports possibly-pending without retracting the edge.
 // A later answer must still complete it, matching Pi and core behavior.
 let waitCutOnce = false
