@@ -130,6 +130,33 @@ func TestPublishManifestsPrunesOldDigests(t *testing.T) {
 	}
 }
 
+func TestPublishManifestsIgnoresPruneFailure(t *testing.T) {
+	root := t.TempDir()
+	content := manifestContent{[]byte("feed"), []byte("registry")}
+	current, err := publishManifests(root, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(filepath.Dir(filepath.Dir(current.feeds)), strings.Repeat("a", 64))
+	if err := os.Mkdir(old, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "file"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(old, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(old, 0700) })
+	if _, err := publishManifests(root, content); err != nil {
+		t.Fatalf("unrelated prune failure prevented publication: %v", err)
+	}
+}
+
 func TestPublishManifestsConcurrent(t *testing.T) {
 	root := t.TempDir()
 	content, err := renderManifests(root, "http://example.com", "run")

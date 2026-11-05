@@ -84,9 +84,7 @@ func publishManifests(stateHome string, content manifestContent) (manifestPaths,
 		if err := os.Chtimes(dest, now, now); err != nil {
 			return manifestPaths{}, err
 		}
-		if err := pruneManifests(root, dest); err != nil {
-			return manifestPaths{}, err
-		}
+		pruneManifests(root, dest)
 		return paths, nil
 	}
 	if err := os.MkdirAll(root, 0700); err != nil {
@@ -118,16 +116,14 @@ func publishManifests(stateHome string, content manifestContent) (manifestPaths,
 			return manifestPaths{}, err
 		}
 	}
-	if err := pruneManifests(root, dest); err != nil {
-		return manifestPaths{}, err
-	}
+	pruneManifests(root, dest)
 	return paths, nil
 }
 
-func pruneManifests(root, current string) error {
+func pruneManifests(root, current string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return fmt.Errorf("prune poo manifests: %w", err)
+		return
 	}
 	cutoff := time.Now().Add(-manifestMaxAge)
 	for _, entry := range entries {
@@ -139,19 +135,13 @@ func pruneManifests(root, current string) error {
 			continue
 		}
 		info, err := entry.Info()
-		if os.IsNotExist(err) {
+		if err != nil {
 			continue
 		}
-		if err != nil {
-			return fmt.Errorf("prune poo manifests: %w", err)
-		}
 		if info.ModTime().Before(cutoff) {
-			if err := os.RemoveAll(filepath.Join(root, name)); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("prune poo manifests: %w", err)
-			}
+			_ = os.RemoveAll(filepath.Join(root, name))
 		}
 	}
-	return nil
 }
 
 func messagingManifests(brokerURL, runID string) (manifestPaths, error) {
