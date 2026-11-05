@@ -75,6 +75,24 @@ describe('parseControlMessage', () => {
     expect(formatInboundAskBody(tell!, { heading: 'Message from peer' })).not.toContain('reply')
   })
 
+  it('takes the message id from the broker-stamped row when the payload has none', () => {
+    // A surface that queues its correlation id on the envelope only (the Pi
+    // host tell) must still carry the id a reply correlates against.
+    const tell = parseControlMessage({
+      type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer-1',
+      payload: { from_run_id: 'peer-1', message: 'fyi' },
+    })
+    expect(tell).toEqual({ from_run_id: 'peer-1', message_id: 'av1.m.envelope', message: 'fyi', expects_reply: false })
+
+    // The payload id stays authoritative, as in the broker's own reader; the
+    // broker refuses a send whose two ids disagree.
+    const both = parseControlMessage({
+      type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer-1',
+      payload: { id: 'av1.m.payload', from_run_id: 'peer-1', message: 'fyi' },
+    })
+    expect(both!.message_id).toBe('av1.m.payload')
+  })
+
   it('carries expects_reply so the caller need not re-parse the payload', () => {
     // The ask/tell decision lives here, not in a second payload parse: a tell
     // that carries a message id must not be mistaken for an ask.

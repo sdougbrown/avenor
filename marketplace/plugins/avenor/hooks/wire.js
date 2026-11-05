@@ -118,7 +118,11 @@ export function parseControlMessage(msg) {
     : typeof body.from_run_id === "string" ? body.from_run_id
     : typeof body.from === "string" ? body.from : ""
   const message = typeof body.message === "string" ? body.message : ""
-  const messageId = typeof body.id === "string" ? body.id : ""
+  // The broker refuses a send whose payload and envelope ids disagree, so a row
+  // carrying both agrees. A row queued with the id on the envelope only (the Pi
+  // host tell) still names the id a reply correlates against.
+  const messageId = typeof body.id === "string" && body.id !== "" ? body.id
+    : typeof entry.id === "string" ? entry.id : ""
   if (fromRunId === "" || message === "") return null
   // The display name is the broker's stamp, then the stamped run id. A payload's
   // `from` never names the sender: /send does not validate it, so it is the

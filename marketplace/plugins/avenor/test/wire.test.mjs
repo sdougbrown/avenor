@@ -86,6 +86,25 @@ test('parseControlMessage: an ask carries its edge facts, a tell carries none', 
   assert.equal(tell.expectsReply, false)
 })
 
+test('parseControlMessage: the envelope id fills in when the payload has none', () => {
+  // A surface that queues its correlation id on the envelope only (the Pi host
+  // tell) must still name the id a reply correlates against.
+  const tell = parseControlMessage({
+    type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer', sender: 'Probe',
+    payload: { from: 'peer', from_run_id: 'peer', message: 'fyi' },
+  })
+  assert.equal(tell.messageId, 'av1.m.envelope')
+  assert.match(frameInboundAsk(tell), /message id `av1\.m\.envelope`/)
+
+  // The payload id stays authoritative, as in the broker's own reader; the
+  // broker refuses a send whose two ids disagree.
+  const both = parseControlMessage({
+    type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer', sender: 'Probe',
+    payload: { id: 'av1.m.payload', from: 'peer', from_run_id: 'peer', message: 'fyi' },
+  })
+  assert.equal(both.messageId, 'av1.m.payload')
+})
+
 test('parseControlMessage: reply rows and control rows are kept apart', () => {
   // A reply carries the asker's correlation in reply_to; its own id names the
   // edge it completes, and it must not be remembered as a new ask.
