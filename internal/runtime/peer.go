@@ -97,6 +97,15 @@ func (p *PeerProvision) Run() (url, runID, token string) {
 	return p.URL, p.RunID, p.RunToken
 }
 
+// RunEnv renders the peer vocabulary with the run's own token, for a harness
+// that authenticates each broker request itself. Nil when unprovisioned.
+func (p *PeerProvision) RunEnv() []string {
+	if p == nil {
+		return nil
+	}
+	return p.env(p.RunToken)
+}
+
 // AttachEnv renders the peer vocabulary with a freshly minted one-shot attach
 // credential in place of the run token. It is for a harness that trades the
 // credential for the run's at session start: the broker spends the grant on the

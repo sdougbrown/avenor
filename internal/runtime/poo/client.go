@@ -91,6 +91,10 @@ type permissionAsk struct {
 	id        json.RawMessage
 }
 
+// messagingReady holds broker credentials back from every poo child until the
+// backend writes the feed and cli-registry manifests that use them. A child
+// given credentials without those manifests could receive asks it has no tool to
+// answer.
 var messagingReady = false
 
 // startClient spawns the resolved binary and returns the connected client. The
@@ -105,11 +109,8 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 	// The child receives this launch's identity and none of the parent's.
 	// Broker credentials require messaging and a ready messaging surface.
 	proc.Env = runtime.LaunchEnv(proc.Environ(), opts.Provenance)
-	if opts.MessagingOn && opts.Broker != nil && messagingReady {
-		url, runID, token := runtime.ProvisionPeer(opts).Run()
-		if url != "" {
-			proc.Env = append(proc.Env, "AVENOR_BROKER_URL="+url, "AVENOR_RUN_ID="+runID, "AVENOR_BROKER_TOKEN="+token)
-		}
+	if opts.MessagingOn && messagingReady {
+		proc.Env = append(proc.Env, runtime.ProvisionPeer(opts).RunEnv()...)
 	}
 
 	stdin, err := proc.StdinPipe()
