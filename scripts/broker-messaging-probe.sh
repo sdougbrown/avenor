@@ -9,8 +9,9 @@
 #   1. a versioned ordinary tell posted without a generation
 #   2. the same tell posted with the generation /sessions advertises, plus the
 #      queued row observed through the target's /poll-control
-#   3. a branch-A run's peer listing (the hub and sibling B are expected to be
-#      hidden) and a send addressed to the sibling's qualified ID as the hub's
+#   3. a branch-A run's peer listing (sibling B's runs are expected to be
+#      hidden, while the hub's own rows — `supervisor` and `rt_hub` — stay
+#      visible) and a send addressed to the sibling's qualified ID as the hub's
 #      own listing names it
 #   4. a branch-C run's peer listing (a hub peer visible through the relay) and
 #      a send from C addressed to that hub peer
@@ -33,11 +34,10 @@ SCRATCH=$(mktemp -d /tmp/opencode/561-probe.XXXXXX)
 mkdir -p "$SCRATCH/tmp"
 
 BIN="$REPO/avenor"
-if [ ! -x "$BIN" ]; then
-  echo "building the checkout binary"
-  (cd "$REPO" && GOCACHE=$REPO/.cache/go-build GOMODCACHE=$REPO/.cache/go-mod \
-    go build -o ./avenor ./cmd/avenor)
-fi
+# Rebuild the gitignored binary so evidence matches this checkout.
+echo "building the checkout binary"
+(cd "$REPO" && GOCACHE=$REPO/.cache/go-build GOMODCACHE=$REPO/.cache/go-mod \
+  go build -o ./avenor ./cmd/avenor)
 
 TOKEN=$("$BIN" parent-token)
 PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
@@ -74,18 +74,25 @@ trap cleanup EXIT
 # --- start the isolated supervisors -----------------------------------------
 # Each supervisor runs in a scrubbed environment: an ambient AVENOR_BROKER_URL
 # or peer credential would leak the operator's peer rows into the listings.
+# AVENOR_HOME does not isolate Go workflow state. Explicit scratch roots keep
+# startup recovery, controllers and lease sweeping out of the operator's store.
 
 launch_stable() { # launch_stable <home> <control_socket> <parent_url_or_''> [extra args...]
   local home=$1 sock=$2 parent=$3
   shift 3
+  local -a isolated=(
+    --workflow-root "$home/workflows"
+    --workflow-adapter-dir "$home/workflow-adapters"
+  )
+  mkdir -p "$home/workflows" "$home/workflow-adapters"
   if [ -n "$parent" ]; then
     env -i PATH="$PATH" HOME="$HOME" TMPDIR="$SCRATCH/tmp" \
       AVENOR_HOME="$home" AVENOR_PARENT_BROKER_URL="$parent" AVENOR_PARENT_BROKER_TOKEN="$TOKEN" \
-      "$BIN" stable --control-socket "$sock" "$@" >"$EVIDENCE/$(basename "$sock").log" 2>&1 &
+      "$BIN" stable --control-socket "$sock" "${isolated[@]}" "$@" >"$EVIDENCE/$(basename "$sock").log" 2>&1 &
   else
     env -i PATH="$PATH" HOME="$HOME" TMPDIR="$SCRATCH/tmp" \
       AVENOR_HOME="$home" AVENOR_PARENT_BROKER_TOKEN="$TOKEN" \
-      "$BIN" stable --control-socket "$sock" "$@" >"$EVIDENCE/$(basename "$sock").log" 2>&1 &
+      "$BIN" stable --control-socket "$sock" "${isolated[@]}" "$@" >"$EVIDENCE/$(basename "$sock").log" 2>&1 &
   fi
 }
 

@@ -420,9 +420,12 @@ two sibling branches, and a sub-branch, registers plain runs, and records
 /poll-control), (c) a sibling hidden in a branch listing yet addressed by its
 qualified ID, and (d) a hub peer listed down a three-tier chain plus a send to
 it. It reports observed behavior verbatim into an evidence directory; it does
-not assert desired behavior. Run it when a change touches generation admission,
-relay sender stamping, or the peer listing; compare its output against the
-stage-1 capture in the #561 evidence.
+not assert desired behavior. Each supervisor is started with its own scratch
+workflow root and adapter directory, and the script rebuilds the checkout
+binary before probing, so the run neither reads the operator's durable
+workflows nor an older build. Run it when a change touches generation
+admission, relay sender stamping, or the peer listing; compare its output
+against the stage-1 capture in the #561 evidence.
 
 ## Limitation
 
