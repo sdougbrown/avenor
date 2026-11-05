@@ -28,6 +28,19 @@ export function parseMessageTarget(target) {
 }
 
 /**
+ * The tell tool's target: any string is a candidate, including a broker label
+ * with spaces (session names allow them) and an empty string, which resolution
+ * refuses as unknown. Only an absent or non-string target is left to the MCP
+ * surface's admission, so a tell this layer can resolve never reaches the
+ * MCP server's unrelated supervisor. Ask keeps its stricter target rule.
+ */
+export function parseTellTarget(target) {
+  if (typeof target !== "string") return null
+  const address = parseAvenorAddress(target)
+  return address === null ? target : address
+}
+
+/**
  * Resolution over the /sessions listing rows. `excludeRunId` drops the
  * caller's own record, so a session can never route a message back to
  * itself through its own layer.

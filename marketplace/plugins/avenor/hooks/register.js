@@ -50,7 +50,7 @@
 // top-level function declarations; pass-through is returning undefined,
 // never calling `next`.
 
-import { parseAvenorAddress, parseMessageTarget, matchSession } from "./addresses.js"
+import { parseAvenorAddress, parseMessageTarget, parseTellTarget, matchSession } from "./addresses.js"
 import {
   mintMessageID,
   randomHex,
@@ -456,17 +456,27 @@ async function serveMessageHook(d, e) {
   if (isReply) {
     return serveReply(d, e)
   }
+  if (isTell) {
+    // A tell's target and text are canonically admitted as strings: labels may
+    // contain spaces, and the message may be empty. Both stay on this session's
+    // peer client; only an absent or non-string field is left to the MCP
+    // surface's admission.
+    const tellRef = parseTellTarget(e.target)
+    const tellMessage = typeof e.message === "string" ? e.message : null
+    if (tellRef === null || tellMessage === null) {
+      return undefined
+    }
+    return serveTell(d, tellRef, tellMessage)
+  }
   const ref = parseMessageTarget(e.target)
   if (ref === null) {
-    // A malformed target is the MCP surface's admission to refuse; the hook
-    // only intercepts a tell it can send.
-    return isTell ? undefined : askOutcome("not-sent", null, "ask target must be a run id, label, or self without whitespace")
+    return askOutcome("not-sent", null, "ask target must be a run id, label, or self without whitespace")
   }
   const message = typeof e.message === "string" ? e.message : ""
   if (message === "") {
-    return isTell ? undefined : askOutcome("not-sent", null, "ask message must be a non-empty string")
+    return askOutcome("not-sent", null, "ask message must be a non-empty string")
   }
-  return isTell ? serveTell(d, ref, message) : serveAsk(d, ref, message, e.timeout_ms)
+  return serveAsk(d, ref, message, e.timeout_ms)
 }
 
 /**

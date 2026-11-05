@@ -23,7 +23,8 @@
 // from one peer (a plain send rides the newest, the reply action reaches the
 // older by id), 6b a timed-out ask is classified from the wire facts, 6c the
 // message tool's tell action is served as this session with its listing's
-// generation and no ask edge, 9b a
+// generation and no ask edge, 6d a spaced label and an empty tell stay on that
+// tell path, 9b a
 // failed /poll-control pauses the loop without killing it, 11a a broker-less
 // session stays off with one reason line, 11b a
 // partial listing refuses every ref, 11b2 unknown and ambiguous tell refusals
@@ -207,6 +208,11 @@ async function probeWait(messageId, generation, timeoutMs = 30000) {
 async function probeSessions() {
   const res = await fetch(BROKER + '/sessions', { headers: { 'X-Avenor-Run-Id': probe.runId, 'X-Avenor-Run-Token': probe.token } })
   return JSON.parse(await res.text())
+}
+async function probeName(name) {
+  const res = await post('/session_name', { name }, true)
+  if (!res.ok) throw new Error('naming probe failed: ' + res.status + ' ' + res.text)
+  record('probe.named', name)
 }
 async function probePoll(agentOnly = true) {
   const res = await post('/poll-control', { agent_only: agentOnly }, true)
@@ -705,6 +711,58 @@ if (!tellEdgeAnswer || tellEdgeAnswer.isDelivered !== true || !tellEdgeShape.ok 
   console.log('FAIL: the explicit tell consumed the ask edge', tellEdgeShape)
   process.exit(1)
 }
+
+console.log('=== 6d. spaced labels and empty text stay on this session\'s tell path ===')
+// A broker label may contain spaces, and the shared router admits an empty
+// message string. Both must remain on this session's peer client instead of
+// falling through to the MCP server's unrelated supervisor.
+await probeName('front end')
+const spacedMarks = sentBodies.length
+const spacedTool = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'tell', target: 'front end', message: 'a tell to a spaced label',
+})
+if (spacedTool === undefined || typeof spacedTool.result !== 'string') {
+  console.log('FAIL: a spaced label tell fell through to the MCP server')
+  process.exit(1)
+}
+const spacedTell = JSON.parse(spacedTool.result)
+const spacedSends = sentBodies.slice(spacedMarks)
+console.log(JSON.stringify({ check: 'spaced label tell', spacedTell, sends: spacedSends.length,
+  from: spacedSends[0] === undefined ? null : spacedSends[0].from_run_id }))
+if (spacedTell.action !== 'tell' || spacedTell.outcome !== 'sent' || spacedTell.label !== 'front end' ||
+    spacedSends.length !== 1 || spacedSends[0].from_run_id !== 'claude-parent' ||
+    spacedSends[0].to_run_id !== probe.runId || spacedSends[0].payload.message !== 'a tell to a spaced label') {
+  console.log('FAIL: a spaced label tell did not stay on this session\'s peer client', spacedTell)
+  process.exit(1)
+}
+const spacedRow = await until('the probe to receive the spaced-label tell', async () => {
+  const rows = await probePoll()
+  return rows.find((m) => m && m.type === 'agent_message' &&
+    JSON.stringify(m).includes('a tell to a spaced label')) ?? null
+})
+if (spacedRow.from_run_id !== 'claude-parent') {
+  console.log('FAIL: the spaced-label tell arrived from another identity', spacedRow)
+  process.exit(1)
+}
+const emptyMarks = sentBodies.length
+const emptyTool = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'tell', target: 'front end', message: '',
+})
+if (emptyTool === undefined || typeof emptyTool.result !== 'string') {
+  console.log('FAIL: an empty tell fell through to the MCP server')
+  process.exit(1)
+}
+const emptyTell = JSON.parse(emptyTool.result)
+const emptySends = sentBodies.slice(emptyMarks)
+console.log(JSON.stringify({ check: 'empty message tell', emptyTell, sends: emptySends.length,
+  from: emptySends[0] === undefined ? null : emptySends[0].from_run_id }))
+if (emptyTell.action !== 'tell' || emptyTell.outcome !== 'sent' || emptyTell.label !== 'front end' ||
+    emptySends.length !== 1 || emptySends[0].from_run_id !== 'claude-parent' ||
+    emptySends[0].to_run_id !== probe.runId || emptySends[0].payload.message !== '') {
+  console.log('FAIL: an empty tell did not stay on this session\'s peer client', emptyTell)
+  process.exit(1)
+}
+await probeName('probe-peer')
 await drainProbe()
 
 console.log('=== 7. unknown avenor ref (before any gate) ===')

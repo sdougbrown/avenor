@@ -275,10 +275,11 @@ export function renderReplyText(messageId, outcome) {
 }
 
 /**
- * The tell column of schemas/message.outcome.json, verbatim: the outcomes a
- * tell can report. A send refusal the broker did not classify is rendered as
- * possibly-pending, the contract's conservative reading, so a message is never
- * reported as provably unsent without the broker saying so.
+ * The tell column of schemas/message.outcome.json for the outcomes this hook
+ * produces: a new tell never becomes `withdrawn`, so that row is omitted. A
+ * send refusal the broker did not classify is rendered as possibly-pending,
+ * the contract's conservative reading, so a message is never reported as
+ * provably unsent without the broker saying so.
  */
 const TELL_TEMPLATES = {
   sent: "message {message_id} delivered to {target}",
