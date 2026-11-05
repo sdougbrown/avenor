@@ -1720,6 +1720,68 @@ describe('Avenor Pi extension', () => {
     const result = await settleWithin<any>(resultPromise, 'a waiting probe re-blocked the backgrounded wait')
     expect(result.details).toMatchObject({ backgrounded: true, ready: false, status: 'waiting' })
 
+    // The claim and notice guards keep the run deliverable: the poll loop
+    // sends the waiting notice — the only post-turn signal that the run is
+    // stuck on a permission.
+    let resolveNotice!: () => void
+    h.sendUserMessage.mockImplementation(() => resolveNotice())
+    await settleWithin(new Promise<void>(resolve => { resolveNotice = resolve }), 'the waiting notice never reached the session')
+    const notices = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('is waiting for input'))
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain('approve the deploy')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('never backgrounds when backgroundAfterMs is 0', async () => {
+    const SOCK = '/tmp/zero-bound.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: 0,
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    let settled = false
+    resultPromise.then(() => { settled = true }, () => { settled = true })
+    await new Promise(resolve => setTimeout(resolve, scaleMs(120)))
+    expect(settled).toBe(false)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('returns the plain result when the run finished as the wait backgrounded', async () => {
+    const SOCK = '/tmp/background-ready.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'already done' }
+    })
+    const resultTool = mock(async () => ({ run_id: 'r1', label: 'worker', status: 'done', ready: true, output: 'already done' }))
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool,
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const result = await settleWithin<any>(resultPromise, 'the finished run never returned its result')
+    expect(result.details).toMatchObject({ run_id: 'r1', ready: true })
+    // The result is in hand: no backgrounding markers may claim otherwise.
+    expect(result.details).not.toHaveProperty('backgrounded')
+    expect(result.details).not.toHaveProperty('note')
+
     await h.eventHandlers.session_shutdown()
   })
 

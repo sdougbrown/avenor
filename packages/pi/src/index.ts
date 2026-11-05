@@ -641,14 +641,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
     /** Build the early return for a wait that backgrounded itself: the same
      * probe and redelivery as a sibling interrupt, but the payload reports
-     * the backgrounding instead of a sibling that caused it. */
+     * the backgrounding instead of a sibling that caused it. When the
+     * redelivery already holds the output, the plain result returns — the
+     * backgrounding markers would claim work is pending that is in hand. */
     async function resultAfterBackground(
       params: { run_id: string; supervisor_id?: string; wait?: boolean; timeout?: string; signal?: AbortSignal },
       tracked: TrackedRun | undefined,
-    ): Promise<BackgroundedResult> {
+    ): Promise<InterruptedResult | BackgroundedResult> {
       const stop: StoppingPoint = { runId: tracked?.runId ?? params.run_id, status: 'backgrounded' }
       const { interrupted_by, ...result } = await resultAfterInterrupt(params, stop, tracked, { redeliverWaiting: false })
       void interrupted_by
+      if (result.ready) return result
       return {
         ...result,
         backgrounded: true,
@@ -2655,7 +2658,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       name: 'avenor_result',
       label: 'Avenor Result',
       description:
-        `Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking. A wait without an explicit timeout stops after two minutes and returns backgrounded: true while the run keeps going; the completion is delivered automatically and starts your next turn, so end your turn instead of re-polling. When several runs are pending, the first stopping point (a permission request, an inbound ask, or completion on any run) interrupts other blocking waits so they can be handled; re-issue the interrupted wait afterwards.`,
+        `Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking. A wait without an explicit timeout stops after ${BACKGROUND_AFTER_MS / 60_000} minutes and returns backgrounded: true while the run keeps going; the completion is delivered automatically and starts your next turn, so end your turn instead of re-polling. When several runs are pending, the first stopping point (a permission request, an inbound ask, or completion on any run) interrupts other blocking waits so they can be handled; re-issue the interrupted wait afterwards.`,
       parameters: Type.Object({
         run_id: Type.String({ description: 'Run ID or label' }),
         wait: Type.Optional(Type.Boolean({ description: 'Wait for a terminal result (default true); false retrieves the current state without blocking' })),
@@ -2714,7 +2717,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               const armSupervisor = params.supervisor_id ?? tracked?.supervisorId
               // A tracked run is released by the finally below and delivers
               // on its own; a second armed entry emits the completion twice.
-              if (!tracked && result.run_id && !trackedRuns.has(trackedRunKey(armSupervisor, result.run_id))) {
+              if (!result.ready && !tracked && result.run_id && !trackedRuns.has(trackedRunKey(armSupervisor, result.run_id))) {
                 upsertTrackedRun({ runId: result.run_id, supervisorId: armSupervisor, label: result.label }, undefined, false)
                 startPolling()
               }
