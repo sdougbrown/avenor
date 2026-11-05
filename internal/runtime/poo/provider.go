@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -23,6 +25,9 @@ const backendID = "poo"
 // errOneSession is the refusal a provider that already serves a session gives:
 // poo runs one session per process.
 var errOneSession = errors.New("poo runs one session per process")
+
+var messagingPollInterval = 100 * time.Millisecond
+var messagingPollLimit = 10 * time.Second
 
 // Provider is the poo backend: one process, one session.
 type Provider struct {
@@ -106,16 +111,70 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, describeCreateFailure(merged, err)
 	}
 
+	on := merged.MessagingOn && messagingReady && runtime.ProvisionPeer(merged) != nil
+	if on {
+		var reason string
+		on, reason = checkMessaging(ctx, c, info)
+		if !on {
+			log.Printf("warning: poo messaging unavailable: %s", reason)
+		}
+	}
+	merged.MessagingOn = on
 	p.mu.Lock()
+	p.opts = merged
 	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
 	p.mu.Unlock()
 
 	return runtime.Session{
-		SessionID: info.SessionID,
-		Backend:   backendID,
-		Dir:       merged.Dir,
-		PID:       c.pid(),
+		SessionID:   info.SessionID,
+		Backend:     backendID,
+		Dir:         merged.Dir,
+		PID:         c.pid(),
+		MessagingOn: &on,
 	}, nil
+}
+
+func checkMessaging(ctx context.Context, c *client, info protocol.SessionInfo) (bool, string) {
+	found := false
+	for _, tool := range info.Tools {
+		if tool.Name == "call_cli" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false, "session/create did not offer call_cli"
+	}
+	ctx, cancel := context.WithTimeout(ctx, messagingPollLimit)
+	defer cancel()
+	for {
+		raw, rpcErr, err := c.call(ctx, protocol.MethodSessionGet, protocol.GetParams{SessionID: info.SessionID})
+		if err != nil {
+			if ctx.Err() != nil {
+				return false, fmt.Sprintf("feed:avenor-inbox not seen: %v", ctx.Err())
+			}
+			return false, fmt.Sprintf("session/get: %v", err)
+		}
+		if rpcErr != nil {
+			return false, fmt.Sprintf("session/get: %s", describeRefusal(rpcErr))
+		}
+		var result protocol.GetResult
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return false, fmt.Sprintf("decode session/get: %v", err)
+		}
+		for _, job := range result.Jobs {
+			if job.JobID == "feed:avenor-inbox" {
+				return true, ""
+			}
+		}
+		timer := time.NewTimer(messagingPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, fmt.Sprintf("feed:avenor-inbox not seen: %v", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 // describeCreateFailure names the field poo refused, because the server's own
@@ -154,10 +213,11 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	if st != nil {
 		if c != nil && c.live() {
 			return runtime.Session{
-				SessionID: sessionID,
-				Backend:   backendID,
-				Dir:       merged.Dir,
-				PID:       c.pid(),
+				SessionID:   sessionID,
+				Backend:     backendID,
+				Dir:         merged.Dir,
+				PID:         c.pid(),
+				MessagingOn: &merged.MessagingOn,
 			}, nil
 		}
 		// The process behind the known session is gone: reap it, so the
@@ -177,15 +237,26 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 		return runtime.Session{}, describeLoadFailure(sessionID, err)
 	}
 
+	on := merged.MessagingOn && messagingReady && runtime.ProvisionPeer(merged) != nil
+	if on {
+		var reason string
+		on, reason = checkMessaging(ctx, c, info)
+		if !on {
+			log.Printf("warning: poo messaging unavailable: %s", reason)
+		}
+	}
+	merged.MessagingOn = on
 	p.mu.Lock()
+	p.opts = merged
 	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
 	p.mu.Unlock()
 
 	return runtime.Session{
-		SessionID: info.SessionID,
-		Backend:   backendID,
-		Dir:       merged.Dir,
-		PID:       c.pid(),
+		SessionID:   info.SessionID,
+		Backend:     backendID,
+		Dir:         merged.Dir,
+		PID:         c.pid(),
+		MessagingOn: &merged.MessagingOn,
 	}, nil
 }
 

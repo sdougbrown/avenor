@@ -88,6 +88,8 @@ type Session struct {
 	Backend   string
 	Dir       string
 	PID       int // Consumed by longe halt (SIGTERM); set by opencode-acp backend. 0 otherwise.
+	// MessagingOn reports the backend's effective messaging choice when non-nil.
+	MessagingOn *bool
 }
 
 // MaxPermissionMessageBytes is the maximum allowed size for a write-in

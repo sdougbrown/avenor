@@ -25,6 +25,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/backendlaunch"
 	"github.com/sdougbrown/avenor/internal/events"
 	avruntime "github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/poo/wire/protocol"
 )
 
@@ -305,6 +306,98 @@ func (f pooFixture) startOptions(t *testing.T) avruntime.StartOptions {
 			Args:     []string{"serve"},
 			Settings: f.settings,
 		},
+	}
+}
+
+func TestMessagingOutcomeRealPoo(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("POO_FEEDS_PATH", "")
+	t.Setenv("POO_CLI_REGISTRY_PATH", "")
+	messagingReady = true
+	t.Cleanup(func() { messagingReady = false })
+	stub := filepath.Join(t.TempDir(), "avenor")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 60\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	old := avenorExecutable
+	avenorExecutable = func() (string, error) { return stub, nil }
+	t.Cleanup(func() { avenorExecutable = old })
+	b := broker.New(broker.MakeToken())
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	token, ok, err := b.EnsureRun("rt_child", "")
+	if err != nil || !ok {
+		t.Fatalf("EnsureRun: %v %v", ok, err)
+	}
+	for _, tc := range []struct {
+		profile string
+		want    bool
+	}{{"code", true}, {"search", false}} {
+		t.Run(tc.profile, func(t *testing.T) {
+			f := newPooFixture(t, newFakeEndpoint(t))
+			opts := f.startOptions(t)
+			opts.Agent, opts.MessagingOn, opts.Broker, opts.RuntimeID, opts.BrokerToken = tc.profile, true, b, "rt_child", token
+			p := NewWithOptions(opts)
+			t.Cleanup(func() { _ = p.Close() })
+			s, err := p.Start(context.Background(), avruntime.StartOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.MessagingOn == nil || *s.MessagingOn != tc.want {
+				t.Fatalf("messaging outcome = %v, want %v", s.MessagingOn, tc.want)
+			}
+			if p.opts.MessagingOn != tc.want {
+				t.Fatalf("effective options = %v", p.opts.MessagingOn)
+			}
+			if tc.want {
+				raw, rpcErr, err := p.client.call(context.Background(), protocol.MethodSessionGet, protocol.GetParams{SessionID: s.SessionID})
+				if err != nil || rpcErr != nil {
+					t.Fatalf("session/get: %v %v", err, rpcErr)
+				}
+				var result protocol.GetResult
+				if err := json.Unmarshal(raw, &result); err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, job := range result.Jobs {
+					if job.JobID == "feed:avenor-inbox" {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("inbox job missing: %+v", result.Jobs)
+				}
+			}
+		})
+	}
+}
+
+func TestMessagingReadinessWait(t *testing.T) {
+	oldInterval, oldLimit := messagingPollInterval, messagingPollLimit
+	messagingPollInterval, messagingPollLimit = 20*time.Millisecond, 180*time.Millisecond
+	t.Cleanup(func() { messagingPollInterval, messagingPollLimit = oldInterval, oldLimit })
+	for _, tc := range []struct {
+		mode string
+		want bool
+	}{{"messaging-late", true}, {"messaging-never", false}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			t.Setenv(helperEnv, tc.mode)
+			c, err := startClient(context.Background(), avruntime.StartOptions{Launch: backendlaunch.Spec{Command: os.Args[0]}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.shutdown()
+			started := time.Now()
+			ok, reason := checkMessaging(context.Background(), c, protocol.SessionInfo{SessionID: "session", Tools: []protocol.ToolInfo{{Name: "call_cli"}}})
+			if ok != tc.want {
+				t.Fatalf("got %v, reason %q", ok, reason)
+			}
+			if !ok && (!strings.Contains(reason, "feed:avenor-inbox") || time.Since(started) < messagingPollLimit) {
+				t.Fatalf("reason %q, elapsed %v", reason, time.Since(started))
+			}
+		})
 	}
 }
 
@@ -1799,6 +1892,7 @@ func runHelperServer(mode string) int {
 	}
 	runPrompts := 0
 	inspectWaits := 0
+	getCount := 0
 	write := func(value any) {
 		encoded, err := json.Marshal(value)
 		if err != nil {
@@ -1822,6 +1916,15 @@ func runHelperServer(mode string) int {
 		}
 		switch request.Method {
 		case protocol.MethodSessionGet:
+			if mode == "messaging-late" || mode == "messaging-never" {
+				getCount++
+				result := protocol.GetResult{}
+				if mode == "messaging-late" && getCount >= 3 {
+					result.Jobs = []protocol.JobInfo{{JobID: "feed:avenor-inbox"}}
+				}
+				write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
+				continue
+			}
 			if mode == "busysettle" {
 				// The run that refused the prompt has settled, so the
 				// session names none.

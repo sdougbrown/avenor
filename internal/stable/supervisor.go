@@ -4607,6 +4607,9 @@ func (s *Supervisor) installChildProvider(child *childRuntime, provider runtime.
 	child.provider = provider
 	child.session = session
 	child.providerLifecycle = lifecycle
+	if session.MessagingOn != nil {
+		child.messagingOn = *session.MessagingOn
+	}
 	child.mu.Unlock()
 	child.writeMu.Unlock()
 	return lifecycle

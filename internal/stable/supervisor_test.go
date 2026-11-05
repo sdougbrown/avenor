@@ -31,6 +31,21 @@ import (
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
+func TestProviderMessagingOutcome(t *testing.T) {
+	sup := newTestSupervisor(t, Config{})
+	child := &childRuntime{messagingOn: true}
+	provider := &permRecordingProvider{}
+	sup.installChildProvider(child, provider, runtime.Session{})
+	if !child.messagingOn {
+		t.Fatal("provider without an outcome changed messaging")
+	}
+	off := false
+	sup.installChildProvider(child, provider, runtime.Session{MessagingOn: &off})
+	if child.messagingOn {
+		t.Fatal("provider's off outcome was not recorded")
+	}
+}
+
 func TestNewSupervisor(t *testing.T) {
 	t.Parallel()
 	sup := newTestSupervisor(t, Config{
