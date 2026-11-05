@@ -18,7 +18,6 @@
       "description": "New display name, 1-64 characters with no control or formatting characters (including bidi overrides and zero-width characters, so a label cannot be rendered to look like another peer's). Length is counted in Unicode code points, as JSON Schema maxLength counts it; the rename authority applies the same rune rule as a second check.",
       "maxLength": 64,
       "minLength": 1,
-      "pattern": "^[^\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]+$",
       "type": "string"
     },
     "session_id": {

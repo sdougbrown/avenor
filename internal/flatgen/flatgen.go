@@ -28,6 +28,13 @@ type Meta struct {
 // carry both declarations. The union's `action` declarations are kept too: its
 // default verbatim, and its per-action descriptions as one summary naming each
 // action.
+//
+// A declared `pattern` is not published. Every consumer validates a tool schema
+// with its own regex dialect, and OpenAI's has no Unicode property classes: a
+// published `^[^\p{Cc}\p{Cf}]+$` makes every turn fail with "Invalid schema
+// for function" before the model runs (avenor#578). The union and the route
+// table keep the pattern, and the router enforces it, so dropping it from
+// publication loses no admission rule.
 func Flatten(raw []byte, meta Meta) ([]byte, error) {
 	var union struct {
 		OneOf []struct {
@@ -82,10 +89,10 @@ func Flatten(raw []byte, meta Meta) ([]byte, error) {
 			if name == "action" {
 				continue
 			}
-			declared := withoutDescription(spec)
+			declared := withoutDescription(publishedSpec(spec))
 			existing, seen := properties[name].(map[string]any)
 			if !seen {
-				properties[name] = copyMap(spec)
+				properties[name] = publishedSpec(spec)
 				declarations[name] = declared
 				declaredBy[name] = action
 				continue
@@ -186,6 +193,15 @@ func withoutDescription(spec map[string]any) map[string]any {
 	declared := copyMap(spec)
 	delete(declared, "description")
 	return declared
+}
+
+// publishedSpec copies one property declaration for the flat schema, without
+// the keywords a published schema cannot carry. Flatten's doc explains why a
+// pattern is dropped; the union keeps it for the router.
+func publishedSpec(spec map[string]any) map[string]any {
+	published := copyMap(spec)
+	delete(published, "pattern")
+	return published
 }
 
 func copyMap(spec map[string]any) map[string]any {

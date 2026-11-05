@@ -46,3 +46,38 @@ func TestFlattenRejectsTrailingContent(t *testing.T) {
 		t.Fatal("Flatten accepted trailing content after the top-level object")
 	}
 }
+
+// TestFlattenDropsPortableUnsafePattern proves a published flat schema carries
+// no regex from the union. A provider's tool-schema validator implements its
+// own regex dialect, and OpenAI's rejects Unicode property classes: a published
+// `\p{Cc}` pattern fails every turn with "Invalid schema for function" before
+// the model runs. The union keeps the pattern for the route table, which the
+// router enforces; the flat schema is publication only.
+func TestFlattenDropsPortableUnsafePattern(t *testing.T) {
+	union := []byte(`{
+	  "oneOf": [
+	    {
+	      "properties": {
+	        "action": {"const": "rename"},
+	        "name": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[^\\p{Cc}\\p{Cf}]+$"}
+	      },
+	      "required": ["action", "name"]
+	    }
+	  ]
+	}`)
+	out, err := Flatten(union, Meta{Title: "t", ID: "https://example.test/t", Description: "d"})
+	if err != nil {
+		t.Fatalf("Flatten: %v", err)
+	}
+	if strings.Contains(string(out), "pattern") {
+		t.Fatalf("flat schema publishes a pattern:\n%s", out)
+	}
+	if strings.Contains(string(out), `\p{`) {
+		t.Fatalf("flat schema carries a Unicode property class:\n%s", out)
+	}
+	for _, want := range []string{`"minLength": 1`, `"maxLength": 64`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("flat schema lost the bound %s:\n%s", want, out)
+		}
+	}
+}

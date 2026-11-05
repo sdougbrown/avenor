@@ -305,7 +305,11 @@ func TestFlatSchemaIsTheUnion(t *testing.T) {
 					continue
 				}
 				declaring[name] = append(declaring[name], action)
-				declared[name] = append(declared[name], withoutKey(property, "description"))
+				// The flat schema publishes no pattern: a client validates a tool
+				// schema with its own regex dialect, and publishing the peers name
+				// pattern broke every turn on OpenAI models (avenor#578). The union
+				// keeps it, and the router enforces it.
+				declared[name] = append(declared[name], withoutKey(withoutKey(property, "description"), "pattern"))
 			}
 		}
 		// The flat schema publishes one required set, so only a key every action
@@ -562,4 +566,39 @@ func capitalize(value string) string {
 		return value
 	}
 	return strings.ToUpper(value[:1]) + value[1:]
+}
+
+// TestPublishedSchemasStayInEveryRegexDialect proves no published tool schema
+// carries a regex. A client validates a tool schema with its own regex dialect,
+// and OpenAI's has no Unicode property classes: publishing `^[^\p{Cc}]+$` made
+// every turn fail with "Invalid schema for function" before the model ran
+// (avenor#578). The union schema keeps the pattern and the router enforces it,
+// so the published flat schema — which both the Go surfaces and the TypeScript
+// package publish — must stay free of them.
+func TestPublishedSchemasStayInEveryRegexDialect(t *testing.T) {
+	for _, path := range []string{
+		"../../schemas/message.input.flat.json",
+		"../../schemas/peers.input.flat.json",
+		"../../schemas/workflow.input.flat.json",
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, forbidden := range []string{"pattern", `\p{`} {
+			if strings.Contains(string(data), forbidden) {
+				t.Errorf("%s publishes %q; a client regex dialect would refuse it", path, forbidden)
+			}
+		}
+	}
+	for name, schema := range map[string]string{
+		"message": messageInputFlatSchemaJSON,
+		"peers":   peersInputFlatSchemaJSON,
+	} {
+		for _, forbidden := range []string{"pattern", `\p{`} {
+			if strings.Contains(schema, forbidden) {
+				t.Errorf("%s flat constant publishes %q", name, forbidden)
+			}
+		}
+	}
 }

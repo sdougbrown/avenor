@@ -176,6 +176,15 @@ is unchanged — the router still refuses a field outside the chosen action's se
 a missing field, a wrong type and an out-of-range value with the contract's own
 sentence. The flat schema is client guidance; the union stays the contract.
 
+A published schema carries no `pattern` either, for the same reason: every
+client validates a tool schema with its own regex dialect, and OpenAI's has no
+Unicode property classes. Publishing the `peers` rename pattern
+(`^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$`) made every pi turn on an `openai-codex`
+model fail with `Invalid schema for function` before the model ran (avenor#578).
+The union and the admission table keep the pattern, and the rename authority
+enforces the same rune rule, so dropping it from publication refuses nothing
+that was admitted before.
+
 ## Wire errors
 
 Every transport error names one of these classes. The code is what the wire
