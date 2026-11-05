@@ -170,6 +170,8 @@ Poo messaging requires poo v0.2.0 or later. The `messaging` spawn option enables
 
 Avenor checks for `call_cli` in the session's tools and waits up to 10 seconds for the `feed:avenor-inbox` job to report `running`. A listed job or a feed-started event alone does not prove the command is running or that the broker accepted it. If messaging cannot be enabled, a default-on spawn is relaunched once with messaging off and a warning; an explicit `messaging: true` fails instead. A read-only profile cannot offer `call_cli` and follows the same policy. A resume keeps the effective choice; a session created with messaging on may not resume through `avenor run --resume`, where the default is off, because its recorded tools no longer match.
 
+An inbox message can wake a parked poo session. While the supervisor is parked it retains the prompted turn's status, result and sentinel; events from the unattended run are not replayed into a later resumed turn. The session transcript still contains that run.
+
 At launch Avenor publishes rendered manifests under `<state home>/poo/manifests/<digest>/`. It prunes sibling digest directories older than seven days, never the directory being published. Each launch, including resume, publishes its own manifests again.
 
 The broker token is in the child's environment, so model-issued `bash` commands can read it. It grants messaging as that child run, not supervisor authority. Claude children instead get a one-shot attach credential. Adding the token to `tools.env.scrub` also hides it from the feed, which then fails at start.

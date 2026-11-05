@@ -68,6 +68,7 @@ type client struct {
 	pending     map[string]chan rpcReply
 	asks        map[string]permissionAsk
 	subs        map[string][]chan events.Event
+	subscribed  map[string]bool
 	held        map[string][]events.Event
 	holds       map[string]int
 	submissions map[string][]events.Event
@@ -157,6 +158,7 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 		pending:     map[string]chan rpcReply{},
 		asks:        map[string]permissionAsk{},
 		subs:        map[string][]chan events.Event{},
+		subscribed:  map[string]bool{},
 		held:        map[string][]events.Event{},
 		holds:       map[string]int{},
 		submissions: map[string][]events.Event{},
@@ -653,8 +655,9 @@ func (c *client) answerPermission(sessionID, requestID string, response runtime.
 	return nil
 }
 
-// deliver fans an event out to the session's subscribers, or holds it until a
-// subscriber attaches or the prompt's acceptance is recorded.
+// deliver fans an event out to the session's subscribers. It holds events
+// until the first subscriber attaches or the prompt's acceptance is recorded;
+// events between subscriptions belong to an unattended run and are not replayed.
 func (c *client) deliver(ev events.Event) {
 	c.mu.Lock()
 	if c.subs == nil {
@@ -665,7 +668,9 @@ func (c *client) deliver(ev events.Event) {
 	// names it, and a subscriber attaches only after Start returns: both are
 	// held here and flushed when someone is listening.
 	if c.holds[ev.SessionID] > 0 || len(c.subs[ev.SessionID]) == 0 {
-		c.held[ev.SessionID] = appendBounded(c.held[ev.SessionID], ev)
+		if c.holds[ev.SessionID] > 0 || !c.subscribed[ev.SessionID] {
+			c.held[ev.SessionID] = appendBounded(c.held[ev.SessionID], ev)
+		}
 		c.mu.Unlock()
 		return
 	}
@@ -706,6 +711,10 @@ func (c *client) subscribe(sessionID string, ch chan events.Event) {
 		return
 	}
 	c.subs[sessionID] = append(c.subs[sessionID], ch)
+	if c.subscribed == nil {
+		c.subscribed = make(map[string]bool)
+	}
+	c.subscribed[sessionID] = true
 	// The events held before this subscriber attached are published before the
 	// lock is released: a concurrent deliver that sees the subscriber therefore
 	// publishes a newer event after the held ones, never ahead of them.

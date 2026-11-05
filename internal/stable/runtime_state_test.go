@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,6 +21,11 @@ import (
 // directory. Production roots still use the user's Avenor runtime-state
 // directory; this only isolates the package's many direct NewSupervisor tests.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 2 && os.Args[1] == "feed" && os.Args[2] == "broker" {
+		if err := syscall.Exec(filepath.Join(os.Getenv("HOME"), "avenor-test-bin"), os.Args, os.Environ()); err != nil {
+			panic(err)
+		}
+	}
 	root, err := os.MkdirTemp("", "avenor-stable-test-")
 	if err != nil {
 		panic(err)
