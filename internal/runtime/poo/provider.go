@@ -140,7 +140,7 @@ func checkMessaging(ctx context.Context, opts runtime.StartOptions, info protoco
 		}
 	}
 	if !found {
-		return &messagingFailure{reason: "session/create did not offer call_cli"}
+		return &messagingFailure{reason: "the session did not offer call_cli"}
 	}
 	ctx, cancel := context.WithTimeout(ctx, messagingPollLimit)
 	defer cancel()
