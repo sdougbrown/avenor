@@ -129,6 +129,10 @@ describe('formatInboundAskBody', () => {
     expect(body).toContain('supervisor')
     expect(body).toContain('hello')
     expect(body).toContain('avenor_message({ action: "reply", reply_to: "ask-1"')
+    // The reply instruction is the only place an ask names its id: a tell's
+    // header carries one because it has no edge to answer on, and an ask's
+    // would duplicate the id the reader already has.
+    expect(body).not.toContain('message id')
   })
 
   it('renders no role, because nothing on the wire is stamped with one', () => {
