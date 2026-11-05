@@ -24,11 +24,13 @@
 // older by id), 6b a timed-out ask is classified from the wire facts, 6c the
 // message tool's tell action is served as this session with its listing's
 // generation and no ask edge, 6d a spaced label and an empty tell stay on that
-// tell path, 9b a
+// tell path while a non-string message passes through, 9b a
 // failed /poll-control pauses the loop without killing it, 11a a broker-less
 // session stays off with one reason line, 11b a
-// partial listing refuses every ref, 11b2 unknown and ambiguous tell refusals
-// send nothing, 11c one ask reads one listing, 11d the
+// partial listing refuses every ref, 11b2 unknown and ambiguous tell and ask
+// refusals send nothing, a non-throw tell refusal classifies from its body, and
+// a label-less row falls back to its run id, 11b3 a failed listing read refuses
+// ask and tell without a send, 11c one ask reads one listing, 11d the
 // reply action answers an inbound tell by message id without reading a listing
 // that hides the peer, 11d2 a tell with only an envelope id still names it in
 // the frame, 11e a tell pinned to a replaced generation is still
@@ -762,13 +764,29 @@ if (emptyTell.action !== 'tell' || emptyTell.outcome !== 'sent' || emptyTell.lab
   console.log('FAIL: an empty tell did not stay on this session\'s peer client', emptyTell)
   process.exit(1)
 }
+// Only an absent or non-string message is left to the MCP surface's admission:
+// the hook must pass it through untouched and send nothing of its own.
+const malformedMarks = sentBodies.length
+const missingMessageTell = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'tell', target: 'front end', message: undefined,
+})
+const numericMessageTell = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'tell', target: 'front end', message: 7,
+})
+console.log(JSON.stringify({ check: 'non-string tell messages pass through', missingMessageTell, numericMessageTell,
+  sends: sentBodies.length - malformedMarks }))
+if (missingMessageTell !== undefined || numericMessageTell !== undefined ||
+    sentBodies.length !== malformedMarks) {
+  console.log('FAIL: a non-string tell message did not pass through to the MCP surface')
+  process.exit(1)
+}
 await probeName('probe-peer')
 await drainProbe()
 
 console.log('=== 7. unknown avenor ref (before any gate) ===')
 const miss = await callHook('session.send').hook(d, { to: 'avenor:nope', text: 'z', origin: { kind: 'model' } })
 console.log(JSON.stringify({ check: 'unknown ref', miss }))
-if (!miss || miss.isDelivered !== false || !miss.reason.includes('no avenor run matches')) {
+if (!miss || miss.isDelivered !== false || !miss.reason.includes('no run matches')) {
   console.log('FAIL: unknown ref behavior')
   process.exit(1)
 }
@@ -994,7 +1012,7 @@ if (!onLine) {
   process.exit(1)
 }
 const onSend = await onCopy.hooks['session.send'](onCopy.d, { to: 'avenor:nobody-here', text: 'x', origin: { kind: 'model' } })
-if (!onSend || onSend.isDelivered !== false || !onSend.reason.includes('no avenor run matches')) {
+if (!onSend || onSend.isDelivered !== false || !onSend.reason.includes('no run matches')) {
   console.log('FAIL: the armed copy did not resolve through the broker', onSend)
   process.exit(1)
 }
@@ -1026,7 +1044,7 @@ if (!partialSend || partialSend.isDelivered !== false ||
   console.log('FAIL: a send resolved against a partial listing', partialSend)
   process.exit(1)
 }
-if (partialAsk.outcome !== 'not-sent' || partialAsk.message_id !== undefined ||
+if (partialAsk.code !== 'refused' || partialAsk.outcome !== undefined ||
     !partialAsk.text.includes('the peer listing is incomplete')) {
   console.log('FAIL: an ask resolved against a partial listing', partialAsk)
   process.exit(1)
@@ -1047,6 +1065,7 @@ const refusalListing = listingStub({
     { run_id: 'peer-a', label: 'twin' },
     { run_id: 'peer-b', label: 'twin' },
     { run_id: 'peer-c', label: 'unique-peer' },
+    { run_id: 'peer-x' },
   ],
   generation: 'gen-refuse',
 }, () => {})
@@ -1067,7 +1086,10 @@ const refusalCopy = await layerCopy({ base: '2.1.311' }, {
 })
 const unknownTell = JSON.parse((await tellHookCall(refusalCopy, { target: 'ghost', message: 'hi' })).result)
 const ambiguousTell = JSON.parse((await tellHookCall(refusalCopy, { target: 'twin', message: 'hi' })).result)
-console.log(JSON.stringify({ check: 'tell refusals', unknownTell, ambiguousTell, sends: refusalSends }))
+const unknownAsk = JSON.parse((await askHookCall(refusalCopy, { target: 'ghost', message: 'hi' })).result)
+const ambiguousAsk = JSON.parse((await askHookCall(refusalCopy, { target: 'twin', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'tell and ask refusals', unknownTell, ambiguousTell, unknownAsk, ambiguousAsk,
+  sends: refusalSends }))
 if (unknownTell.code !== 'unknown_target' || unknownTell.text !== 'no run matches "ghost"') {
   console.log('FAIL: an unknown tell target is not the router error', unknownTell)
   process.exit(1)
@@ -1077,8 +1099,17 @@ if (ambiguousTell.code !== 'ambiguous_name' ||
   console.log('FAIL: an ambiguous tell target is not the router error', ambiguousTell)
   process.exit(1)
 }
+if (unknownAsk.code !== 'unknown_target' || unknownAsk.text !== 'no run matches "ghost"') {
+  console.log('FAIL: an unknown ask target is not the router error', unknownAsk)
+  process.exit(1)
+}
+if (ambiguousAsk.code !== 'ambiguous_name' ||
+    ambiguousAsk.text !== '"twin" matches 2 runs: "peer-a", "peer-b"') {
+  console.log('FAIL: an ambiguous ask target is not the router error', ambiguousAsk)
+  process.exit(1)
+}
 if (refusalSends !== 0) {
-  console.log('FAIL: a refused tell reached the broker', refusalSends)
+  console.log('FAIL: a refused tell or ask reached the broker', refusalSends)
   process.exit(1)
 }
 // A send the broker refuses is classified from its own envelope, and the hook
@@ -1091,6 +1122,80 @@ if (refusedTell.action !== 'tell' || refusedTell.outcome !== 'auth-rejected' ||
     refusedTell.text !== 'message "' + refusedTell.message_id +
       '" to "unique-peer" was rejected (not authorized); nothing is pending') {
   console.log('FAIL: a refused tell was not classified from the broker envelope', refusedTell)
+  process.exit(1)
+}
+// A resolved row without a label is still labeled by its run id, never by an
+// empty string.
+const labelFallbackMarks = refusalSends
+const missingLabelTell = JSON.parse((await tellHookCall(refusalCopy, { target: 'avenor:peer-x', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'a label-less row is labeled by its run id', missingLabelTell,
+  sends: refusalSends - labelFallbackMarks }))
+if (missingLabelTell.action !== 'tell' || missingLabelTell.outcome !== 'auth-rejected' ||
+    missingLabelTell.label !== 'peer-x' || refusalSends - labelFallbackMarks !== 1 ||
+    missingLabelTell.text !== 'message "' + missingLabelTell.message_id +
+      '" to "peer-x" was rejected (not authorized); nothing is pending') {
+  console.log('FAIL: a label-less tell target was not labeled by its run id', missingLabelTell)
+  process.exit(1)
+}
+// A broker that answers 200 with queued:false has not queued the tell: the
+// outcome comes from the body, and the uncertain message is never re-sent.
+let unqueuedSends = 0
+const unqueuedCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: freshRunId('claude-tellunq'),
+}, async (url, init = {}) => {
+  if (String(url).endsWith('/send')) {
+    unqueuedSends += 1
+    return {
+      status: 200,
+      ok: true,
+      headers: {},
+      text: JSON.stringify({ queued: false, outcome: 'auth-rejected' }),
+    }
+  }
+  return refusalListing(url, init)
+})
+const unqueuedTell = JSON.parse((await tellHookCall(unqueuedCopy, { target: 'unique-peer', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'a non-throw refusal is classified from the body', unqueuedTell,
+  sends: unqueuedSends }))
+if (unqueuedTell.action !== 'tell' || unqueuedTell.outcome !== 'auth-rejected' ||
+    unqueuedTell.label !== 'unique-peer' || unqueuedSends !== 1 ||
+    unqueuedTell.text !== 'message "' + unqueuedTell.message_id +
+      '" to "unique-peer" was rejected (not authorized); nothing is pending') {
+  console.log('FAIL: a non-throw tell refusal was not classified from the broker body', unqueuedTell)
+  process.exit(1)
+}
+
+console.log('=== 11b3. a failed listing read refuses ask and tell without a send ===')
+// The listing never reached the resolver, so neither action has a target. Both
+// must report the router's refused error exactly once, without retrying the
+// read or falling back to a send.
+let listingFailSends = 0
+let listingFailReads = 0
+const listingFailCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: freshRunId('claude-listfail'),
+}, async (url, init = {}) => {
+  if (String(url).endsWith('/sessions')) {
+    listingFailReads += 1
+    throw new Error('the run listing was cut')
+  }
+  if (String(url).endsWith('/send')) listingFailSends += 1
+  const res = await fetch(url, init)
+  const text = await res.text()
+  return { status: res.status, ok: res.ok, headers: {}, text }
+})
+const unresolvedAsk = JSON.parse((await askHookCall(listingFailCopy, { target: 'probe-peer', message: 'hi' })).result)
+const unresolvedTell = JSON.parse((await tellHookCall(listingFailCopy, { target: 'probe-peer', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'a failed listing read refuses both actions', unresolvedAsk, unresolvedTell,
+  reads: listingFailReads, sends: listingFailSends }))
+if (unresolvedAsk.code !== 'refused' || unresolvedAsk.outcome !== undefined ||
+    !unresolvedAsk.text.endsWith('did not answer the run listing') ||
+    unresolvedTell.code !== 'refused' || unresolvedTell.outcome !== undefined ||
+    !unresolvedTell.text.endsWith('did not answer the run listing') ||
+    listingFailReads !== 2 || listingFailSends !== 0) {
+  console.log('FAIL: a failed listing read did not refuse both actions cleanly',
+    { unresolvedAsk, unresolvedTell, reads: listingFailReads, sends: listingFailSends })
   process.exit(1)
 }
 

@@ -119,16 +119,9 @@ async function deliverIfAvenor(d, e) {
 
 async function deliverOutbound(d, ref, text) {
   const target = await resolveTarget(d, ref)
-  if (target.match === "none") {
-    return undelivered('no avenor run matches "' + ref + '"')
-  }
-  const ambiguous = target.match === "ambiguous"
-  if (ambiguous) {
-    return undelivered('"' + ref + '" names several avenor runs (' + target.candidates.join(", ") + ")")
-  }
-  const incomplete = target.match === "incomplete"
-  if (incomplete) {
-    return undelivered(listingIncomplete(target.incomplete, ref))
+  const refusal = targetRefusal(target, ref)
+  if (refusal !== null) {
+    return undelivered(refusal.text)
   }
   // A peer this session owes an ask to takes the send as the ask's reply, so
   // the asker's own wait unblocks; every other send is a plain tell. The
@@ -491,18 +484,11 @@ async function serveTell(d, ref, message) {
     target = await resolveTarget(d, ref, true)
   } catch (err) {
     await logLayer(d, "tell target resolution failed: " + errorText(err))
-    return tellError("refused",
-      "tell to " + quote(ref) + " was not sent: the avenor broker did not answer the run listing")
+    return toolError(listingRefusal("tell", ref))
   }
-  if (target.match === "none") {
-    return tellError("unknown_target", "no run matches " + quote(ref))
-  }
-  if (target.match === "ambiguous") {
-    return tellError("ambiguous_name", quote(ref) + " matches " +
-      target.candidates.length + " runs: " + target.candidates.map(quote).join(", "))
-  }
-  if (target.match === "incomplete") {
-    return tellError("refused", listingIncomplete(target.incomplete, ref))
+  const refusal = targetRefusal(target, ref)
+  if (refusal !== null) {
+    return toolError(refusal)
   }
   const messageId = mintMessageID(await d.clock.now())
   let response
@@ -537,17 +523,11 @@ async function serveAsk(d, ref, message, rawTimeout) {
     target = await resolveTarget(d, ref, true)
   } catch (err) {
     await logLayer(d, "ask target resolution failed: " + errorText(err))
-    return askOutcome("not-sent", null,
-      "ask to " + quote(ref) + " was not sent: the avenor broker did not answer the run listing")
+    return toolError(listingRefusal("ask", ref))
   }
-  if (target.match === "none") {
-    return askOutcome("not-sent", null, 'no avenor run matches "' + ref + '"')
-  }
-  if (target.match === "ambiguous") {
-    return askOutcome("not-sent", null, '"' + ref + '" names several avenor runs (' + target.candidates.join(", ") + ")")
-  }
-  if (target.match === "incomplete") {
-    return askOutcome("not-sent", null, listingIncomplete(target.incomplete, ref))
+  const refusal = targetRefusal(target, ref)
+  if (refusal !== null) {
+    return toolError(refusal)
   }
   return runAsk(d, target, ref, message, rawTimeout)
 }
@@ -682,8 +662,8 @@ function tellOutcome(outcome, messageId, label) {
  * channel carries it as content, so the model reads the same error object the
  * MCP surface's failed call publishes.
  */
-function tellError(code, text) {
-  return { result: JSON.stringify({ code: code, text: text }) }
+function toolError(refusal) {
+  return { result: JSON.stringify({ code: refusal.code, text: refusal.text }) }
 }
 
 // --- broker client ---
@@ -709,15 +689,11 @@ async function resolveTarget(d, ref, allowSelf = false) {
   const targetRef = allowSelf && ref === "self" && broker !== null ? broker.runID : ref
   const excludeRunId = allowSelf || broker === null ? "" : broker.runID
   const hit = matchSession(sessions, targetRef, excludeRunId)
-  const resolved = hit.match === "unique" ? sessions.find((row) => row !== null &&
-    typeof row === "object" && row.run_id === hit.runId) : null
-  const rowLabel = resolved !== undefined && resolved !== null &&
-    typeof resolved.label === "string" && resolved.label !== "" ? resolved.label : ""
   return {
     match: hit.match,
     runId: hit.runId,
     candidates: hit.candidates,
-    label: hit.match === "unique" ? (rowLabel !== "" ? rowLabel : hit.runId) : "",
+    label: hit.match === "unique" ? hit.label : "",
     generation: typeof answer.generation === "string" ? answer.generation : "",
     incomplete: "",
   }
@@ -727,6 +703,41 @@ async function resolveTarget(d, ref, allowSelf = false) {
 function listingIncomplete(detail, ref) {
   return "the peer listing is incomplete: " + detail + "; " + quote(ref) +
     " was not resolved against it, because a row it missed can shadow the run or label that ref names"
+}
+
+/**
+ * The one gate every outbound peer action shares: only a target that resolved to
+ * exactly one run may send. The refusal carries the router's error code and its
+ * rendered sentence, so SendMessage, tell and ask report the same failure the
+ * same way; a match state this layer does not know is refused rather than sent
+ * with no target.
+ */
+function targetRefusal(target, ref) {
+  if (target.match === "unique") {
+    return null
+  }
+  if (target.match === "none") {
+    return { code: "unknown_target", text: "no run matches " + quote(ref) }
+  }
+  if (target.match === "ambiguous") {
+    return {
+      code: "ambiguous_name",
+      text: quote(ref) + " matches " + target.candidates.length + " runs: " +
+        target.candidates.map(quote).join(", "),
+    }
+  }
+  if (target.match === "incomplete") {
+    return { code: "refused", text: listingIncomplete(target.incomplete, ref) }
+  }
+  return { code: "refused", text: quote(ref) + " was not sent: the target did not resolve to exactly one run" }
+}
+
+/** A resolution that never reached the listing, in the same error shape. */
+function listingRefusal(action, ref) {
+  return {
+    code: "refused",
+    text: action + " to " + quote(ref) + " was not sent: the avenor broker did not answer the run listing",
+  }
 }
 
 async function brokerGet(d, path) {

@@ -53,17 +53,30 @@ export function matchSession(sessions, ref, excludeRunId) {
   if (ref === "") return { match: "none", runId: "", candidates: [] }
   const rows = Array.isArray(sessions) ? sessions : []
   let runIDMatch = null
+  let runIDLabel = ""
   const labelMatches = []
   for (const row of rows) {
     const entry = row === null || typeof row !== "object" ? {} : row
     const runID = typeof entry.run_id === "string" ? entry.run_id : ""
     const label = typeof entry.label === "string" ? entry.label : ""
     if (runID === "" || runID === excludeRunId) continue
-    if (runID === ref && runIDMatch === null) runIDMatch = runID
+    if (runID === ref && runIDMatch === null) {
+      runIDMatch = runID
+      runIDLabel = label
+    }
     if (label === ref && labelMatches.indexOf(runID) === -1) labelMatches.push(runID)
   }
-  if (runIDMatch !== null) return { match: "unique", runId: runIDMatch, candidates: [] }
-  if (labelMatches.length === 1) return { match: "unique", runId: labelMatches[0], candidates: [] }
+  if (runIDMatch !== null) {
+    return {
+      match: "unique",
+      runId: runIDMatch,
+      label: runIDLabel !== "" ? runIDLabel : runIDMatch,
+      candidates: [],
+    }
+  }
+  if (labelMatches.length === 1) {
+    return { match: "unique", runId: labelMatches[0], label: ref, candidates: [] }
+  }
   if (labelMatches.length > 1) return { match: "ambiguous", runId: "", candidates: labelMatches }
   return { match: "none", runId: "", candidates: [] }
 }

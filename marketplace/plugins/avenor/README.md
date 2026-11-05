@@ -50,7 +50,10 @@ avenor runs become addressable like teammates:
   through this session's own broker credentials (an `expects_reply` send
   blocking on `/wait_reply`, the same shape the avenor surfaces' ask action
   takes, bounded by `timeout_ms`, 0–600000 ms). Resolution and the ask's
-  generation pin come from one `/sessions` read, not two. A failed ask
+  generation pin come from one `/sessions` read, not two. A target that does
+  not resolve to exactly one run is refused with the router's error object
+  (`code`, `text`), the same refusal a tell returns, before anything is sent.
+  A failed ask
   renders the shared ask sentences from `schemas/message.outcome.json`
   (`not-sent`, `timed-out`, `possibly-pending`, …) — the same text and the
   same withdraw guidance a pi or Go peer's ask returns — and classifies the
