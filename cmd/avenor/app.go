@@ -28,6 +28,7 @@ func app() *clicontract.App {
 		VersionTemplate: "avenor v{{.Version}}\n",
 		Commands: []*clicontract.Command{
 			runCmd,
+			feedCommand(),
 			{
 				Name:  "probe",
 				Short: "run a one-shot backend probe and write the transcript",
