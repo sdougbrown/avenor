@@ -313,8 +313,6 @@ func TestMessagingOutcomeRealPoo(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("POO_FEEDS_PATH", "")
 	t.Setenv("POO_CLI_REGISTRY_PATH", "")
-	messagingReady = true
-	t.Cleanup(func() { messagingReady = false })
 	stub := filepath.Join(t.TempDir(), "avenor")
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 60\n"), 0700); err != nil {
 		t.Fatal(err)
@@ -350,6 +348,17 @@ func TestMessagingOutcomeRealPoo(t *testing.T) {
 			}
 			if p.opts.MessagingOn != tc.want {
 				t.Fatalf("effective options = %v", p.opts.MessagingOn)
+			}
+			for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN", "POO_FEEDS_PATH", "POO_CLI_REGISTRY_PATH"} {
+				found := false
+				for _, entry := range p.client.proc.Env {
+					if strings.HasPrefix(entry, key+"=") && strings.TrimPrefix(entry, key+"=") != "" {
+						found = true
+					}
+				}
+				if found != tc.want {
+					t.Errorf("%s present = %v, want %v", key, found, tc.want)
+				}
 			}
 			if tc.want {
 				raw, rpcErr, err := p.client.call(context.Background(), protocol.MethodSessionGet, protocol.GetParams{SessionID: s.SessionID})

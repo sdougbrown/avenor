@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
@@ -91,11 +93,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	c, err := p.openProcess(ctx, merged)
-	if err != nil {
-		return runtime.Session{}, err
-	}
-
 	params := protocol.CreateParams{
 		WorkingDir: workingDir,
 		Profile:    merged.Agent,
@@ -103,23 +100,14 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if merged.Model != "" {
 		params.Models = &protocol.ModelRoles{Chat: merged.Model}
 	}
-	info, err := c.createSession(ctx, params)
+	c, info, merged, err := p.openSession(ctx, merged, func(c *client) (protocol.SessionInfo, error) {
+		info, err := c.createSession(ctx, params)
+		return info, describeCreateFailure(merged, err)
+	})
 	if err != nil {
-		// A refused create leaves nothing running, so a later attempt
-		// starts clean.
-		p.discardProcess(c)
-		return runtime.Session{}, describeCreateFailure(merged, err)
+		return runtime.Session{}, err
 	}
-
-	on := merged.MessagingOn && messagingReady && runtime.ProvisionPeer(merged) != nil
-	if on {
-		var reason string
-		on, reason = checkMessaging(ctx, c, info)
-		if !on {
-			log.Printf("warning: poo messaging unavailable: %s", reason)
-		}
-	}
-	merged.MessagingOn = on
+	on := merged.MessagingOn
 	p.mu.Lock()
 	p.opts = merged
 	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
@@ -180,6 +168,9 @@ func checkMessaging(ctx context.Context, c *client, info protocol.SessionInfo) (
 // describeCreateFailure names the field poo refused, because the server's own
 // message names the value and not what the roster entry should change.
 func describeCreateFailure(opts runtime.StartOptions, err error) error {
+	if err == nil {
+		return nil
+	}
 	switch refusedCode(err) {
 	case protocol.DataUnknownProfile:
 		return fmt.Errorf("poo profile %q is not offered by this binary: %w", opts.Agent, err)
@@ -227,25 +218,16 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 			p.discardProcess(c)
 		}
 	}
-	c, err := p.openProcess(ctx, merged)
+	c, info, merged, err := p.openSession(ctx, merged, func(c *client) (protocol.SessionInfo, error) {
+		info, err := c.loadSession(ctx, protocol.LoadParams{SessionID: sessionID})
+		if err != nil {
+			err = describeLoadFailure(sessionID, err)
+		}
+		return info, err
+	})
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	info, err := c.loadSession(ctx, protocol.LoadParams{SessionID: sessionID})
-	if err != nil {
-		p.discardProcess(c)
-		return runtime.Session{}, describeLoadFailure(sessionID, err)
-	}
-
-	on := merged.MessagingOn && messagingReady && runtime.ProvisionPeer(merged) != nil
-	if on {
-		var reason string
-		on, reason = checkMessaging(ctx, c, info)
-		if !on {
-			log.Printf("warning: poo messaging unavailable: %s", reason)
-		}
-	}
-	merged.MessagingOn = on
 	p.mu.Lock()
 	p.opts = merged
 	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
@@ -275,6 +257,48 @@ func describeLoadFailure(sessionID string, err error) error {
 	}
 }
 
+type messagingFailure struct{ reason string }
+
+func (e *messagingFailure) Error() string { return e.reason }
+
+// openSession applies the same fallback to creation and cross-process resume.
+func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, open func(*client) (protocol.SessionInfo, error)) (*client, protocol.SessionInfo, runtime.StartOptions, error) {
+	opts.MessagingOn = opts.MessagingOn && runtime.ProvisionPeer(opts) != nil
+	for {
+		c, err := p.openProcess(ctx, opts)
+		var info protocol.SessionInfo
+		if err == nil {
+			info, err = open(c)
+			if err != nil && (strings.Contains(err.Error(), "feeds.paths") || strings.Contains(err.Error(), "cli_registry.paths")) {
+				err = &messagingFailure{reason: err.Error()}
+			}
+			if err == nil && opts.MessagingOn {
+				if ok, reason := checkMessaging(ctx, c, info); !ok {
+					err = &messagingFailure{reason: reason}
+				}
+			}
+			if err != nil {
+				if info.SessionID != "" {
+					_ = c.closeSession(info.SessionID)
+				}
+				p.discardProcess(c)
+			}
+		}
+		if err == nil {
+			return c, info, opts, nil
+		}
+		var failure *messagingFailure
+		if !opts.MessagingOn || !errors.As(err, &failure) || ctx.Err() != nil {
+			return nil, protocol.SessionInfo{}, opts, err
+		}
+		if opts.Messaging != nil && *opts.Messaging {
+			return nil, protocol.SessionInfo{}, opts, &runtime.MessagingUnavailableError{Reason: failure.reason}
+		}
+		log.Printf("warning: poo messaging unavailable: %s", failure.reason)
+		opts.MessagingOn = false
+	}
+}
+
 // openProcess starts the process and completes the handshake. A process that
 // cannot complete the handshake is torn down, so a refused start or resume
 // leaves nothing running.
@@ -284,7 +308,16 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 		return nil, err
 	}
 	if _, err := c.initialize(ctx, p.versions()); err != nil {
+		exited := errors.Is(err, syscall.EPIPE)
+		select {
+		case <-c.stdoutDone:
+			exited = true
+		default:
+		}
 		p.discardProcess(c)
+		if exited && ctx.Err() == nil {
+			return nil, &messagingFailure{reason: err.Error()}
+		}
 		return nil, err
 	}
 	return c, nil

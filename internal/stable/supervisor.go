@@ -3927,6 +3927,10 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		if failErr != nil {
 			s.reportLifecycleError(child, failErr)
 		}
+		var unavailable *runtime.MessagingUnavailableError
+		if errors.As(err, &unavailable) {
+			return childAttemptResult{exitCode: 1, stopReason: runtime.MessagingUnavailableStopReason}
+		}
 		return childAttemptResult{exitCode: 1}
 	}
 	child.mu.Lock()
