@@ -410,6 +410,20 @@ echo "evidence kept in $EV"
 if [ "$cleanup_status" -ne 0 ]; then exit "$cleanup_status"; fi
 ```
 
+### The no-model reproduction probe
+
+`scripts/broker-messaging-probe.sh` reproduces the generation and relay
+behaviors with plain authenticated HTTP and no model calls: it starts one hub,
+two sibling branches, and a sub-branch, registers plain runs, and records
+(a) a versioned tell without a generation (409 generation-mismatch/not-sent),
+(b) the same tell with the advertised generation (sent, observed queued through
+/poll-control), (c) a sibling hidden in a branch listing yet addressed by its
+qualified ID, and (d) a hub peer listed down a three-tier chain plus a send to
+it. It reports observed behavior verbatim into an evidence directory; it does
+not assert desired behavior. Run it when a change touches generation admission,
+relay sender stamping, or the peer listing; compare its output against the
+stage-1 capture in the #561 evidence.
+
 ## Limitation
 
 **With the installed `@dougbots/avenor-pi`, the child ask leg does not pass
