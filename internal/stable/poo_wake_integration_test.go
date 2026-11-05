@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
@@ -112,6 +114,18 @@ func testPooInboxWake(t *testing.T, ask bool) {
 	if !strings.Contains(string(before), "DONE") {
 		t.Fatalf("sentinel: %s", before)
 	}
+	var wakeEvents <-chan events.Event
+	if !ask {
+		child.mu.Lock()
+		provider := child.provider
+		child.mu.Unlock()
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		wakeEvents, err = provider.Events(ctx, statusBefore.(map[string]any)["session_id"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := sup.broker.SendTo("supervisor", spawned.RuntimeID, "agent_message", json.RawMessage(`{"id":"wake-id","message":"wake","expects_reply":false}`), "wake-id"); err != nil {
 		t.Fatal(err)
 	}
@@ -148,8 +162,22 @@ func testPooInboxWake(t *testing.T, ask bool) {
 		data, _ := os.ReadFile(sessionLog)
 		return calls.Load() >= 2 && strings.Count(string(data), `"record":"run.settled"`) >= 2
 	})
-	// Allow delivery of the persisted settlement to the provider's reader.
-	time.Sleep(200 * time.Millisecond)
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+settlement:
+	for {
+		select {
+		case ev, ok := <-wakeEvents:
+			if !ok {
+				t.Fatal("wake event stream closed")
+			}
+			if ev.Event == "session.end" {
+				break settlement
+			}
+		case <-timer.C:
+			t.Fatal("wake settlement did not reach provider")
+		}
+	}
 	after, err := os.ReadFile(sentinel)
 	if err != nil {
 		t.Fatal(err)
