@@ -101,6 +101,8 @@ function rememberAsk(sessionDir, ask) {
   if (dir === "") return;
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // A redelivered ask that was already answered stays answered.
+    if (fs.existsSync(path.join(dir, ask.messageId + ".claimed"))) return;
     const file = path.join(dir, ask.messageId + ".json");
     fs.writeFileSync(file, JSON.stringify({ message_id: ask.messageId, asker_run_id: ask.fromRunId }) + "\n", {
       mode: 0o600,
