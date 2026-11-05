@@ -118,6 +118,10 @@ const POLL_INTERVAL_MS = 3_000
 // accepted prompt may never come back through message_end. Re-arm delivery
 // after this long instead of leaving the run skipped with its notice unread.
 const IDLE_SEND_TIMEOUT_MS = 10_000
+// How long an unbounded wait holds the turn before it stops blocking and
+// goes to the background; the run keeps going and the completion is
+// delivered by polling.
+const BACKGROUND_AFTER_MS = 120_000
 // An unconfirmable send is retried at most this many times before the notice is
 // left for settlement and the failure is recorded.
 const MAX_IDLE_SEND_ATTEMPTS = 3
@@ -410,6 +414,9 @@ export interface ExtensionOptions {
   /** How long an unconfirmed idle completion send waits before re-arming;
    * injectable so tests can exercise the timeout without fixed sleeps. */
   idleSendTimeoutMs?: number
+  /** How long a blocking wait holds the turn before it backgrounds;
+   * injectable so tests can exercise the boundary without fixed sleeps. */
+  backgroundAfterMs?: number
   /** Overrides broker-credential autodetection for sub-agent broker mode (tests). */
   subAgentEnv?: SubAgentEnv | null
   /** Explicit central broker configuration; null disables top-level participation. */
@@ -420,6 +427,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
   return async function (pi: ExtensionAPI) {
     const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS
     const idleSendTimeoutMs = options.idleSendTimeoutMs ?? IDLE_SEND_TIMEOUT_MS
+    const backgroundAfterMs = options.backgroundAfterMs ?? BACKGROUND_AFTER_MS
     let telemetryGeneration = 0
     const trackedRuns = new Map<string, TrackedRun>()
     let pollingActive = false
@@ -477,12 +485,25 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return `reached ${stop.status}`
     }
 
-    function interruptPendingWaits(stop: StoppingPoint, excludeRunKey?: string): void {
+    /** Snapshot-copy, delete before interrupt: one loop owns the registry
+     * invariant, so a re-entrancy or ordering change lands in one place. */
+    function interruptWaits(matches: (wait: PendingWait) => boolean, stop: StoppingPoint): void {
       for (const wait of [...pendingWaits]) {
-        if (wait.runKey === excludeRunKey) continue
+        if (!matches(wait)) continue
         pendingWaits.delete(wait)
         wait.interrupt(stop)
       }
+    }
+
+    function interruptPendingWaits(stop: StoppingPoint, excludeRunKey?: string): void {
+      interruptWaits(wait => wait.runKey !== excludeRunKey, stop)
+    }
+
+    /** Interrupt only the waits bound to one run. A wait that backgrounds
+     * itself (or is backgrounded by command) must not wake siblings waiting
+     * on other runs, unlike a run's own stopping point. */
+    function interruptWaitsForRun(runKey: string, stop: StoppingPoint): void {
+      interruptWaits(wait => wait.runKey === runKey, stop)
     }
 
     function registerPendingWait(runKey: string, interrupt: PendingWait['interrupt']): PendingWait {
@@ -558,20 +579,31 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       status: string
     }
 
-    type InterruptedResult = ResultResult & { interrupted_by?: InterruptedBy }
+    /** Prose shown to the model when a wait gave the turn back before the run
+     * finished. Delivery is armed, so the completion starts the next turn. */
+    const BACKGROUND_NOTE =
+      'The wait was moved to the background; this run keeps going and its final result is delivered automatically and starts your next turn, so end your turn instead of re-polling.'
 
-    /** Build the early return for a wait interrupted by a sibling stopping
-     * point. When the awaited run itself has since reached a stopping point,
-     * deliver its real state instead of an interruption notice. The probe and
-     * redelivery use the caller's original run reference, matching the non-
-     * interrupted path: a label may resolve canonically to a newer run than
-     * the one this call first bound to, and the reconciliation below handles
-     * that divergence the same way. A caller that omitted supervisor_id still
-     * probes through the bound run's supervisor. */
+    type InterruptedResult = ResultResult & { interrupted_by?: InterruptedBy }
+    type BackgroundedResult = ResultResult & { backgrounded: true; note: string }
+
+    /** Build the early return for a wait that stopped without its own result:
+     * a sibling stopping point interrupted it, or it backgrounded itself at
+     * the wait bound. When the awaited run itself has since reached a stopping
+     * point, deliver its real state instead of an interruption notice. The
+     * probe and redelivery use the caller's original run reference, matching
+     * the non-interrupted path: a label can resolve canonically to a newer run
+     * than the one this call first bound to, and the reconciliation below
+     * handles that divergence the same way. A caller that omitted
+     * supervisor_id still probes through the bound run's supervisor. */
     async function resultAfterInterrupt(
       params: { run_id: string; supervisor_id?: string; wait?: boolean; timeout?: string; signal?: AbortSignal },
       stop: StoppingPoint,
       tracked: TrackedRun | undefined,
+      /** A pending permission is a stopping point for a sibling interrupt,
+       * redelivered inline. A backgrounded wait must give the turn back even
+       * when the probe shows the run waiting, so it passes false. */
+      options: { redeliverWaiting?: boolean } = {},
     ): Promise<InterruptedResult> {
       const runId = params.run_id
       const supervisorId = params.supervisor_id ?? tracked?.supervisorId
@@ -582,7 +614,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       } catch {
         // Status unavailable; report the interruption without run state.
       }
-      const stoppedItself = current !== undefined && (isTerminalStatus(current.status) || current.status === 'waiting')
+      const stoppedItself = current !== undefined
+        && (isTerminalStatus(current.status) || (options.redeliverWaiting !== false && current.status === 'waiting'))
       if (stoppedItself) {
         try {
           // Fresh signal: the wait's own controller is already aborted. The
@@ -597,9 +630,34 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         run_id: current?.run_id ?? runId,
         label: current?.label ?? runId,
         status: current?.status ?? 'running',
-        ready: current !== undefined && isTerminalStatus(current.status),
+        // Never claim ready without the output in hand: the caller drops
+        // the run's tracking and suppresses the delivery that still owns
+        // the result.
+        ready: false,
         ...(current?.pending_permission && { pending_permission: current.pending_permission }),
         interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status },
+      }
+    }
+
+    /** Build the early return for a wait that backgrounded itself: the same
+     * probe and redelivery as a sibling interrupt, but the payload reports
+     * the backgrounding instead of a sibling that caused it. When the
+     * redelivery already holds the output, the plain result returns — the
+     * backgrounding markers would claim work is pending that is in hand. */
+    async function resultAfterBackground(
+      params: { run_id: string; supervisor_id?: string; wait?: boolean; timeout?: string; signal?: AbortSignal },
+      tracked: TrackedRun | undefined,
+    ): Promise<InterruptedResult | BackgroundedResult> {
+      const stop: StoppingPoint = { runId: tracked?.runId ?? params.run_id, status: 'backgrounded' }
+      const { interrupted_by, ...result } = await resultAfterInterrupt(params, stop, tracked, { redeliverWaiting: false })
+      void interrupted_by
+      if (result.ready) return result
+      return {
+        ...result,
+        backgrounded: true,
+        note: result.pending_permission
+          ? 'The wait was moved to the background; the run is waiting for a permission, which you can answer with avenor_answer_permission.'
+          : BACKGROUND_NOTE,
       }
     }
 
@@ -2411,6 +2469,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (waitResult.aborted) {
           const stop = blockingWait.stopped
           if (stop && !stop.synthetic) {
+            if (stop.status === 'backgrounded') {
+              // The command gave the turn back; the run keeps going. The
+              // poll loop delivers the completion, the same delivery a
+              // wait=false spawn gets.
+              const tracked = getTrackedRunById(result.run_id, supervisorId)
+              if (tracked) tracked.blocking = false
+              return {
+                content: [{ type: 'text', text: `Sub-agent "${label}" (run_id: ${result.run_id}) is still running in the background; the final result is delivered automatically and starts your next turn.` }],
+                details: {
+                  run_id: result.run_id,
+                  backgrounded: true,
+                  ...spawnIdentityMetadata(hostParams),
+                },
+              }
+            }
             // A sibling stopping point interrupted this wait, but the awaited
             // run may have reached a stopping point in the same tick. Probe
             // before delegating to the tick: its synchronous skip path can
@@ -2585,7 +2658,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       name: 'avenor_result',
       label: 'Avenor Result',
       description:
-        `Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking. When several runs are pending, the first stopping point (a permission request, an inbound ask, or completion on any run) interrupts other blocking waits so they can be handled; re-issue the interrupted wait afterwards.`,
+        `Retrieve the complete final output of a run without transcript or event details. Waits by default; set wait=false to retrieve an already-completed run without blocking. A wait without an explicit timeout stops after ${BACKGROUND_AFTER_MS / 60_000} minutes and returns backgrounded: true while the run keeps going; the completion is delivered automatically and starts your next turn, so end your turn instead of re-polling. When several runs are pending, the first stopping point (a permission request, an inbound ask, or completion on any run) interrupts other blocking waits so they can be handled; re-issue the interrupted wait afterwards.`,
       parameters: Type.Object({
         run_id: Type.String({ description: 'Run ID or label' }),
         wait: Type.Optional(Type.Boolean({ description: 'Wait for a terminal result (default true); false retrieves the current state without blocking' })),
@@ -2597,6 +2670,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const previousBlocking = tracked?.blocking
         if (tracked) tracked.blocking = true
         let completed = false
+        // A backgrounded exit hands delivery to the poll loop, so the claim
+        // ends on exit instead of being restored to its entry state.
+        let clearClaimOnExit = false
         let resultRun = tracked
 
         // Key on the resolved run (getTrackedRun may have matched by label or
@@ -2604,14 +2680,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         // excluded from sibling interrupts. wait=false calls resolve without
         // waiting, so they register nothing.
         const blocking = params.wait ?? true
-        const blockingWait = blocking
-          ? createInterruptibleWait(
-              trackedRunKey(tracked?.supervisorId ?? params.supervisor_id, tracked?.runId ?? params.run_id),
-              signal,
+        const waitRunKey = trackedRunKey(tracked?.supervisorId ?? params.supervisor_id, tracked?.runId ?? params.run_id)
+        const blockingWait = blocking ? createInterruptibleWait(waitRunKey, signal) : undefined
+        // The timer gives an unbounded wait back to the model after this
+        // long. It backgrounds this wait only (not siblings on other runs);
+        // polling delivers the completion while the run keeps going. An
+        // explicit timeout is the caller's own bound and is respected in
+        // full.
+        const backgroundTimer = blocking && params.timeout === undefined && backgroundAfterMs > 0
+          ? setTimeout(
+              () => interruptWaitsForRun(waitRunKey, { runId: tracked?.runId ?? params.run_id, status: 'backgrounded' }),
+              backgroundAfterMs,
             )
           : undefined
         try {
-          let result: InterruptedResult
+          let result: InterruptedResult | BackgroundedResult
           try {
             result = await deps.resultTool({
               runId: params.run_id,
@@ -2620,9 +2703,27 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               timeout: params.timeout,
               signal: blockingWait?.signal ?? signal,
             })
+            clearTimeout(backgroundTimer)
           } catch (err) {
-            if (!blockingWait?.stopped || blockingWait.stopped.synthetic) throw err
-            result = await resultAfterInterrupt(params, blockingWait.stopped, tracked)
+            clearTimeout(backgroundTimer)
+            const stop = blockingWait?.stopped
+            if (!stop || stop.synthetic) throw err
+            if (stop.status === 'backgrounded') {
+              result = await resultAfterBackground(params, tracked)
+              clearClaimOnExit = true
+              // Arm automatic delivery for a run this session was not
+              // tracking. A tracked run is released by the finally below; the
+              // poll loop delivers its completion either way.
+              const armSupervisor = params.supervisor_id ?? tracked?.supervisorId
+              // A tracked run is released by the finally below and delivers
+              // on its own; a second armed entry emits the completion twice.
+              if (!result.ready && !tracked && result.run_id && !trackedRuns.has(trackedRunKey(armSupervisor, result.run_id))) {
+                upsertTrackedRun({ runId: result.run_id, supervisorId: armSupervisor, label: result.label }, undefined, false)
+                startPolling()
+              }
+            } else {
+              result = await resultAfterInterrupt(params, stop, tracked)
+            }
           }
           completed = result.ready
           // The result tool resolves labels and reports the canonical run id.
@@ -2674,7 +2775,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               // release the blocking flag so polling may deliver it later.
               tracked.blocking = previousBlocking ?? false
             }
-          } else if (resultRun && result.status === 'waiting') {
+          } else if (!clearClaimOnExit && resultRun && result.status === 'waiting') {
             resultRun.permissionNotified = true
           }
           return {
@@ -2685,9 +2786,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           blockingWait?.dispose()
           // An incomplete call releases only the run it claimed at entry: the
           // reconciled run may be owned by another in-flight result call, and
-          // its claim must survive this call's exit.
+          // its claim must survive this call's exit. A backgrounded exit is
+          // the exception — the claim ends unconditionally, or the last of
+          // two concurrent backgrounded calls would restore a claim nobody
+          // holds and park the completion notice forever.
           if (!completed && tracked && trackedRuns.get(trackedRunKey(tracked.supervisorId, tracked.runId)) === tracked) {
-            tracked.blocking = previousBlocking ?? false
+            tracked.blocking = clearClaimOnExit ? false : (previousBlocking ?? false)
           }
         }
       },
@@ -3059,6 +3163,26 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             }
           },
         })
+      },
+    })
+
+    pi.registerCommand('avenor-background', {
+      description: 'Move blocking avenor waits (avenor_result, blocking avenor_spawn) to the background',
+      handler: async (_args, ctx) => {
+        const waits = [...pendingWaits]
+        if (waits.length === 0) {
+          ctx.ui.notify('No blocking avenor waits to background', 'info')
+          return
+        }
+        for (const wait of waits) {
+          pendingWaits.delete(wait)
+          // A backgrounded stop is consumed only by the waiter itself. The
+          // run id parsed from the wait key is enough; each tool reports its
+          // own run from its own call context.
+          const runId = wait.runKey.slice(wait.runKey.indexOf('\u0000') + 1)
+          wait.interrupt({ runId, status: 'backgrounded' })
+        }
+        ctx.ui.notify(`Moved ${waits.length} blocking wait${waits.length === 1 ? '' : 's'} to the background`, 'info')
       },
     })
 

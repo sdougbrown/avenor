@@ -292,8 +292,13 @@ function resultLines(details: unknown, args: ResultArgs, expanded: boolean): str
     `Result: ${label} — ${state}`,
     `Run: ${runId}`,
     ...(result.timed_out === true ? ['Warning: wait timed out; the run is still active.'] : []),
+    ...(result.backgrounded === true
+      ? ['The wait was backgrounded; the run keeps going and its completion is delivered automatically.']
+      : []),
     ...(pending ? [`Permission: ${selected(pending, 'description')}`] : []),
-    guidance(state, pending, runId),
+    result.backgrounded === true && !pending
+      ? 'Guidance: The final result is delivered automatically; end your turn instead of re-polling.'
+      : guidance(state, pending, runId),
     ...(result.output_truncated === true
       ? [stringValue(result.output_event_path)
         ? `Warning: final output may be truncated; retry avenor_result or read the durable event path "${scalar(result.output_event_path)}".`

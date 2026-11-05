@@ -113,6 +113,32 @@ describe('Avenor Pi renderers', () => {
       'Session: session-2',
       'Stop reason: budget',
     ].join('\n'))
+
+    const backgrounded = {
+      run_id: 'run-3',
+      label: 'worker',
+      status: 'running',
+      ready: false,
+      backgrounded: true,
+      note: 'The wait was moved to the background.',
+    }
+    expect(text(renderResultResult(result(backgrounded), expanded, theme, { run_id: 'call-run' }))).toBe([
+      'Result: worker — running',
+      'Run: run-3',
+      'The wait was backgrounded; the run keeps going and its completion is delivered automatically.',
+      'Guidance: The final result is delivered automatically; end your turn instead of re-polling.',
+      'Final output: unavailable.',
+    ].join('\n'))
+
+    const backgroundedPermission = { ...backgrounded, status: 'waiting', pending_permission: { description: 'allow write' } }
+    expect(text(renderResultResult(result(backgroundedPermission), expanded, theme, { run_id: 'call-run' }))).toBe([
+      'Result: worker — waiting',
+      'Run: run-3',
+      'The wait was backgrounded; the run keeps going and its completion is delivered automatically.',
+      'Permission: allow write',
+      'Guidance: Permission input is required, but no options are available; call avenor_inspect with run_id "run-3".',
+      'Final output: unavailable.',
+    ].join('\n'))
   })
 
   it('renders permission, follow-up, events, inspect, and shutdown without serializing details', () => {

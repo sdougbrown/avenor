@@ -22,6 +22,14 @@ here is the notification path owned by the Pi extension, not CLI output.
 - Idle delivery: a run that finishes while the session is idle is sent with
   `sendUserMessage`, so it arrives as an ordinary user-role message and starts
   its own turn. Nothing is queued, and no `avenor-completion` message exists.
+- Wait backgrounding: a blocking `avenor_result` with no explicit `timeout`
+  gives the turn back after two minutes (the wait is "backgrounded"), returning
+  `backgrounded: true` with `ready: false` while the run keeps going; an
+  explicit `timeout` is respected in full and never backgrounds. `/avenor-background`
+  does the same at once for every wait in flight (a blocking `avenor_spawn`
+  included). Either way the completion notice is delivered by polling exactly
+  like a `wait: false` spawn's, and the payload's note tells the model to end
+  its turn instead of re-polling.
 - Retention: a settlement that ends in abort or error delivers nothing; the
   notices stay queued. Session shutdown clears the queue.
 

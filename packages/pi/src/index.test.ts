@@ -56,6 +56,7 @@ async function createMultiSupervisorHarness(options: {
   inspectTool?: any
   brokerReceiveTool?: any
   dial?: any
+  backgroundAfterMs?: number
   subAgentEnv?: { brokerUrl: string; runId: string; token: string }
   /** Supervisor mock; provides isCurrentInstance for singleton-scope tests. */
   supervisor?: { isCurrentInstance?: (supervisorId: string) => boolean }
@@ -89,6 +90,7 @@ async function createMultiSupervisorHarness(options: {
     extOptions: {
       pollIntervalMs: options.pollIntervalMs ?? 5,
       ...(options.idleSendTimeoutMs !== undefined && { idleSendTimeoutMs: options.idleSendTimeoutMs }),
+      ...(options.backgroundAfterMs !== undefined && { backgroundAfterMs: options.backgroundAfterMs }),
       ...(options.subAgentEnv !== undefined && { subAgentEnv: options.subAgentEnv }),
     },
     ui: { confirm },
@@ -1631,6 +1633,387 @@ describe('Avenor Pi extension', () => {
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
     expect(completions).toHaveLength(1)
     expect(completions[0]).toContain('interrupted answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  /** A blocking wait that never settles on its own and rejects when the
+   * wait's abort reaches it, the way a real result fetch does. */
+  function hangUntilAborted(): any {
+    return mock(async (args: { signal?: AbortSignal } = {}) =>
+      new Promise<never>((_resolve, reject) => {
+        const signal = args.signal
+        if (signal?.aborted) return reject(signal.reason ?? new Error('aborted'))
+        signal?.addEventListener('abort', () => reject(signal.reason ?? new Error('aborted')), { once: true })
+      }),
+    )
+  }
+
+  /** Assert the backgrounded run's completion notice reaches the session. */
+  async function expectCompletionDelivered(h: { sendUserMessage: any }, marker: string) {
+    let resolveCompletion!: () => void
+    const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
+    h.sendUserMessage.mockImplementation(() => resolveCompletion())
+    await completionSent
+    const completions = h.sendUserMessage.mock.calls.map(([t]: [string]) => String(t)).filter((t: string) => t.includes('Sub-agent "worker" finished'))
+    expect(completions).toHaveLength(1)
+    expect(completions[0]).toContain(marker)
+  }
+
+  it('backgrounds an unbounded avenor_result at the wait bound and delivers the completion later', async () => {
+    const SOCK = '/tmp/background.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'backgrounded answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const result = await settleWithin<any>(resultPromise, 'avenor_result never backgrounded at the wait bound')
+    expect(result.details).toMatchObject({ backgrounded: true, run_id: 'r1', ready: false })
+
+    done = true
+    await expectCompletionDelivered(h, 'backgrounded answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('gives the turn back when the backgrounded probe shows a pending permission', async () => {
+    const SOCK = '/tmp/background-waiting.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return {
+        run_id: 'r1',
+        label: 'worker',
+        status: 'waiting',
+        runtime_id: 'rt1',
+        pending_permission: { id: 'perm-1', description: 'approve the deploy', options: [{ option_id: 'allow_once', name: 'Allow', description: 'allow once' }] },
+      }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      // A redelivery on this resultTool would block forever: if the probe's
+      // waiting stop triggered one, the turn would never come back.
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const result = await settleWithin<any>(resultPromise, 'a waiting probe re-blocked the backgrounded wait')
+    expect(result.details).toMatchObject({ backgrounded: true, ready: false, status: 'waiting' })
+
+    // The claim and notice guards keep the run deliverable: the poll loop
+    // sends the waiting notice — the only post-turn signal that the run is
+    // stuck on a permission.
+    let resolveNotice!: () => void
+    h.sendUserMessage.mockImplementation(() => resolveNotice())
+    await settleWithin(new Promise<void>(resolve => { resolveNotice = resolve }), 'the waiting notice never reached the session')
+    const notices = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('is waiting for input'))
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain('approve the deploy')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('never backgrounds when backgroundAfterMs is 0', async () => {
+    const SOCK = '/tmp/zero-bound.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: 0,
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    let settled = false
+    resultPromise.then(() => { settled = true }, () => { settled = true })
+    await new Promise(resolve => setTimeout(resolve, scaleMs(120)))
+    expect(settled).toBe(false)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('returns the plain result when the run finished as the wait backgrounded', async () => {
+    const SOCK = '/tmp/background-ready.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'already done' }
+    })
+    const resultTool = mock(async () => ({ run_id: 'r1', label: 'worker', status: 'done', ready: true, output: 'already done' }))
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool,
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const result = await settleWithin<any>(resultPromise, 'the finished run never returned its result')
+    expect(result.details).toMatchObject({ run_id: 'r1', ready: true })
+    // The result is in hand: no backgrounding markers may claim otherwise.
+    expect(result.details).not.toHaveProperty('backgrounded')
+    expect(result.details).not.toHaveProperty('note')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('arms delivery for an untracked run that backgrounds', async () => {
+    const SOCK = '/tmp/untracked-background.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'lone', label: 'lone', status: 'done', runtime_id: 'rt1', final_output: 'lone answer' }
+          : { run_id: 'lone', label: 'lone', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+
+    // No avenor_spawn first: the run is not tracked when the wait backgrounds.
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      resultTool: hangUntilAborted(),
+    })
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t1', { run_id: 'lone', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const result = await settleWithin<any>(resultPromise, 'the untracked run never backgrounded')
+    expect(result.details).toMatchObject({ backgrounded: true, run_id: 'lone' })
+
+    // The armed tracking entry delivers the completion once the run finishes.
+    let resolveDelivery!: () => void
+    h.sendUserMessage.mockImplementation(() => resolveDelivery())
+    done = true
+    await settleWithin(new Promise<void>(resolve => { resolveDelivery = resolve }), 'the untracked run never delivered')
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "lone" finished'))
+    expect(completions).toHaveLength(1)
+    expect(completions[0]).toContain('lone answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('keeps a sibling wait blocked when another run self-backgrounds', async () => {
+    const SOCK = '/tmp/isolated-background.sock'
+    let alphaDone = false
+    let betaDone = false
+    const statusTool = makeTwoRunStatusTool(SOCK, () => ({ alphaDone, betaDone }))
+    // Each wait resolves when its own run reaches terminal, the way a real
+    // result fetch does; before that it hangs until aborted.
+    const resultTool = mock(async (args: { runId?: string; signal?: AbortSignal } = {}) => new Promise((resolve, reject) => {
+      const poll = setInterval(() => {
+        if ((args.runId === 'ra' && alphaDone) || (args.runId === 'rb' && betaDone)) {
+          clearInterval(poll)
+          resolve({ run_id: args.runId, label: args.runId === 'ra' ? 'alpha' : 'beta', status: 'done', ready: true, output: 'answer' })
+        }
+      }, 5)
+      args.signal?.addEventListener('abort', () => {
+        clearInterval(poll)
+        reject(new Error('result wait cancelled'))
+      }, { once: true })
+    }))
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: makeTwoRunSpawnTool(SOCK),
+      resultTool,
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'alpha', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    await h.registeredTools.avenor_spawn.execute('t2', { agent: 'explore', label: 'beta', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    // Alpha's unbounded wait backgrounds at the bound; beta's explicit
+    // timeout keeps its wait timer-free, so only the isolation property can
+    // end it early.
+    const alphaWait = h.registeredTools.avenor_result.execute('t3', { run_id: 'ra', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const betaWait = h.registeredTools.avenor_result.execute('t4', { run_id: 'rb', supervisor_id: SOCK, timeout: '5m' }, undefined, undefined, h.ctx)
+
+    const alphaResult = await settleWithin<any>(alphaWait, 'alpha never backgrounded at the wait bound')
+    expect(alphaResult.details).toMatchObject({ backgrounded: true, run_id: 'ra' })
+
+    let betaSettled = false
+    betaWait.then(() => { betaSettled = true }, () => { betaSettled = true })
+    await new Promise(resolve => setTimeout(resolve, scaleMs(120)))
+    expect(betaSettled).toBe(false)
+
+    // Beta is untouched by alpha's backgrounding: its own run finishing is
+    // what resolves it, with the result in hand.
+    alphaDone = true
+    betaDone = true
+    const betaResult = await settleWithin<any>(betaWait, 'beta wait never resolved after its run finished')
+    expect(betaResult.details).toMatchObject({ run_id: 'rb', ready: true })
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('delivers the completion when two concurrent waits background on one run', async () => {
+    const SOCK = '/tmp/concurrent-background.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'concurrent answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    // The second call enters while the first holds the claim; the last exit
+    // must still end the claim, or the completion parks forever.
+    const first = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const second = h.registeredTools.avenor_result.execute('t3', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const firstResult = await settleWithin<any>(first, 'the first wait never backgrounded')
+    await settleWithin<any>(second, 'the second wait never backgrounded')
+    expect(firstResult.details).toMatchObject({ backgrounded: true, run_id: 'r1' })
+
+    let resolveDelivery!: () => void
+    h.sendUserMessage.mockImplementation(() => resolveDelivery())
+    done = true
+    await settleWithin(new Promise<void>(resolve => { resolveDelivery = resolve }), 'the completion never arrived after both waits backgrounded')
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+    expect(completions).toHaveLength(1)
+    expect(completions[0]).toContain('concurrent answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('respects an explicit timeout instead of backgrounding at the wait bound', async () => {
+    const SOCK = '/tmp/timeout-bound.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK, timeout: '5m' }, undefined, undefined, h.ctx)
+    let settled = false
+    resultPromise.then(() => { settled = true }, () => { settled = true })
+    await new Promise(resolve => setTimeout(resolve, scaleMs(120)))
+    expect(settled).toBe(false)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('backgrounds a blocking wait on command and keeps delivery flowing', async () => {
+    const SOCK = '/tmp/command-background.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'commanded answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    // No waits in flight: the command reports it and changes nothing.
+    await h.registeredCommands['avenor-background'].handler('', h.ctx)
+    expect(h.notify.mock.calls.some(([c]) => String(c).includes('No blocking avenor waits'))).toBe(true)
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    await new Promise(resolve => setTimeout(resolve, scaleMs(20)))
+
+    await h.registeredCommands['avenor-background'].handler('', h.ctx)
+    const result = await settleWithin<any>(resultPromise, 'the command never backgrounded the wait')
+    expect(result.details).toMatchObject({ backgrounded: true, run_id: 'r1' })
+    expect(h.notify.mock.calls.some(([c]) => String(c).includes('1 blocking wait'))).toBe(true)
+
+    done = true
+    await expectCompletionDelivered(h, 'commanded answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('backgrounds a blocking spawn wait on command and keeps delivery flowing', async () => {
+    const SOCK = '/tmp/spawn-background.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'spawn answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+      // An observer that never completes keeps the blocking spawn wait inside
+      // waitForRun, so the command's interrupt is what ends it.
+      observeRun: mock(async () => ({
+        subscribe: (_cb: (snapshot: unknown) => void) => () => {},
+        snapshot: () => ({ last_event: null, transcript: [], pending_permission: false, ended: false }),
+        close: async () => {},
+      })),
+    })
+
+    const spawnPromise = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
+    await new Promise(resolve => setTimeout(resolve, scaleMs(20)))
+
+    await h.registeredCommands['avenor-background'].handler('', h.ctx)
+    const spawnResult = await settleWithin<any>(spawnPromise, 'the command never backgrounded the spawn wait')
+    expect(String(spawnResult.content[0].text)).toContain('still running in the background')
+    expect(spawnResult.details).toMatchObject({ backgrounded: true, run_id: 'r1' })
+
+    done = true
+    await expectCompletionDelivered(h, 'spawn answer')
 
     await h.eventHandlers.session_shutdown()
   })
@@ -3776,14 +4159,20 @@ describe('Avenor Pi extension', () => {
     expect(result.details).toMatchObject({
       run_id: 'ra',
       status: 'done',
-      ready: true,
+      // The fallback has no output in hand, so it must not claim ready:
+      // claiming it would drop the run's tracking and suppress delivery.
+      ready: false,
       interrupted_by: { run_id: 'rb', label: 'beta', status: 'done' },
     })
     expect(result.details).not.toHaveProperty('output')
 
-    // The delivered terminal fallback consumed the run: no auto-delivery.
+    // The run stays tracked with delivery armed: the completion arrives.
+    let resolveCompletion!: () => void
+    const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
+    h.sendUserMessage.mockImplementation(() => resolveCompletion())
+    await completionSent
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "alpha" finished'))
-    expect(completions).toHaveLength(0)
+    expect(completions).toHaveLength(1)
 
     await h.eventHandlers.session_shutdown()
   })
