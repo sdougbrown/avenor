@@ -87,6 +87,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	thinking := prior.thinking
 	agentProfile := prior.agentProfile
 	persistedSessions := prior.persistedSessions
+	messagingChoice, messagingOn := prior.messagingChoice, prior.messagingOn
 	dir := prior.dir
 	autoApprove := prior.autoApprove
 	rosterFile := prior.rosterFile
@@ -134,6 +135,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 		RosterFile:     rosterFile,
 		RosterEntry:    rosterEntry,
 		IdempotencyKey: idempotencyKey,
+		Messaging:      messagingChoice,
 		// The surface mints the public run id; carrying it through the spawn
 		// result is what lets a keyed replay report the first run's id instead
 		// of the retry's.
@@ -142,6 +144,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 			labelReservation: true,
 			implicitLabel:    req.Label == "",
 			mcpOrigin:        req.MCP,
+			messagingOn:      &messagingOn,
 		},
 	}
 	// The resume carries the prior run's recorded persisted-session choice

@@ -514,6 +514,27 @@ func TestSpawnKeySpaceIsolatedFromResume(t *testing.T) {
 // The MCP spawn boundary translates the tri-state persist_sessions argument
 // into the spawn parameter verbatim, in both directions and with the omitted
 // state absent.
+func TestSpawnArgsMessagingTranslation(t *testing.T) {
+	on, off := true, false
+	sup := newFakeIdempotentSupervisor()
+	s := newIdempotencyServer(t, sup)
+	for _, tc := range []struct {
+		choice  *bool
+		want    any
+		present bool
+	}{
+		{&on, true, true}, {&off, false, true}, {nil, nil, false},
+	} {
+		if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo", Messaging: tc.choice}); err != nil {
+			t.Fatal(err)
+		}
+		got, present := sup.lastSpawnParams["messaging"]
+		if present != tc.present || got != tc.want {
+			t.Fatalf("messaging=%v present=%v, want %v present=%v", got, present, tc.want, tc.present)
+		}
+	}
+}
+
 func TestSpawnArgsPersistSessionsTranslation(t *testing.T) {
 	on := true
 	off := false

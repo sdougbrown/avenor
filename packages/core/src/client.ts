@@ -68,6 +68,7 @@ export interface SpawnParams {
   on_event?: string
   auto_approve?: boolean
   persist_sessions?: boolean
+  messaging?: boolean
   [key: string]: unknown
 }
 

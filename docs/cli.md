@@ -33,7 +33,7 @@ avenor run [flags]
 | `--roster-entry` | (none) | Entry key within `--roster-file` for a direct spawn; invalid with a workflow file |
 | `--label` | (none) | Free-form label for log correlation; appears in events and sentinel |
 | `--dir` | `.` | Working directory for the agent |
-| `--resume` | (none) | Resume an existing session by ID; incompatible with `--loop-file` |
+| `--resume` | (none) | Resume an existing session by ID; incompatible with `--loop-file`. Messaging is off for this path, so a poo session created with messaging on may fail to resume if its recorded tools are unavailable |
 | `--server-url` | (none) | Long-lived ACP server endpoint; required for `--backend opencode-http` |
 | `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `pi`, `claude` |
 | `--pony-config` | (none) | Path to the pony backend JSON config; required for `--backend pony` |
@@ -433,6 +433,7 @@ Spawn flags (all optional):
 | `--permission-handler` | Permission resolver (e.g., `file:<path>`) |
 | `--auto-approve` | Automatically approve all permission requests |
 | `--persist-sessions` | Persist the backend session (see [backends.md](backends.md#persisted-sessions-and-resume)) |
+| `--messaging` | Request poo messaging on or off. Omitted defaults on for delegation spawns and off for workflow nodes, loop or team phases, and permission-decider runs. True is refused for loop and team spawns. The switch is carried per run but is not wired to poo launch yet. |
 | `--timeout` | Overall session timeout (Go duration: `30s`, `5m`, etc.) |
 | `--max-retries` | Maximum retry attempts on transient failure |
 | `--launch-wrapper` | Opaque argv prefix placed in front of the backend process command; repeatable, each use adds one element (e.g. `--launch-wrapper nice --launch-wrapper -n --launch-wrapper 5`). Avenor does not interpret the wrapper — see [backends.md](backends.md#launch-wrapper) |

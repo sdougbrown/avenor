@@ -469,6 +469,43 @@ func TestResumeColdArmKeepsHarnessLabelsUnambiguous(t *testing.T) {
 	}
 }
 
+func TestColdResumePreservesMessaging(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name       string
+		choice     *bool
+		workflowID string
+		want       bool
+	}{
+		{"default on", nil, "", true},
+		{"default off", nil, "workflow", false},
+		{"explicit on", &on, "workflow", true},
+		{"explicit off", &off, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup, _ := newStage2Supervisor(t, 8)
+			dir := t.TempDir()
+			sentinel := filepath.Join(dir, "prior.env")
+			prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: dir, Label: "prior", Agent: "claude", SentinelFile: sentinel, Messaging: tc.choice, WorkflowID: tc.workflowID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			finishResumeFixture(t, sup, prior, sentinel, false)
+			result, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue", SentinelFile: filepath.Join(dir, "next.env"), EventLog: filepath.Join(dir, "next.log")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			child := sup.runtimeByID(result.RuntimeID)
+			child.mu.Lock()
+			choice, effective := child.messagingChoice, child.messagingOn
+			child.mu.Unlock()
+			if choice != tc.choice || effective != tc.want {
+				t.Fatalf("choice=%v on=%v, want %v on=%v", choice, effective, tc.choice, tc.want)
+			}
+		})
+	}
+}
+
 func TestResumeKeyedReplayAdoptsFirstRun(t *testing.T) {
 	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)
@@ -900,6 +937,62 @@ func TestResumePriorEphemeralWithEnvSet(t *testing.T) {
 	assertToolCode(t, err, "not_resumable")
 	if !strings.Contains(err.Error(), "(status: expired)") {
 		t.Fatalf("not-resumable text = %q, want the pi gate's expired status", err)
+	}
+}
+
+func TestSpawnMessagingDefaultsAndOverrides(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name   string
+		params SpawnParams
+		want   bool
+	}{
+		{"delegation", SpawnParams{}, true},
+		{"workflow node", SpawnParams{WorkflowID: "wf"}, false},
+		{"decider", SpawnParams{permissionDeciderRun: true}, false},
+		{"explicit off", SpawnParams{Messaging: &off}, false},
+		{"explicit on for node", SpawnParams{WorkflowID: "wf", Messaging: &on}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "msg"), MaxRuntimes: 1})
+			observed := make(chan runtime.StartOptions, 1)
+			sup.newProviderFunc = func(opts runtime.StartOptions, backend string) (runtime.Provider, error) {
+				observed <- opts
+				return &plainResumeProvider{}, nil
+			}
+			tc.params.Prompt, tc.params.Dir, tc.params.Backend = "work", t.TempDir(), "pi"
+			if _, err := sup.spawn(tc.params); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case opts := <-observed:
+				if opts.MessagingOn != tc.want || opts.Messaging != tc.params.Messaging {
+					t.Fatalf("messaging choice=%v on=%v, want %v on=%v", opts.Messaging, opts.MessagingOn, tc.params.Messaging, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("provider not constructed")
+			}
+		})
+	}
+}
+
+func TestSpawnMessagingRefusesLoopAndTeam(t *testing.T) {
+	on := true
+	for _, tc := range []struct {
+		name   string
+		params SpawnParams
+	}{
+		{"loop", SpawnParams{LoopFile: "loop.json"}},
+		{"team", SpawnParams{TeamFile: "team.json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "msg-refuse"), MaxRuntimes: 1})
+			tc.params.Messaging = &on
+			_, err := sup.spawn(tc.params)
+			if err == nil || !strings.Contains(err.Error(), "messaging is not supported for loop and team phases") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
 
