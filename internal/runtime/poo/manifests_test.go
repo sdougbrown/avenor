@@ -90,6 +90,40 @@ func TestMessagingManifests(t *testing.T) {
 	}
 }
 
+func TestPublishManifestsPrunesOldDigests(t *testing.T) {
+	root := t.TempDir()
+	content := manifestContent{[]byte("feed"), []byte("registry")}
+	current, err := publishManifests(root, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Dir(filepath.Dir(current.feeds))
+	old := filepath.Join(base, strings.Repeat("a", 64))
+	fresh := filepath.Join(base, strings.Repeat("b", 64))
+	for _, dir := range []string{old, fresh} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-8 * 24 * time.Hour)
+	for _, dir := range []string{old, filepath.Dir(current.feeds)} {
+		if err := os.Chtimes(dir, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := publishManifests(root, content); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("old digest remains: %v", err)
+	}
+	for _, dir := range []string{fresh, filepath.Dir(current.feeds)} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("kept digest %s: %v", dir, err)
+		}
+	}
+}
+
 func TestPublishManifestsConcurrent(t *testing.T) {
 	root := t.TempDir()
 	content, err := renderManifests(root, "http://example.com", "run")

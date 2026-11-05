@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 var manifestTemplates embed.FS
 
 var avenorExecutable = os.Executable
+var manifestMaxAge = 7 * 24 * time.Hour
 
 type manifestPaths struct{ feeds, registry string }
 type manifestContent struct{ feed, registry []byte }
@@ -78,6 +80,9 @@ func publishManifests(stateHome string, content manifestContent) (manifestPaths,
 		return true
 	}
 	if complete() {
+		if err := pruneManifests(root, dest); err != nil {
+			return manifestPaths{}, err
+		}
 		return paths, nil
 	}
 	if err := os.MkdirAll(root, 0700); err != nil {
@@ -105,7 +110,40 @@ func publishManifests(stateHome string, content manifestContent) (manifestPaths,
 			return manifestPaths{}, fmt.Errorf("publish poo manifests: %w", err)
 		}
 	}
+	if err := pruneManifests(root, dest); err != nil {
+		return manifestPaths{}, err
+	}
 	return paths, nil
+}
+
+func pruneManifests(root, current string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("prune poo manifests: %w", err)
+	}
+	cutoff := time.Now().Add(-manifestMaxAge)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || len(name) != 64 || filepath.Join(root, name) == current {
+			continue
+		}
+		if _, err := hex.DecodeString(name); err != nil {
+			continue
+		}
+		info, err := entry.Info()
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("prune poo manifests: %w", err)
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.RemoveAll(filepath.Join(root, name)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("prune poo manifests: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func messagingManifests(brokerURL, runID string) (manifestPaths, error) {
