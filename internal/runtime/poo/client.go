@@ -104,13 +104,6 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 	// The child receives this launch's identity and none of the parent's.
 	// Broker credentials require messaging.
 	proc.Env = runtime.LaunchEnv(proc.Environ(), opts.Provenance)
-	filtered := proc.Env[:0]
-	for _, entry := range proc.Env {
-		if !strings.HasPrefix(entry, "POO_FEEDS_PATH=") && !strings.HasPrefix(entry, "POO_CLI_REGISTRY_PATH=") {
-			filtered = append(filtered, entry)
-		}
-	}
-	proc.Env = filtered
 	if opts.MessagingOn {
 		peer := runtime.ProvisionPeer(opts)
 		if peer != nil {
@@ -119,7 +112,7 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 				return nil, &messagingFailure{reason: fmt.Sprintf("poo messaging manifests: %v", err)}
 			}
 			proc.Env = append(proc.Env, peer.RunEnv()...)
-			proc.Env = append(proc.Env, "POO_FEEDS_PATH="+paths.feeds, "POO_CLI_REGISTRY_PATH="+paths.registry)
+			proc.Env = append(proc.Env, runtime.EnvPooFeedsPath+"="+paths.feeds, runtime.EnvPooCLIRegistryPath+"="+paths.registry)
 		}
 	}
 

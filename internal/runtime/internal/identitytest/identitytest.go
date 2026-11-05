@@ -28,8 +28,6 @@ func keys() []string {
 	return append(runtime.ScrubbedEnvNames(),
 		runtime.EnvRuntimeID+"_SUFFIX", // near miss of an identity name
 		"AVENOR_TREE_BUDGET",
-		"POO_FEEDS_PATH",
-		"POO_CLI_REGISTRY_PATH",
 		"AVENOR_RUN_ID",
 		"AVENOR_BROKER_TOKEN",
 		"AVENOR_BROKER_URL",
