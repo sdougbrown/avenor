@@ -71,15 +71,13 @@ forward their asks to the parent.
 
 ## Child CLI messages
 
-A child with broker credentials can use `avenor message tell`, `ask` and
-`reply` to route messages as its own run. The commands use the same router as
-other messaging surfaces. The CLI reference documents their flags and exit
-codes: [avenor message](cli.md#avenor-message).
+A child with broker credentials can use `avenor message --action tell`,
+`ask` or `reply` to route messages as its own run. The command uses the same
+router as other messaging surfaces; see [avenor message](cli.md#avenor-message).
 
-For an ask, pass the sender's broker run ID as `--to` when replying. Without
-`--to`, the broker resolves a reply to a tell from the message ID. If `--to`
-names a run with no matching ask edge, the broker delivers the reply to that
-run as a plain message (`sent`); the original ask remains unanswered. A
+A reply to an ask needs the claim record the feed wrote. Use `--asks-dir` if
+the feed uses a non-default directory. A second reply is `edge-absent`. Without
+a record, the broker resolves a reply to a tell or refuses the reply. A
 `timed-out` ask exits 0 and remains open to a later reply.
 
 ## Transport contract
