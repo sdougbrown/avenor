@@ -11,9 +11,7 @@
 //      refused credential disables the layer with the broker's reason instead
 //      of leaving a second reader on the queue.
 //   B. half-provisioned — a run id without a credential. The layer
-//      self-registers through the broker's open /register route and names
-//      itself through /rename — the same route a later peers rename writes, so
-//      the name stays replaceable — here as AVENOR_LABEL alone.
+//      self-registers and uses AVENOR_LABEL as a replaceable name.
 //   C. bare — no run id at all. The layer mints its own run and names it,
 //      handed as the older AVENOR_SESSION_NAME spelling a shell may still set.
 //
