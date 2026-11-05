@@ -11,9 +11,10 @@
 //      refused credential disables the layer with the broker's reason instead
 //      of leaving a second reader on the queue.
 //   B. half-provisioned — a run id without a credential. The layer
-//      self-registers through the broker's open /register route and posts the
-//      name it was handed, here as AVENOR_LABEL alone.
-//   C. bare — no run id at all. The layer mints its own run and posts its name,
+//      self-registers through the broker's open /register route and names
+//      itself through /rename — the same route a later peers rename writes, so
+//      the name stays replaceable — here as AVENOR_LABEL alone.
+//   C. bare — no run id at all. The layer mints its own run and names it,
 //      handed as the older AVENOR_SESSION_NAME spelling a shell may still set.
 //
 // Case A's credential is one this broker never minted, on purpose: a launch
@@ -96,6 +97,7 @@ async function labelRun(creds, name) {
 async function loadLayer(caseName, env) {
   const hooks = {}
   const requests = []
+  const registerAnswers = []
   function on(event, matcher, hook) {
     hooks[event] = typeof matcher === 'function' ? matcher : hook
   }
@@ -116,7 +118,9 @@ async function loadLayer(caseName, env) {
           path: target.startsWith(BROKER) ? target.slice(BROKER.length) : target,
         })
         const res = await fetch(url, init)
-        return { status: res.status, ok: res.ok, headers: {}, text: await res.text() }
+        const text = await res.text()
+        if (target === BROKER + '/register') registerAnswers.push(JSON.parse(text))
+        return { status: res.status, ok: res.ok, headers: {}, text }
       },
     },
     tool: { register: async () => { throw new Error('no tool registration expected') } },
@@ -125,7 +129,7 @@ async function loadLayer(caseName, env) {
   // (broker, armed flag, poll loop) is module-scoped.
   const mod = await import(PLUGIN + '/hooks/register.js?identity=' + encodeURIComponent(caseName))
   await mod.register(on)
-  return { caseName, d: stub, hooks, requests }
+  return { caseName, d: stub, hooks, requests, registerAnswers }
 }
 
 function issued(layer, path) {
@@ -201,9 +205,13 @@ const afterB = await sessions(provisionedA)
 const rowB = afterB.sessions.find((s) => s.run_id === RUN_B)
 check('B self-registered through /register', Boolean(rowB), rowB)
 check('B issued exactly one /register', issued(layerB, '/register').length === 1, layerB.requests.map((r) => r.method + ' ' + r.path))
-check('B posted the launch label it was handed', issued(layerB, '/session_name').length === 1,
-  layerB.requests.map((r) => r.method + ' ' + r.path))
 check('B is listed under that name', Boolean(rowB) && rowB.label === NAME_B, rowB)
+const RENAMED_B = 'pf-top-renamed'
+const credsB = { runId: RUN_B, token: layerB.registerAnswers[0].token }
+const renamedB = await post('/rename', { name: RENAMED_B }, credsB)
+check('B accepted a follow-up rename', renamedB.ok, renamedB)
+const afterRenameB = (await sessions(provisionedA)).sessions.find((s) => s.run_id === RUN_B)
+check('B is listed under the rename it accepted', Boolean(afterRenameB) && afterRenameB.label === RENAMED_B, afterRenameB)
 check('B added one record', afterB.sessions.length === beforeB.sessions.length + 1,
   { before: beforeB.sessions.length, after: afterB.sessions.length })
 const logsB = events.filter((e) => e.kind === 'b ui.log').map((e) => e.line).join('\n')
@@ -225,8 +233,6 @@ const freshC = afterC.sessions.find((s) => !beforeC.sessions.some((b) => b.run_i
 check('C minted one run', afterC.sessions.length === beforeC.sessions.length + 1 && Boolean(freshC),
   { before: beforeC.sessions.length, after: afterC.sessions.length })
 check('C minted id is a claude-<hex>', Boolean(freshC) && /^claude-[0-9a-f]{6}$/.test(freshC.run_id), freshC && freshC.run_id)
-check('C posted the name it was handed', issued(layerC, '/session_name').length === 1,
-  layerC.requests.map((r) => r.method + ' ' + r.path))
 check('C is listed under that name', Boolean(freshC) && freshC.label === NAME_C, freshC)
 
 console.log(failures === 0 ? 'PREFLIGHT OK' : 'PREFLIGHT FAILED (' + failures + ')')

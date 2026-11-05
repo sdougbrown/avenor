@@ -179,10 +179,12 @@ shape, whose only entry is `POST /attach` — no `/register`, no `/session_name`
 write (asserted by request path, with the launch label set as a supervisor
 spawn sets it), no run minted, and a refused credential disables the layer with
 the broker's reason instead of leaving a second reader on the queue; a run id
-without a credential self-registers and posts its name; a bare session mints its
-own run and names it; and `/register` answers the run credential with no attach
-grant. The drive's provisioned case carries a credential the broker never minted
-on purpose: a launch grant is minted in process, by the broker that provisions
+without a credential self-registers and names itself through `/rename` — the
+route a later peers rename writes, so the name stays replaceable, proven by the
+drive renaming the run and reading the new name back from `GET /sessions`; a
+bare session mints its own run and names it the same way; and `/register`
+answers the run credential with no attach grant. The drive's provisioned case
+carries a credential the broker never minted on purpose: a launch grant is minted in process, by the broker that provisions
 the launch, so a broker-only script cannot hold a spendable one. The handshake
 itself — grant spent once, the run's own credential returned, a nested session
 refused `409 attach-consumed`, the label surviving an authorized rename — is

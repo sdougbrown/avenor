@@ -111,7 +111,7 @@ already uses for its peers:
   run. A provisioned launch's is a one-shot attach credential (below); a
   hand-exported shell has none, so it self-registers instead.
 - `AVENOR_SESSION_NAME` — optional display name, posted to the broker's
-  `/session_name` by a session that self-registers; the posted name is what
+  `/rename` by a session that self-registers; the posted name is what
   `avenor:<label>` resolution and peer lists see. It falls back to
   `AVENOR_LABEL`, the launch identity every avenor launch exports, so a
   hand-exported shell can keep using either spelling. A provisioned run posts

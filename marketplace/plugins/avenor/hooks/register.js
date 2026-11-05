@@ -236,18 +236,19 @@ async function selfRegister(d) {
     return false
   }
   // A provisioned run posts no name. The supervisor registered it under the
-  // label its peers already address, and /session_name writes a harness name,
-  // which the broker resolves ahead of that label — the write would shadow the
-  // record's own name for good, including a later authorized rename. A
-  // self-registered run is displayed by its run id, so a name handed in is the
-  // only way it gets a good one.
+  // label its peers already address, and a harness name — which the broker
+  // resolves ahead of that label — would shadow the record's own name for
+  // good, including a later authorized rename. A self-registered run is
+  // displayed by its run id, so a name handed in is the only way it gets a
+  // good one; it goes through /rename, the same label field a later peers
+  // rename writes, so the name stays replaceable.
   if (!provisioned) {
     const name = await envSessionName(d)
     if (name !== "") {
       try {
-        await brokerPost(d, "/session_name", { name: name })
+        await brokerPost(d, "/rename", { name: name })
       } catch (err) {
-        await logLayer(d, "session_name failed: " + errorText(err))
+        await logLayer(d, "rename failed: " + errorText(err))
       }
     }
   }
