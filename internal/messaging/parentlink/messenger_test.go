@@ -320,7 +320,7 @@ func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
 	})
 	local := newStubMessenger()
 	local.peers = []messaging.Peer{{RunID: "run-collide"}}
-	local.reachable["run-collide"] = true
+	local.holds["run-collide"] = true
 	messenger := newTestMessenger(t, local, parent)
 	ctx := testContext(t)
 	if err := messenger.Start(ctx); err != nil {

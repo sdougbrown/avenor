@@ -187,7 +187,6 @@ type stubMessenger struct {
 	receives   []messaging.ReceiveRequest
 	preflights int
 
-	reachable map[string]bool
 	holds     map[string]bool
 	peers     []messaging.Peer
 	peersGen  string
@@ -205,7 +204,7 @@ type stubMessenger struct {
 }
 
 func newStubMessenger() *stubMessenger {
-	return &stubMessenger{reachable: map[string]bool{}, holds: map[string]bool{}}
+	return &stubMessenger{holds: map[string]bool{}}
 }
 
 func (s *stubMessenger) Send(_ context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
@@ -243,11 +242,7 @@ func (s *stubMessenger) Tell(_ context.Context, req messaging.TellRequest) error
 	return nil
 }
 
-func (s *stubMessenger) Reachable(runID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.reachable[runID]
-}
+func (s *stubMessenger) Reachable(_ string) bool { return false }
 
 func (s *stubMessenger) Holds(runID string) bool {
 	s.mu.Lock()

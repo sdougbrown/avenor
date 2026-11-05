@@ -218,11 +218,11 @@ func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 		// A literal run ID names the local run: a parent-exported run that
 		// shares a local run's ID is shadowed by it, because the child could
 		// not address the parent's run under that ID without also reaching its
-		// own. Only IDs the local registry does not hold survive the dedup.
+		// own. Only IDs the local seam does not hold survive the dedup.
 		if _, ok := seen[peer.RunID]; ok {
 			continue
 		}
-		if runID, ok := localRunID(peer.RunID, m.childID); ok && m.local.Reachable(runID) {
+		if runID, ok := localRunID(peer.RunID, m.childID); ok && m.local.Holds(runID) {
 			continue
 		}
 		seen[peer.RunID] = struct{}{}
