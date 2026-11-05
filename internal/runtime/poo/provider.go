@@ -319,8 +319,9 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 		default:
 		}
 		p.discardProcess(c)
-		if exited && ctx.Err() == nil {
-			return nil, &messagingFailure{reason: err.Error()}
+		cause := c.exitCause()
+		if opts.MessagingOn && exited && ctx.Err() == nil && (strings.Contains(cause, "feeds.paths") || strings.Contains(cause, "cli_registry.paths")) {
+			return nil, &messagingFailure{reason: cause}
 		}
 		return nil, err
 	}

@@ -2,6 +2,7 @@ package poo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 func TestMessagingLaunchFailures(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, scenario := range []struct{ name, action string }{
-		{"exit-before-initialize", "exit 1"},
+		{"exit-before-initialize", "echo 'feeds.paths refused' >&2; exit 1"},
 		{"bad-feeds-path", "export POO_FEEDS_PATH=/nonexistent-avenor-test-feeds"},
 		{"bad-registry-path", "export POO_CLI_REGISTRY_PATH=/nonexistent-avenor-test-registry"},
 	} {
@@ -54,6 +55,33 @@ func TestMessagingLaunchFailures(t *testing.T) {
 				assertFallbackSessionOff(t, p, session)
 			})
 		}
+	}
+}
+
+func TestEarlyCrashIsNotMessagingFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
+			opts, dir := fallbackFixture(t, "")
+			if explicit {
+				on := true
+				opts.Messaging = &on
+			}
+			script := fmt.Sprintf("#!/bin/sh\necho x >> '%s'\necho 'crashed' >&2\nexit 1\n", filepath.Join(dir, "count"))
+			if err := os.WriteFile(opts.Launch.Command, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			p := NewWithOptions(opts)
+			t.Cleanup(func() { _ = p.Close() })
+			_, err := p.Start(context.Background(), avruntime.StartOptions{})
+			var unavailable *avruntime.MessagingUnavailableError
+			if err == nil || errors.As(err, &unavailable) {
+				t.Fatalf("ordinary launch error wanted, got %v", err)
+			}
+			if got := fallbackLaunches(t, dir); got != 1 {
+				t.Fatalf("launches = %d, want 1", got)
+			}
+		})
 	}
 }
 
