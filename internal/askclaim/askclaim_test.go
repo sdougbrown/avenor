@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 	"testing"
 )
 
-// TestRecordClaimAndRestore checks the single-use claim handoff.
-func TestRecordClaimAndRestore(t *testing.T) {
+// TestRecord checks the persisted ask and its permissions.
+func TestRecord(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "asks")
 	if err := Record(dir, "av1.ask", "rt_sender"); err != nil {
 		t.Fatal(err)
@@ -39,39 +37,6 @@ func TestRecordClaimAndRestore(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0700 {
 		t.Fatalf("dir mode=%v err=%v", info, err)
 	}
-	p := &Provider{Dir: dir}
-	if sender, ok := p.ClaimAsk("av1.ask"); !ok || sender != "rt_sender" {
-		t.Fatalf("claim %q %v", sender, ok)
-	}
-	if sender, ok := p.ClaimAsk("av1.ask"); ok || sender != "" {
-		t.Fatalf("second claim %q %v", sender, ok)
-	}
-	p.RestoreAsk("av1.ask", "attacker")
-	if sender, ok := p.ClaimAsk("av1.ask"); !ok || sender != "rt_sender" {
-		t.Fatalf("restored claim %q %v", sender, ok)
-	}
-}
-
-// TestClaimWithExistingClaimedFileDoesNotWin preserves the original claim.
-func TestClaimWithExistingClaimedFileDoesNotWin(t *testing.T) {
-	dir := t.TempDir()
-	if err := Record(dir, "id", "first"); err != nil {
-		t.Fatal(err)
-	}
-	p := &Provider{Dir: dir}
-	if _, ok := p.ClaimAsk("id"); !ok {
-		t.Fatal("first claim failed")
-	}
-	if err := os.WriteFile(filepath.Join(dir, "id.json"), []byte(`{"asker_run_id":"second"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if asker, ok := p.ClaimAsk("id"); ok || asker != "" {
-		t.Fatalf("second claim %q %v", asker, ok)
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "id.claimed"))
-	if err != nil || !strings.Contains(string(raw), "first") {
-		t.Fatalf("claimed %q error %v", raw, err)
-	}
 }
 
 // TestRecordRejectsDifferentAsker preserves existing pending and claimed records.
@@ -82,11 +47,10 @@ func TestRecordRejectsDifferentAsker(t *testing.T) {
 			if err := Record(dir, "id", "first"); err != nil {
 				t.Fatal(err)
 			}
-			p := &Provider{Dir: dir}
 			name := "id.json"
 			if claimed {
-				if _, ok := p.ClaimAsk("id"); !ok {
-					t.Fatal("claim failed")
+				if err := os.Rename(filepath.Join(dir, name), filepath.Join(dir, "id.claimed")); err != nil {
+					t.Fatal(err)
 				}
 				name = "id.claimed"
 			}
@@ -108,45 +72,14 @@ func TestRecordRejectsDifferentAsker(t *testing.T) {
 	}
 }
 
-// TestConcurrentClaimsHaveOneWinner verifies the atomic handoff.
-func TestConcurrentClaimsHaveOneWinner(t *testing.T) {
-	dir := t.TempDir()
-	if err := Record(dir, "id", "sender"); err != nil {
-		t.Fatal(err)
-	}
-	p := &Provider{Dir: dir}
-	var wg sync.WaitGroup
-	results := make(chan bool, 20)
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); _, ok := p.ClaimAsk("id"); results <- ok }()
-	}
-	wg.Wait()
-	close(results)
-	wins := 0
-	for ok := range results {
-		if ok {
-			wins++
-		}
-	}
-	if wins != 1 {
-		t.Fatalf("winners=%d", wins)
-	}
-}
-
 // TestInvalidMessageIDDoesNotTouchFilesystem rejects paths and unsafe names.
 func TestInvalidMessageIDDoesNotTouchFilesystem(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "asks")
-	p := &Provider{Dir: dir}
 	for _, id := range []string{"../x", ".", "..", "", "a/b"} {
 		if err := Record(dir, id, "s"); err == nil {
 			t.Errorf("Record(%q) succeeded", id)
 		}
-		if _, ok := p.ClaimAsk(id); ok {
-			t.Errorf("ClaimAsk(%q) succeeded", id)
-		}
-		p.RestoreAsk(id, "s")
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("directory touched: %v", err)
@@ -193,14 +126,13 @@ func TestAClaimedAskIsNotRecordedAgain(t *testing.T) {
 	if err := Record(dir, "av1.ask", "rt_sender"); err != nil {
 		t.Fatal(err)
 	}
-	p := &Provider{Dir: dir}
-	if _, ok := p.ClaimAsk("av1.ask"); !ok {
-		t.Fatal("the first claim failed")
+	if err := os.Rename(filepath.Join(dir, "av1.ask.json"), filepath.Join(dir, "av1.ask.claimed")); err != nil {
+		t.Fatal(err)
 	}
 	if err := Record(dir, "av1.ask", "rt_sender"); err != nil {
 		t.Fatal(err)
 	}
-	if asker, ok := p.ClaimAsk("av1.ask"); ok {
-		t.Fatalf("an ask claimed once was claimable again, for %q", asker)
+	if _, err := os.Stat(filepath.Join(dir, "av1.ask.json")); !os.IsNotExist(err) {
+		t.Fatalf("claimed ask was recorded again: %v", err)
 	}
 }
