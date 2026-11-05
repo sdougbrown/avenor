@@ -15,6 +15,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/durablefile"
+	"github.com/sdougbrown/avenor/internal/feed"
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
@@ -40,7 +41,7 @@ func renderManifests(stateHome, brokerURL, runID string) (manifestContent, error
 		return manifestContent{}, err
 	}
 	data := struct{ Executable, LockFlag, AsksFlag, Timeout string }{
-		executable, "--lock-dir=" + filepath.Join(stateHome, "feed-locks"), "--asks-dir=" + asks,
+		executable, "--lock-dir=" + feed.DefaultLockDir(stateHome), "--asks-dir=" + asks,
 		(messaging.MaxWait + 30*time.Second).String(),
 	}
 	jsonString := func(s string) string { b, _ := json.Marshal(s); return string(b) }
