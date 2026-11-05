@@ -14,6 +14,9 @@ import (
 
 func TestMessagingPeerEnv(t *testing.T) {
 	identitytest.PoisonParent(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("POO_FEEDS_PATH", "")
+	t.Setenv("POO_CLI_REGISTRY_PATH", "")
 	b := broker.New(broker.MakeToken())
 	if err := b.Start(); err != nil {
 		t.Fatal(err)
@@ -52,6 +55,19 @@ func TestMessagingPeerEnv(t *testing.T) {
 				want = map[string]string{"AVENOR_BROKER_URL": b.URL(), "AVENOR_RUN_ID": "rt_child", "AVENOR_BROKER_TOKEN": token}
 			}
 			identitytest.AssertPeerEnv(t, observed, want)
+			for _, key := range []string{"POO_FEEDS_PATH", "POO_CLI_REGISTRY_PATH"} {
+				value := observed[key]
+				if tc.on && tc.ready && tc.broker {
+					if !filepath.IsAbs(value) {
+						t.Errorf("%s = %q, want absolute path", key, value)
+					}
+					if info, err := os.Stat(value); err != nil || !info.IsDir() {
+						t.Errorf("%s = %q: %v", key, value, err)
+					}
+				} else if value != "" {
+					t.Errorf("%s = %q, want empty", key, value)
+				}
+			}
 		})
 	}
 }

@@ -91,10 +91,8 @@ type permissionAsk struct {
 	id        json.RawMessage
 }
 
-// messagingReady holds broker credentials back from every poo child until the
-// backend writes the feed and cli-registry manifests that use them. A child
-// given credentials without those manifests could receive asks it has no tool to
-// answer.
+// messagingReady holds messaging back until the backend can verify that a
+// child accepted both the feed and the tool.
 var messagingReady = false
 
 // startClient spawns the resolved binary and returns the connected client. The
@@ -110,7 +108,15 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 	// Broker credentials require messaging and a ready messaging surface.
 	proc.Env = runtime.LaunchEnv(proc.Environ(), opts.Provenance)
 	if opts.MessagingOn && messagingReady {
-		proc.Env = append(proc.Env, runtime.ProvisionPeer(opts).RunEnv()...)
+		peer := runtime.ProvisionPeer(opts)
+		if peer != nil {
+			paths, err := messagingManifests(peer.URL, peer.RunID)
+			if err != nil {
+				return nil, fmt.Errorf("poo messaging manifests: %w", err)
+			}
+			proc.Env = append(proc.Env, peer.RunEnv()...)
+			proc.Env = append(proc.Env, "POO_FEEDS_PATH="+paths.feeds, "POO_CLI_REGISTRY_PATH="+paths.registry)
+		}
 	}
 
 	stdin, err := proc.StdinPipe()
