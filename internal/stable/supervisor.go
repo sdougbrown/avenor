@@ -6603,12 +6603,6 @@ func (s *Supervisor) loopExecutor() workflow.Executor {
 type loopExecutor struct{ sup *Supervisor }
 
 func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
-	if ec.Selection != nil && ec.Selection.Messaging != nil && *ec.Selection.Messaging {
-		kind, label := workflowMarkerForKind(ec.Action.Kind)
-		_ = e.sup.workflowManager().RecordAttemptTerminated(
-			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
-		return fmt.Errorf("messaging is not supported for loop and team phases")
-	}
 	params := SpawnParams{
 		WorkflowID:   string(ec.WorkflowID),
 		NodeID:       string(ec.NodeID),
@@ -6623,6 +6617,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PersistSessions = ec.Selection.PersistSessions
+		params.Messaging = ec.Selection.Messaging
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
@@ -6672,12 +6667,6 @@ func (s *Supervisor) teamExecutor() workflow.Executor {
 type teamExecutor struct{ sup *Supervisor }
 
 func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
-	if ec.Selection != nil && ec.Selection.Messaging != nil && *ec.Selection.Messaging {
-		kind, label := workflowMarkerForKind(ec.Action.Kind)
-		_ = e.sup.workflowManager().RecordAttemptTerminated(
-			ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptFailed, kind, label)
-		return fmt.Errorf("messaging is not supported for loop and team phases")
-	}
 	params := SpawnParams{
 		WorkflowID:   string(ec.WorkflowID),
 		NodeID:       string(ec.NodeID),
@@ -6692,6 +6681,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PersistSessions = ec.Selection.PersistSessions
+		params.Messaging = ec.Selection.Messaging
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
