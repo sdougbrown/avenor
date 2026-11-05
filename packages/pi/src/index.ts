@@ -700,11 +700,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     }
 
     // The harness owns the session's user-defined name, and the broker lets it
-    // outrank any name the model set for itself. The pi peer this package builds
-    // against exposes the name through the session manager but no rename event,
-    // so it is read on session start and before every turn; an unchanged name is
-    // not republished. `null` means nothing has been published for this session
-    // yet, so a failed publish is retried on the next turn.
+    // outrank any name the model set for itself. Pi reports renames that go
+    // through the session API (RPC hosts, other extensions) as
+    // `session_info_changed`, which publishes immediately. The manager is also
+    // read before every turn. An unchanged name is not republished. `null`
+    // means nothing has been published yet, so a failed publish is retried.
     let publishedSessionName: { name: string | undefined } | null = null
 
     // Publishes are serialized: the broker applies last-writer-wins, so an
@@ -2249,6 +2249,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       if (hasUndelivered) startPolling()
     }
     pi.on('session_compact', resumeAfterCompaction)
+
+    pi.on('session_info_changed', async (_event, ctx) => {
+      void publishSessionName(ctx)
+    })
 
     pi.on('before_agent_start', async (_event, ctx) => {
       // A session renamed between turns is picked up here, before the turn whose

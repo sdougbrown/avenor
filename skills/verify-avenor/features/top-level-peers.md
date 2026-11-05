@@ -53,6 +53,9 @@ request bodies.
 1. In Pi, call `avenor_peers`. Capture a complete listing containing
    `pi-scout` and `claude-scout` with distinct run IDs. Before any spawn,
    confirm that using central peer tools did not start a local supervisor.
+   Rename the idle Pi session through the session API and capture a peer listing
+   with the new name and the same run ID before starting another model turn.
+   Clear the name and capture the resulting listing as well.
 2. In Pi, ask `claude-scout` to reply with `CLAUDE-PEER-OK`. Let idle Claude
    receive the injected prompt and answer through its peer layer. Capture Pi's
    `replied` result and Claude's matching inbound message and reply result.
@@ -122,6 +125,9 @@ are opt-in; existing Claude self-registrations are not leased. A retired peer's
 record is reaped 30 minutes after its identity stops answering
 (`peerTombstoneTTL`), so its last turn stops being readable and its run id
 becomes registrable again after that window.
+
+Pi's session-selector rename does not emit a session-name change event. This
+drive does not establish when a selector rename propagates.
 
 A bearer credential can be copied. Overlapping-poll exclusion does not prove
 one physical consumer.
