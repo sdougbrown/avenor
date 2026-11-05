@@ -4626,7 +4626,7 @@ func (s *Supervisor) recordMessagingOutcome(child *childRuntime, session runtime
 	child.session.MessagingWarning = ""
 	child.mu.Unlock()
 	if session.MessagingWarning != "" {
-		s.emitChildError(child, "poo messaging unavailable: "+session.MessagingWarning, "warning")
+		s.emitChildError(child, "messaging unavailable: "+session.MessagingWarning, "warning")
 	}
 }
 

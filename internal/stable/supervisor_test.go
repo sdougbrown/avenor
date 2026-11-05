@@ -46,7 +46,7 @@ func TestProviderMessagingRetryOutcome(t *testing.T) {
 	sup.recordMessagingOutcome(child, child.session)
 	select {
 	case ev := <-stream:
-		if ev.Event != "avenor.error" || ev.Fields["source"] != "warning" || ev.Fields["message"] != "poo messaging unavailable: fallback" {
+		if ev.Event != "avenor.error" || ev.Fields["source"] != "warning" || ev.Fields["message"] != "messaging unavailable: fallback" {
 			t.Fatalf("warning event = %+v", ev)
 		}
 	default:
