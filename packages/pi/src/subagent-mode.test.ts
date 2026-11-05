@@ -587,6 +587,64 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 
+  it('delivers a late reply to a timed-out ask as an ordinary inbound message', async () => {
+    // A timeout leaves the edge open. Its late answer arrives as a plain peer
+    // message, without a reply instruction or error result.
+    // Keep the reply unavailable until the ask has returned its timeout.
+    const wait = Promise.withResolvers<Response>()
+    const lateReply = {
+      type: 'agent_message',
+      from_run_id: 'supervisor',
+      payload: {
+        id: 'ask-late.reply',
+        from: 'supervisor',
+        from_run_id: 'supervisor',
+        to_run_id: 'rt_child',
+        message: 'LATE-PONG',
+        role: 'agent',
+        reply_to: 'ask-late',
+      },
+    }
+    let lateArmed = false
+    let polls = 0
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/wait_reply': () => wait.promise,
+      '/poll-control': () => {
+        polls++
+        return Response.json(lateArmed ? [lateReply] : [])
+      },
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const pending = harness.registeredTools.avenor_message.execute('t1', {
+        action: 'ask',
+        target: 'supervisor',
+        message: 'anyone there?',
+      })
+      // Polls ran while the ask waited and delivered nothing, so the row below
+      // cannot have been queued before the wait ended.
+      await waitFor(() => polls >= 2)
+      wait.resolve(Response.json({ outcome: 'timed-out' }))
+
+      const result = await pending
+      expect(result.details.outcome).toBe('timed-out')
+      expect(harness.sendUserMessage).not.toHaveBeenCalled()
+
+      lateArmed = true
+      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
+      const [body, options] = harness.sendUserMessage.mock.calls[0] as [string, { deliverAs: string }]
+      expect(body).toContain('Message from peer')
+      expect(body).toContain('LATE-PONG')
+      expect(body).not.toContain('reply_to')
+      expect(options.deliverAs).toBe('steer')
+    } finally {
+      wait.resolve(new Response('[]'))
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
   it('keeps a child ask open when the tool call aborts', async () => {
     const fetchStub = stubBrokerFetch([], 0, 0, 0, {
       '/sessions': supervisorSessions,
