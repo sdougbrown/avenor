@@ -320,8 +320,16 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 		}
 		p.discardProcess(c)
 		cause := c.exitCause()
-		if opts.MessagingOn && exited && ctx.Err() == nil && (strings.Contains(cause, "feeds.paths") || strings.Contains(cause, "cli_registry.paths")) {
-			return nil, &messagingFailure{reason: cause}
+		if opts.MessagingOn && exited && ctx.Err() == nil {
+			for _, line := range strings.Split(cause, "\n") {
+				if strings.Contains(line, "feeds.paths") || strings.Contains(line, "cli_registry.paths") {
+					line = strings.TrimSpace(line)
+					if len(line) > 400 {
+						line = line[:400]
+					}
+					return nil, &messagingFailure{reason: line}
+				}
+			}
 		}
 		return nil, err
 	}

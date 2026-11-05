@@ -58,6 +58,23 @@ func TestMessagingLaunchFailures(t *testing.T) {
 	}
 }
 
+func TestEarlyManifestFailureReportsOnlyFieldLine(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	opts, _ := fallbackFixture(t, "")
+	on := true
+	opts.Messaging = &on
+	if err := os.WriteFile(opts.Launch.Command, []byte("#!/bin/sh\necho trace-before >&2\necho 'feeds.paths: invalid' >&2\necho trace-after >&2\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := NewWithOptions(opts)
+	t.Cleanup(func() { _ = p.Close() })
+	_, err := p.Start(context.Background(), avruntime.StartOptions{})
+	var unavailable *avruntime.MessagingUnavailableError
+	if !errors.As(err, &unavailable) || !strings.Contains(err.Error(), "feeds.paths") || strings.Contains(err.Error(), "trace-") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestEarlyCrashIsNotMessagingFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, explicit := range []bool{false, true} {
