@@ -121,7 +121,7 @@ func TestBrokerDeliversStampedMessagesAndLocks(t *testing.T) {
 	if tell.Text != "hello" || tell.From != "sender" || tell.ID != "tell" {
 		t.Fatalf("tell: %+v", tell)
 	}
-	if ask.From != "sender" || ask.ID != "ask" || !strings.Contains(ask.Text, "avenor_reply") || !strings.Contains(ask.Text, `"ask"`) || !strings.Contains(ask.Text, "call_cli") || !strings.Contains(ask.Text, `ask from "sender"`) || strings.Contains(ask.Text, `"to":`) || strings.Contains(ask.Text, "supervisor") || strings.Contains(ask.Text, "forged") {
+	if ask.From != "sender" || ask.ID != "ask" || !strings.Contains(ask.Text, `"name": "avenor_message"`) || !strings.Contains(ask.Text, `"action": "reply"`) || !strings.Contains(ask.Text, `"message": "..."`) || strings.Contains(ask.Text, "avenor_reply") || !strings.Contains(ask.Text, `"ask"`) || !strings.Contains(ask.Text, "call_cli") || !strings.Contains(ask.Text, `ask from "sender"`) || strings.Contains(ask.Text, `"to":`) || strings.Contains(ask.Text, "supervisor") || strings.Contains(ask.Text, "forged") {
 		t.Fatalf("ask: %+v", ask)
 	}
 	raw, err := os.ReadFile(filepath.Join(asksDir, "ask.json"))
@@ -177,7 +177,7 @@ func TestAskRecordFailureDoesNotLoseDelivery(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.String()), &line); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(line.Text, "private text") || !strings.HasSuffix(line.Text, `This message is an ask from "sender", but it cannot be answered here.`) || strings.Contains(line.Text, "avenor_reply") || !strings.Contains(logs.String(), "ask-id") || strings.Contains(logs.String(), "private text") {
+	if !strings.Contains(line.Text, "private text") || !strings.HasSuffix(line.Text, `This message is an ask from "sender", but it cannot be answered here.`) || strings.Contains(line.Text, "avenor_message") || !strings.Contains(logs.String(), "ask-id") || strings.Contains(logs.String(), "private text") {
 		t.Fatalf("output=%q log=%q", out.String(), logs.String())
 	}
 }

@@ -177,7 +177,7 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 						text += fmt.Sprintf("\n\nThis message is an ask from %s, but it cannot be answered here.", quotedSender)
 					} else {
 						quotedID, _ := json.Marshal(id)
-						text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_reply\", \"args\": {\"reply_to\": %s, \"text\": \"...\"}}.", quotedSender, quotedID)
+						text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_message\", \"args\": {\"action\": \"reply\", \"reply_to\": %s, \"message\": \"...\"}}.", quotedSender, quotedID)
 					}
 				}
 				line := struct {
