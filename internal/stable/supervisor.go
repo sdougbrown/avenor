@@ -6552,11 +6552,9 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Thinking = ec.Selection.Thinking
 		params.AutoApprove = ec.Selection.AutoApprove
 		params.PersistSessions = ec.Selection.PersistSessions
+		params.Messaging = ec.Selection.Messaging
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
-	}
-	if ec.Selection != nil {
-		params.Messaging = ec.Selection.Messaging
 	}
 	if ec.Action.Run != nil {
 		params.Prompt = ec.Action.Run.Prompt
