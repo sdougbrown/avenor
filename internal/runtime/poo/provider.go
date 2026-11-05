@@ -101,7 +101,8 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		params.Models = &protocol.ModelRoles{Chat: merged.Model}
 	}
 	baseline := time.Now()
-	c, info, merged, err := p.openSession(ctx, merged, baseline, func(c *client) (protocol.SessionInfo, error) {
+	var warning string
+	c, info, merged, err := p.openSession(ctx, merged, baseline, &warning, func(c *client) (protocol.SessionInfo, error) {
 		info, err := c.createSession(ctx, params)
 		return info, describeCreateFailure(merged, err)
 	})
@@ -115,11 +116,12 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	p.mu.Unlock()
 
 	return runtime.Session{
-		SessionID:   info.SessionID,
-		Backend:     backendID,
-		Dir:         merged.Dir,
-		PID:         c.pid(),
-		MessagingOn: &on,
+		SessionID:        info.SessionID,
+		Backend:          backendID,
+		Dir:              merged.Dir,
+		PID:              c.pid(),
+		MessagingOn:      &on,
+		MessagingWarning: warning,
 	}, nil
 }
 
@@ -214,7 +216,8 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 		}
 	}
 	baseline := time.Now()
-	c, info, merged, err := p.openSession(ctx, merged, baseline, func(c *client) (protocol.SessionInfo, error) {
+	var warning string
+	c, info, merged, err := p.openSession(ctx, merged, baseline, &warning, func(c *client) (protocol.SessionInfo, error) {
 		info, err := c.loadSession(ctx, protocol.LoadParams{SessionID: sessionID})
 		if err != nil {
 			err = describeLoadFailure(sessionID, err)
@@ -230,11 +233,12 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	p.mu.Unlock()
 
 	return runtime.Session{
-		SessionID:   info.SessionID,
-		Backend:     backendID,
-		Dir:         merged.Dir,
-		PID:         c.pid(),
-		MessagingOn: &merged.MessagingOn,
+		SessionID:        info.SessionID,
+		Backend:          backendID,
+		Dir:              merged.Dir,
+		PID:              c.pid(),
+		MessagingOn:      &merged.MessagingOn,
+		MessagingWarning: warning,
 	}, nil
 }
 
@@ -258,7 +262,7 @@ type messagingFailure struct{ reason string }
 func (e *messagingFailure) Error() string { return e.reason }
 
 // openSession applies the same fallback to creation and cross-process resume.
-func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, baseline time.Time, open func(*client) (protocol.SessionInfo, error)) (*client, protocol.SessionInfo, runtime.StartOptions, error) {
+func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, baseline time.Time, warning *string, open func(*client) (protocol.SessionInfo, error)) (*client, protocol.SessionInfo, runtime.StartOptions, error) {
 	for {
 		var c *client
 		var err error
@@ -298,6 +302,7 @@ func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, b
 		if opts.Messaging != nil && *opts.Messaging {
 			return nil, protocol.SessionInfo{}, opts, &runtime.MessagingUnavailableError{Reason: failure.reason}
 		}
+		*warning = failure.reason
 		log.Printf("warning: poo messaging unavailable: %s", failure.reason)
 		opts.MessagingOn = false
 	}

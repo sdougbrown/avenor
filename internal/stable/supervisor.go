@@ -4616,6 +4616,9 @@ func (s *Supervisor) installChildProvider(child *childRuntime, provider runtime.
 	}
 	child.mu.Unlock()
 	child.writeMu.Unlock()
+	if session.MessagingWarning != "" {
+		s.emitChildError(child, "poo messaging unavailable: "+session.MessagingWarning, "warning")
+	}
 	return lifecycle
 }
 

@@ -191,6 +191,9 @@ func TestMessagingWithoutBrokerIdentity(t *testing.T) {
 			}
 			assertFallbackEnv(t, dir, 1, false)
 			assertFallbackSessionOff(t, p, session)
+			if !strings.Contains(session.MessagingWarning, "broker identity") {
+				t.Fatalf("warning = %q", session.MessagingWarning)
+			}
 		})
 	}
 }
