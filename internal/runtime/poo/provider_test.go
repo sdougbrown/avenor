@@ -488,12 +488,13 @@ func TestMessagingOutcomeRealPoo(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("POO_FEEDS_PATH", "")
 	t.Setenv("POO_CLI_REGISTRY_PATH", "")
-	stub := filepath.Join(t.TempDir(), "avenor")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexec sleep 60\n"), 0700); err != nil {
-		t.Fatal(err)
+	avenor := filepath.Join(t.TempDir(), "avenor")
+	cmd := exec.Command("go", "build", "-o", avenor, "../../../cmd/avenor")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build avenor: %v\n%s", err, out)
 	}
 	old := avenorExecutable
-	avenorExecutable = func() (string, error) { return stub, nil }
+	avenorExecutable = func() (string, error) { return avenor, nil }
 	t.Cleanup(func() { avenorExecutable = old })
 	b := broker.New(broker.MakeToken())
 	if err := b.Start(); err != nil {
@@ -558,38 +559,76 @@ func TestMessagingOutcomeRealPoo(t *testing.T) {
 	}
 }
 
-func TestMessagingReadinessWait(t *testing.T) {
+func TestMessagingTakeCheck(t *testing.T) {
 	oldInterval, oldLimit := messagingPollInterval, messagingPollLimit
 	messagingPollInterval, messagingPollLimit = 20*time.Millisecond, 180*time.Millisecond
 	t.Cleanup(func() { messagingPollInterval, messagingPollLimit = oldInterval, oldLimit })
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	token, _, err := b.EnsureRun("take", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := helperStartOptions()
+	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "take", token, true
+	info := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_cli"}}}
+	baseline := time.Now()
+	t.Setenv(helperEnv, "messaging-poll")
+	c, err := startClient(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkMessaging(context.Background(), opts, info, baseline); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.shutdown()
+	baseline = time.Now()
 	for _, tc := range []struct {
-		mode string
-		want bool
-		// reason is what a failed check names.
-		reason string
+		name    string
+		opts    avruntime.StartOptions
+		info    protocol.SessionInfo
+		reason  string
+		failure bool
 	}{
-		{"messaging-late", true, ""},
-		{"messaging-never", false, "not seen"},
-		// A feed whose command keeps failing is listed, but never running.
-		{"messaging-restarting", false, "restarting"},
-		{"messaging-recovers", true, ""},
+		{"old poll", opts, info, "no poll", true},
+		{"no poll", func() avruntime.StartOptions { o := opts; o.RuntimeID = "empty"; return o }(), info, "no poll", true},
+		{"no tool", opts, protocol.SessionInfo{}, "call_cli", true},
+		{"missing record", func() avruntime.StartOptions { o := opts; o.RuntimeID = "missing"; return o }(), info, "no run record", false},
+		{"no broker", func() avruntime.StartOptions { o := opts; o.Broker = nil; return o }(), info, "not provisioned", true},
 	} {
-		t.Run(tc.mode, func(t *testing.T) {
-			t.Setenv(helperEnv, tc.mode)
-			c, err := startClient(context.Background(), avruntime.StartOptions{Launch: backendlaunch.Spec{Command: os.Args[0]}}, nil)
-			if err != nil {
-				t.Fatal(err)
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "no poll" {
+				if _, _, err := b.EnsureRun("empty", ""); err != nil {
+					t.Fatal(err)
+				}
 			}
-			defer c.shutdown()
 			started := time.Now()
-			ok, reason := checkMessaging(context.Background(), c, protocol.SessionInfo{SessionID: "session", Tools: []protocol.ToolInfo{{Name: "call_cli"}}})
-			if ok != tc.want {
-				t.Fatalf("got %v, reason %q", ok, reason)
+			err := checkMessaging(context.Background(), tc.opts, tc.info, baseline)
+			var failure *messagingFailure
+			if err == nil || !strings.Contains(err.Error(), tc.reason) || errors.As(err, &failure) != tc.failure {
+				t.Fatalf("error = %v", err)
 			}
-			if !ok && (!strings.Contains(reason, "feed:avenor-inbox") || !strings.Contains(reason, tc.reason) || time.Since(started) < messagingPollLimit) {
-				t.Fatalf("reason %q, elapsed %v", reason, time.Since(started))
+			if strings.Contains(tc.reason, "no poll") && time.Since(started) < messagingPollLimit {
+				t.Fatal("check returned early")
 			}
 		})
+	}
+}
+
+func TestMessagingMissingRunIsNotFallback(t *testing.T) {
+	b := broker.New("")
+	opts := helperStartOptions()
+	opts.Broker, opts.RuntimeID, opts.MessagingOn = b, "missing", true
+	p := NewWithOptions(opts)
+	defer p.Close()
+	_, err := p.Start(context.Background(), avruntime.StartOptions{})
+	var unavailable *avruntime.MessagingUnavailableError
+	if err == nil || !strings.Contains(err.Error(), "broker has no run record for missing") || errors.As(err, &unavailable) {
+		t.Fatalf("error = %v, want provisioning error", err)
 	}
 }
 
@@ -2084,7 +2123,15 @@ func runHelperServer(mode string) int {
 	}
 	runPrompts := 0
 	inspectWaits := 0
-	getCount := 0
+	if mode == "messaging-poll" {
+		go func() {
+			body, _ := json.Marshal(map[string]string{"run_id": os.Getenv("AVENOR_RUN_ID"), "token": os.Getenv("AVENOR_BROKER_TOKEN")})
+			resp, err := http.Post(os.Getenv("AVENOR_BROKER_URL")+"/poll-control", "application/json", bytes.NewReader(body))
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+	}
 	write := func(value any) {
 		encoded, err := json.Marshal(value)
 		if err != nil {
@@ -2108,20 +2155,6 @@ func runHelperServer(mode string) int {
 		}
 		switch request.Method {
 		case protocol.MethodSessionGet:
-			if mode == "messaging-late" || mode == "messaging-never" || mode == "messaging-restarting" || mode == "messaging-recovers" {
-				getCount++
-				result := protocol.GetResult{}
-				switch {
-				case mode == "messaging-late" && getCount >= 3:
-					result.Jobs = []protocol.JobInfo{{JobID: "feed:avenor-inbox", Status: "running"}}
-				case mode == "messaging-restarting", mode == "messaging-recovers" && getCount < 3:
-					result.Jobs = []protocol.JobInfo{{JobID: "feed:avenor-inbox", Status: "restarting"}}
-				case mode == "messaging-recovers":
-					result.Jobs = []protocol.JobInfo{{JobID: "feed:avenor-inbox", Status: "running"}}
-				}
-				write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
-				continue
-			}
 			if mode == "busysettle" {
 				// The run that refused the prompt has settled, so the
 				// session names none.

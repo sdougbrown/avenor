@@ -100,7 +100,8 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if merged.Model != "" {
 		params.Models = &protocol.ModelRoles{Chat: merged.Model}
 	}
-	c, info, merged, err := p.openSession(ctx, merged, func(c *client) (protocol.SessionInfo, error) {
+	baseline := time.Now()
+	c, info, merged, err := p.openSession(ctx, merged, baseline, func(c *client) (protocol.SessionInfo, error) {
 		info, err := c.createSession(ctx, params)
 		return info, describeCreateFailure(merged, err)
 	})
@@ -122,7 +123,13 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	}, nil
 }
 
-func checkMessaging(ctx context.Context, c *client, info protocol.SessionInfo) (bool, string) {
+func checkMessaging(ctx context.Context, opts runtime.StartOptions, info protocol.SessionInfo, baseline time.Time) error {
+	if opts.Broker == nil || opts.RuntimeID == "" {
+		return &messagingFailure{reason: "broker identity was not provisioned"}
+	}
+	if _, ok := opts.Broker.LastPolled(opts.RuntimeID); !ok {
+		return fmt.Errorf("broker has no run record for %s", opts.RuntimeID)
+	}
 	found := false
 	for _, tool := range info.Tools {
 		if tool.Name == "call_cli" {
@@ -131,48 +138,23 @@ func checkMessaging(ctx context.Context, c *client, info protocol.SessionInfo) (
 		}
 	}
 	if !found {
-		return false, "session/create did not offer call_cli"
+		return &messagingFailure{reason: "session/create did not offer call_cli"}
 	}
 	ctx, cancel := context.WithTimeout(ctx, messagingPollLimit)
 	defer cancel()
-	var lastStatus string
-	// poo lists a feed's job before its command starts, so only a running
-	// job shows the feed came up. A restarting or held job may still recover
-	// within the wait.
-	notSeen := func(err error) string {
-		if last := lastStatus; last != "" {
-			return fmt.Sprintf("feed:avenor-inbox is %s, not running: %v", last, err)
-		}
-		return fmt.Sprintf("feed:avenor-inbox not seen: %v", err)
-	}
 	for {
-		raw, rpcErr, err := c.call(ctx, protocol.MethodSessionGet, protocol.GetParams{SessionID: info.SessionID})
-		if err != nil {
-			if ctx.Err() != nil {
-				return false, notSeen(ctx.Err())
-			}
-			return false, fmt.Sprintf("session/get: %v", err)
+		stamp, ok := opts.Broker.LastPolled(opts.RuntimeID)
+		if !ok {
+			return fmt.Errorf("broker has no run record for %s", opts.RuntimeID)
 		}
-		if rpcErr != nil {
-			return false, fmt.Sprintf("session/get: %s", describeRefusal(rpcErr))
-		}
-		var result protocol.GetResult
-		if err := json.Unmarshal(raw, &result); err != nil {
-			return false, fmt.Sprintf("decode session/get: %v", err)
-		}
-		for _, job := range result.Jobs {
-			if job.JobID == "feed:avenor-inbox" {
-				if job.Status == "running" {
-					return true, ""
-				}
-				lastStatus = job.Status
-			}
+		if stamp.After(baseline) {
+			return nil
 		}
 		timer := time.NewTimer(messagingPollInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return false, notSeen(ctx.Err())
+			return &messagingFailure{reason: fmt.Sprintf("the broker saw no poll from run %s within %s", opts.RuntimeID, messagingPollLimit)}
 		case <-timer.C:
 		}
 	}
@@ -231,7 +213,8 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 			p.discardProcess(c)
 		}
 	}
-	c, info, merged, err := p.openSession(ctx, merged, func(c *client) (protocol.SessionInfo, error) {
+	baseline := time.Now()
+	c, info, merged, err := p.openSession(ctx, merged, baseline, func(c *client) (protocol.SessionInfo, error) {
 		info, err := c.loadSession(ctx, protocol.LoadParams{SessionID: sessionID})
 		if err != nil {
 			err = describeLoadFailure(sessionID, err)
@@ -275,10 +258,20 @@ type messagingFailure struct{ reason string }
 func (e *messagingFailure) Error() string { return e.reason }
 
 // openSession applies the same fallback to creation and cross-process resume.
-func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, open func(*client) (protocol.SessionInfo, error)) (*client, protocol.SessionInfo, runtime.StartOptions, error) {
-	opts.MessagingOn = opts.MessagingOn && runtime.ProvisionPeer(opts) != nil
+func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, baseline time.Time, open func(*client) (protocol.SessionInfo, error)) (*client, protocol.SessionInfo, runtime.StartOptions, error) {
 	for {
-		c, err := p.openProcess(ctx, opts)
+		var c *client
+		var err error
+		if opts.MessagingOn && (opts.Broker == nil || opts.RuntimeID == "") {
+			err = &messagingFailure{reason: "broker identity was not provisioned"}
+		} else if opts.MessagingOn {
+			if _, ok := opts.Broker.LastPolled(opts.RuntimeID); !ok {
+				err = fmt.Errorf("broker has no run record for %s", opts.RuntimeID)
+			}
+		}
+		if err == nil {
+			c, err = p.openProcess(ctx, opts)
+		}
 		var info protocol.SessionInfo
 		if err == nil {
 			info, err = open(c)
@@ -286,9 +279,7 @@ func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, o
 				err = &messagingFailure{reason: err.Error()}
 			}
 			if err == nil && opts.MessagingOn {
-				if ok, reason := checkMessaging(ctx, c, info); !ok {
-					err = &messagingFailure{reason: reason}
-				}
+				err = checkMessaging(ctx, opts, info, baseline)
 			}
 			if err != nil {
 				if info.SessionID != "" {
