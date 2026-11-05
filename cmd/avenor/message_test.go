@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +58,12 @@ func TestMessageRoundTrips(t *testing.T) {
 		t.Fatal("message not received")
 		return messaging.InboundMessage{}
 	}
-	dir := t.TempDir()
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	dir, err := askclaim.DefaultDir(filepath.Join(stateHome, "avenor"), "http://"+b.Addr(), "child")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var out, stderr bytes.Buffer
 	if code := runDeclared([]string{"message", "--action=tell", "--target=supervisor", "--message=hello"}, &out, &stderr); code != 0 {
 		t.Fatalf("tell: %d %s", code, &stderr)
@@ -111,7 +117,7 @@ func TestMessageRoundTrips(t *testing.T) {
 	}()
 	out.Reset()
 	stderr.Reset()
-	if code := runDeclared([]string{"message", "--action=reply", "--reply-to=" + id, "--asks-dir=" + dir, "--message=child answer"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "replied"`) {
+	if code := runDeclared([]string{"message", "--action=reply", "--reply-to=" + id, "--message=child answer"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "replied"`) {
 		t.Fatalf("reply: %d %s %s", code, &out, &stderr)
 	}
 	waited := <-waiting
