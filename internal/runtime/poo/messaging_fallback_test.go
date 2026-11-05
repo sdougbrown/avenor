@@ -3,6 +3,7 @@ package poo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -155,6 +156,41 @@ func TestMessagingIgnoredManifestsFallback(t *testing.T) {
 			}
 			assertFallbackEnv(t, dir, 3, false)
 			assertFallbackSessionOff(t, p, resumed)
+		})
+	}
+}
+
+func TestMessagingWithoutBrokerIdentity(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
+			opts, dir := fallbackFixture(t, "")
+			opts.BrokerToken = ""
+			if explicit {
+				on := true
+				opts.Messaging = &on
+			}
+			p := NewWithOptions(opts)
+			t.Cleanup(func() { _ = p.Close() })
+			session, err := p.Start(context.Background(), avruntime.StartOptions{})
+			if explicit {
+				var unavailable *avruntime.MessagingUnavailableError
+				if !errors.As(err, &unavailable) || !strings.Contains(err.Error(), "broker identity") {
+					t.Fatalf("error = %v", err)
+				}
+				if got := fallbackLaunches(t, dir); got != 0 {
+					t.Fatalf("launches = %d", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := fallbackLaunches(t, dir); got != 1 {
+				t.Fatalf("launches = %d", got)
+			}
+			assertFallbackEnv(t, dir, 1, false)
+			assertFallbackSessionOff(t, p, session)
 		})
 	}
 }
