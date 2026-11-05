@@ -197,7 +197,8 @@ func TestMissingStampedSenderUsesUnknown(t *testing.T) {
 	}))
 	defer s.Close()
 	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
-	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: out, RequestTimeout: time.Second})
+	asksDir := filepath.Join(t.TempDir(), "asks")
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), AsksDir: asksDir, Out: out, RequestTimeout: time.Second})
 	select {
 	case <-out.wrote:
 	case <-time.After(3 * time.Second):
@@ -211,8 +212,11 @@ func TestMissingStampedSenderUsesUnknown(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.String()), &line); err != nil {
 		t.Fatal(err)
 	}
-	if line.From != "unknown" || !strings.Contains(line.Text, `ask from "unknown"`) || strings.Contains(line.Text, "supervisor") {
+	if line.From != "unknown" || line.Text != "question\n\nThis message is an ask from \"unknown\", but it cannot be answered here." {
 		t.Fatalf("line: %+v", line)
+	}
+	if _, err := os.Stat(asksDir); !os.IsNotExist(err) {
+		t.Fatalf("unknown sender created a record: %v", err)
 	}
 }
 

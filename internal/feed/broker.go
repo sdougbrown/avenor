@@ -158,8 +158,14 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 				text := message.Message
 				if message.ExpectsReply {
 					quotedSender, _ := json.Marshal(sender)
-					if err := askclaim.Record(b.AsksDir, id, row.FromRunID); err != nil {
-						fmt.Fprintf(b.Log, "feed broker: failed to record ask id %q\n", id)
+					var recordErr error
+					if row.FromRunID != "" {
+						recordErr = askclaim.Record(b.AsksDir, id, row.FromRunID)
+						if recordErr != nil {
+							fmt.Fprintf(b.Log, "feed broker: failed to record ask id %q\n", id)
+						}
+					}
+					if row.FromRunID == "" || recordErr != nil {
 						text += fmt.Sprintf("\n\nThis message is an ask from %s, but it cannot be answered here.", quotedSender)
 					} else {
 						quotedID, _ := json.Marshal(id)
