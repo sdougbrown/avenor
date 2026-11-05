@@ -156,7 +156,8 @@ passing an unknown `reply_to` through, busy-path append, an unpaired
 outstanding asks from one peer (a plain send riding the newest, the `reply`
 action still reaching the older by id), the ask tool's reply
 and timed-out shapes, a cut `/wait_reply` keeping its edge open for a late
-answer, an inbound tell answered by message id with no listing, a tell pinned
+answer, an inbound tell answered by message id with no listing, a tell whose id
+is only on the broker envelope still naming it in the frame, a tell pinned
 to a replaced generation still refused, an open ask surviving a flood of more
 than 128 inbound tells, a refused
 `prompt.submit` falling back to a row while the rest of the batch still lands,

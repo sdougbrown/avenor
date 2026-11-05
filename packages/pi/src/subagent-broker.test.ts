@@ -75,6 +75,24 @@ describe('parseControlMessage', () => {
     expect(formatInboundAskBody(tell!, { heading: 'Message from peer' })).not.toContain('reply')
   })
 
+  it('takes the message id from the broker-stamped row when the payload has none', () => {
+    // A surface that queues its correlation id on the envelope only (the Pi
+    // host tell) must still carry the id a reply correlates against.
+    const tell = parseControlMessage({
+      type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer-1',
+      payload: { from_run_id: 'peer-1', message: 'fyi' },
+    })
+    expect(tell).toEqual({ from_run_id: 'peer-1', message_id: 'av1.m.envelope', message: 'fyi', expects_reply: false })
+
+    // The payload id stays authoritative, as in the broker's own reader; the
+    // broker refuses a send whose two ids disagree.
+    const both = parseControlMessage({
+      type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer-1',
+      payload: { id: 'av1.m.payload', from_run_id: 'peer-1', message: 'fyi' },
+    })
+    expect(both!.message_id).toBe('av1.m.payload')
+  })
+
   it('carries expects_reply so the caller need not re-parse the payload', () => {
     // The ask/tell decision lives here, not in a second payload parse: a tell
     // that carries a message id must not be mistaken for an ask.
@@ -111,6 +129,10 @@ describe('formatInboundAskBody', () => {
     expect(body).toContain('supervisor')
     expect(body).toContain('hello')
     expect(body).toContain('avenor_message({ action: "reply", reply_to: "ask-1"')
+    // The reply instruction is the only place an ask names its id: a tell's
+    // header carries one because it has no edge to answer on, and an ask's
+    // would duplicate the id the reader already has.
+    expect(body).not.toContain('message id')
   })
 
   it('renders no role, because nothing on the wire is stamped with one', () => {
@@ -121,6 +143,25 @@ describe('formatInboundAskBody', () => {
     expect(body).toContain('from `host-1`')
     expect(body).not.toContain('(supervisor)')
     expect(body).not.toContain('(agent)')
+  })
+
+  it('shows the recovered message id in a tell header, and no reply line', () => {
+    // Tells have no reply instruction. Their headers must expose the recovered
+    // ID for the model to reply by ID.
+    const tell = parseControlMessage({
+      type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer-1',
+      payload: { from_run_id: 'peer-1', message: 'fyi' },
+    })
+    const body = formatInboundAskBody(tell!, { heading: 'Message from peer' })
+    expect(body).toContain('message id `av1.m.envelope`')
+    expect(body).not.toContain('avenor_message({ action: "reply"')
+
+    // Neither id: the header keeps its prior shape, with no empty segment.
+    const bare = formatInboundAskBody(
+      { from_run_id: 'peer-1', message_id: '', message: 'fyi', expects_reply: false },
+      { heading: 'Message from peer' },
+    )
+    expect(bare).not.toContain('message id')
   })
 
   it('marks peer text as another session\'s words and drops the reply line for a tell', () => {

@@ -26,7 +26,8 @@
 // session stays off with one reason line, 11b a
 // partial listing refuses every ref, 11c one ask reads one listing, 11d the
 // reply action answers an inbound tell by message id without reading a listing
-// that hides the peer, 11e a tell pinned to a replaced generation is still
+// that hides the peer, 11d2 a tell with only an envelope id still names it in
+// the frame, 11e a tell pinned to a replaced generation is still
 // refused, 11f a flood of inbound tells cannot forget an open ask (the next
 // send still rides its edge), 11g a stale self-minted name is reminted then
 // registered, 11h a failed wait keeps its ask open for a late answer.
@@ -953,6 +954,56 @@ const tellReplyBody = typeof tellReplyRow.payload === 'string' ? JSON.parse(tell
 console.log(JSON.stringify({ check: 'probe received reply-by-id answer', replyTo: tellReplyBody.reply_to, from: tellReplyRow.from_run_id }))
 if (tellReplyBody.reply_to !== tellReplyID || tellReplyRow.from_run_id !== tellReplyRunId) {
   console.log('FAIL: the reply-by-id answer did not carry the tell route', tellReplyRow)
+  process.exit(1)
+}
+
+console.log('=== 11d2. a tell whose id is only on the broker envelope still names it ===')
+// A host tell can carry its ID only on the envelope. The frame must expose
+// that ID so the model can name it in a reply.
+const envelopeOnlyRunId = freshRunId('claude-envelopeid')
+const envelopeOnlyCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: envelopeOnlyRunId,
+}, listingStub({
+  sessions: [],
+  generation: 'gen-envelope',
+  messaging_protocol: 1,
+}))
+const envelopeOnlyID = mintAskID()
+const envelopeOnlySend = await post('/send', {
+  from_run_id: probe.runId,
+  to_run_id: envelopeOnlyRunId,
+  type: 'agent_message',
+  message_id: envelopeOnlyID,
+  payload: {
+    from: probe.runId,
+    from_run_id: probe.runId,
+    to_run_id: envelopeOnlyRunId,
+    message: 'this tell carries its id on the envelope',
+    role: 'agent',
+  },
+  generation: listing.generation,
+}, true)
+console.log(JSON.stringify({ check: 'envelope-only tell admitted', status: envelopeOnlySend.status }))
+if (!envelopeOnlySend.ok) {
+  console.log('FAIL: the probe could not send the envelope-only tell', envelopeOnlySend)
+  process.exit(1)
+}
+const envelopeOnlyRow = await until('the envelope-only tell to reach the session',
+  () => events.find((e) => e.kind === 'prompt.submit' && e.line.includes('this tell carries its id on the envelope')))
+const framedID = /message id `([^`]+)`/.exec(envelopeOnlyRow.line)?.[1]
+console.log(JSON.stringify({ check: 'envelope-only tell frame names the id', framedID }))
+if (framedID !== envelopeOnlyID) {
+  console.log('FAIL: the frame did not name the envelope id', envelopeOnlyRow.line)
+  process.exit(1)
+}
+const envelopeReply = JSON.parse((await envelopeOnlyCopy.hooks['tool.call{"tool":"mcp__avenor__message"}'](envelopeOnlyCopy.d, {
+  tool: 'mcp__avenor__message', action: 'reply', reply_to: framedID, message: 'answered from the envelope id',
+})).result)
+console.log(JSON.stringify({ check: 'envelope-id reply result', envelopeReply }))
+if (envelopeReply.action !== 'reply' || envelopeReply.outcome !== 'replied' ||
+    envelopeReply.message_id !== envelopeOnlyID) {
+  console.log('FAIL: the reply action did not answer the envelope-only tell', envelopeReply)
   process.exit(1)
 }
 

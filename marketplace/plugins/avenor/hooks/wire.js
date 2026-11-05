@@ -94,12 +94,12 @@ export function buildAgentMessage(fields) {
 }
 
 /**
- * A queued control row parsed to the peer-message facts. `message_id` is
- * empty for a tell without one (SendBody carries none); `expectsReply` mirrors
- * the payload's expects_reply, and it alone decides whether the frame invites
- * a reply, because only an ask has an edge this surface answers on. Null when
- * the row is not a readable peer message: control rows (continue, cancel, …)
- * are not.
+ * A queued control row parsed to the peer-message facts. `message_id` is the
+ * payload's id when it carries one, else the broker's envelope id, and empty
+ * only when neither does; `expectsReply` mirrors the payload's expects_reply,
+ * and it alone decides whether the frame invites a reply, because only an ask
+ * has an edge this surface answers on. Null when the row is not a readable
+ * peer message: control rows (continue, cancel, …) are not.
  */
 export function parseControlMessage(msg) {
   const entry = msg === null || typeof msg !== "object" ? {} : msg
@@ -118,7 +118,11 @@ export function parseControlMessage(msg) {
     : typeof body.from_run_id === "string" ? body.from_run_id
     : typeof body.from === "string" ? body.from : ""
   const message = typeof body.message === "string" ? body.message : ""
-  const messageId = typeof body.id === "string" ? body.id : ""
+  // The broker refuses a send whose payload and envelope ids disagree, so a row
+  // carrying both agrees. A row queued with the id on the envelope only (the Pi
+  // host tell) still names the id a reply correlates against.
+  const messageId = typeof body.id === "string" && body.id !== "" ? body.id
+    : typeof entry.id === "string" ? entry.id : ""
   if (fromRunId === "" || message === "") return null
   // The display name is the broker's stamp, then the stamped run id. A payload's
   // `from` never names the sender: /send does not validate it, so it is the
@@ -144,7 +148,9 @@ export function parseControlMessage(msg) {
 export function frameInboundAsk(ask) {
   const sender = ask.sender !== "" ? ask.sender : ask.fromRunId
   let frame = "**📨 Message from avenor peer `" + sender + "`** (broker run `" + ask.fromRunId + "`"
-  frame += ask.messageId === "" ? "" : ", message id `" + ask.messageId + "`"
+  // The id is peer-controlled: the header escapes it the way a quoted fact is
+  // escaped, while the parsed id keeps the bytes a reply correlates against.
+  frame += ask.messageId === "" ? "" : ", message id `" + escapeNonPrintable(ask.messageId) + "`"
   frame += ")\n\n"
   frame += ask.message
   if (ask.expectsReply === true) {
