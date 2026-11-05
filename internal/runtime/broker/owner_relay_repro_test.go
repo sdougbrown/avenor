@@ -52,12 +52,7 @@ func TestOwnerTellToAChildOwnedRun(t *testing.T) {
 		ChildID:    "child-1",
 		Runs:       func() []messaging.RunClaim { return child.ParentRunClaims() },
 		Generation: func() string { return child.Store().Generation() },
-		DisplayName: func(runID string) string {
-			if st := child.GetRun(runID); st != nil {
-				return runID
-			}
-			return runID
-		},
+		DisplayName: func(runID string) string { return runID },
 		RetireRun: func(runID, token string) { child.DeleteRunIfToken(runID, token) },
 	}, child.LocalMessenger())
 	if err != nil {
@@ -84,35 +79,53 @@ func TestOwnerTellToAChildOwnedRun(t *testing.T) {
 	// the resolution could produce, each pinning the store's generation.
 	generation := parent.Store().Generation()
 	now := time.Now()
-	for _, target := range []string{"claude-x", parentlink.ParentRunKey("child-1", "claude-x")} {
-		id, err := messaging.NewMsgID(now, time.Time{})
-		if err != nil {
-			t.Fatalf("mint message id: %v", err)
-		}
-		res, err := rootMessenger.Send(ctx, messaging.SendRequest{
-			From:       messaging.Identity{RunID: "supervisor"},
-			To:         messaging.Identity{RunID: target},
-			MessageID:  id,
-			Generation: generation,
-			Body:       `{"message":"hello from the host"}`,
-			NoReply:    true,
-		})
-		t.Logf("tell to %q: outcome=%q err=%v", target, res.Outcome, err)
-	}
-
-	// The ask shape, for completeness.
-	askID, err := messaging.NewMsgID(now, time.Time{})
-	if err != nil {
-		t.Fatalf("mint ask id: %v", err)
-	}
+	// A plain target id names no run the root routes: the claim key is the
+	// namespaced spelling, so the bare id is refused and nothing is relayed.
 	res, err := rootMessenger.Send(ctx, messaging.SendRequest{
 		From:       messaging.Identity{RunID: "supervisor"},
+		To:         messaging.Identity{RunID: "claude-x"},
+		MessageID:  mustMsgID(t, now),
+		Generation: generation,
+		Body:       `{"message":"hello from the host"}`,
+		NoReply:    true,
+	})
+	if res.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("tell to the bare id = (%+v, %v), want not-sent", res, err)
+	}
+	if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("tell to the bare id err = %v, want ErrTargetUnavailable", err)
+	}
+
+	// The claim-key tell relays into the child's queue.
+	res, err = rootMessenger.Send(ctx, messaging.SendRequest{
+		From:       messaging.Identity{RunID: "supervisor"},
 		To:         messaging.Identity{RunID: parentlink.ParentRunKey("child-1", "claude-x")},
-		MessageID:  askID,
+		MessageID:  mustMsgID(t, now),
+		Generation: generation,
+		Body:       `{"message":"hello from the host"}`,
+		NoReply:    true,
+	})
+	if err != nil || res.Outcome != messaging.OutcomeSent {
+		t.Fatalf("tell to the claim key = (%+v, %v), want sent", res, err)
+	}
+
+	// And the ask shape: the edge admits at the root and the relay delivers.
+	res, err = rootMessenger.Send(ctx, messaging.SendRequest{
+		From:       messaging.Identity{RunID: "supervisor"},
+		To:         messaging.Identity{RunID: parentlink.ParentRunKey("child-1", "claude-x")},
+		MessageID:  mustMsgID(t, now),
 		Generation: generation,
 		Body:       `{"message":"ask from the host"}`,
 	})
-	t.Logf("ask: outcome=%q err=%v", res.Outcome, err)
+	if err != nil || res.Outcome != messaging.OutcomeSent {
+		t.Fatalf("ask = (%+v, %v), want sent", res, err)
+	}
+
+	// Both relayed messages reached the child's queue — the "not lost" half of
+	// the issue this branch pins.
+	if got := countAgentMessages(t, child, "claude-x"); got != 2 {
+		t.Fatalf("child queue = %d messages, want the relayed tell and ask", got)
+	}
 }
 
 // The live system's second failure shape: the host and the target live on the
@@ -199,14 +212,30 @@ func TestOwnerTellToAnIdleLocalRunIsNotForwardedUpward(t *testing.T) {
 	if res.Outcome != messaging.OutcomeNotSent {
 		t.Fatalf("tell outcome = %q, want %q", res.Outcome, messaging.OutcomeNotSent)
 	}
-	// The send stayed here: the local seam served it and the parent never saw it.
+	// And the ask shape: the routing decision is the same for an ask, and the
+	// parked target refuses it locally without admitting an edge.
+	askRes, askErr := childLink.Send(ctx, messaging.SendRequest{
+		From:       messaging.Identity{RunID: "supervisor"},
+		To:         messaging.Identity{RunID: "claude-y"},
+		MessageID:  mustMsgID(t, time.Now()),
+		Generation: child.Store().Generation(),
+		Body:       `{"message":"ask to an idle run"}`,
+	})
+	if !errors.Is(askErr, messaging.ErrTargetUnavailable) || askRes.Outcome != messaging.OutcomeNotSent {
+		t.Fatalf("ask to an idle local run = (%+v, %v), want a local refusal", askRes, askErr)
+	}
+
+	// The tell stayed here: the local seam served it and the parent never saw
+	// it. The local-seam count below is what fails when the send is forwarded —
+	// the parent's own reachability gate would 404 the forward before its seam
+	// ever ran, so a parent-side assertion cannot carry this pin.
 	for _, sent := range childLocal.Sends() {
 		if sent.Request.To.RunID != "claude-y" {
 			t.Fatalf("the local seam was asked for %q, want the idle local target only", sent.Request.To.RunID)
 		}
 	}
-	if len(childLocal.Sends()) != 1 {
-		t.Fatalf("the local seam saw %d sends, want the one idle local send", len(childLocal.Sends()))
+	if len(childLocal.Sends()) != 2 {
+		t.Fatalf("the local seam saw %d sends, want the tell and the ask served locally", len(childLocal.Sends()))
 	}
 	if len(rootLocal.Sends()) != 0 {
 		t.Fatalf("the parent was asked for %d sends, want nothing forwarded", len(rootLocal.Sends()))
@@ -214,7 +243,8 @@ func TestOwnerTellToAnIdleLocalRunIsNotForwardedUpward(t *testing.T) {
 }
 
 // parkUnavailable marks runID's peer unavailable on its own broker, the way a
-// missed lease deadline does, without waiting one out.
+// missed lease deadline does, without waiting one out. It asserts the state it
+// produced, so a later lifecycle change cannot silently hollow the helper out.
 func parkUnavailable(t *testing.T, b *Broker, runID string) {
 	t.Helper()
 	st := b.GetRun(runID)
@@ -224,5 +254,20 @@ func parkUnavailable(t *testing.T, b *Broker, runID string) {
 	st.Mu.Lock()
 	st.peer = true
 	st.peerDeadline = time.Now().Add(-time.Minute)
+	if st.peerUnavailableLocked(time.Now()) == "" {
+		st.Mu.Unlock()
+		t.Fatalf("parking %q did not make the peer unavailable", runID)
+	}
 	st.Mu.Unlock()
+}
+
+// mustMsgID mints one versioned message id with the default acceptance
+// horizon, the way every production caller does.
+func mustMsgID(t *testing.T, now time.Time) string {
+	t.Helper()
+	id, err := messaging.NewMsgID(now, time.Time{})
+	if err != nil {
+		t.Fatalf("mint message id: %v", err)
+	}
+	return id
 }
