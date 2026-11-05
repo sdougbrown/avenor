@@ -13,8 +13,10 @@ func TestIsRetryableFailure(t *testing.T) {
 	if !IsRetryableFailure(1, "") {
 		t.Fatal("generic exit code 1 should be retryable")
 	}
-	if IsRetryableFailure(1, SessionIDConflictStopReason) {
-		t.Fatal("session ID conflict should be fatal")
+	for _, reason := range []string{SessionIDConflictStopReason, MessagingUnavailableStopReason} {
+		if IsRetryableFailure(1, reason) {
+			t.Errorf("stop reason %q should be fatal even with retryable exit code 1", reason)
+		}
 	}
 	if IsRetryableFailure(0, "end_turn") {
 		t.Fatal("successful attempt should not be retryable")
