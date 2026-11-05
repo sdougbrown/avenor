@@ -67,11 +67,12 @@ type TellRequest struct {
 // replaces it, and a client-side transport cannot disagree about what a send, a
 // reply or a peer listing looks like.
 //
-// Tell and Reachable stay here rather than on Transport because a client-side
-// transport has no counterpart for either: a tell is a bare publication into a
-// broker's queue, and reachability is a broker-local ownership test, so a wire
-// client could only answer them with a stub. Everything else, including the
-// store-backed reads and Preflight, comes from Transport.
+// Tell, Reachable and Holds stay here rather than on Transport because a
+// client-side transport has no counterpart for any of them: a tell is a bare
+// publication into a broker's queue, and reachability and record ownership are
+// broker-local tests, so a wire client could only answer them with a stub.
+// Everything else, including the store-backed reads and Preflight, comes from
+// Transport.
 type Seam interface {
 	Transport
 	// Tell publishes a fire-and-forget message. It allocates no reply edge, so

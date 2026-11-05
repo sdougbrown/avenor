@@ -89,7 +89,7 @@ func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest) (messag
 	if m.registry.Owns(req.To.RunID) {
 		return m.sendToChild(ctx, req)
 	}
-	if m.up == nil || m.local.Reachable(req.To.RunID) || m.local.Holds(req.To.RunID) {
+	if m.up == nil || m.local.Holds(req.To.RunID) {
 		return m.local.Send(ctx, req)
 	}
 	return m.up.Send(ctx, req)
@@ -168,7 +168,7 @@ func (m *Messenger) Tell(ctx context.Context, req messaging.TellRequest) error {
 	if m.registry.Owns(req.ToRunID) {
 		return m.down.Tell(ctx, req)
 	}
-	if m.up == nil || m.local.Reachable(req.ToRunID) || m.local.Holds(req.ToRunID) {
+	if m.up == nil || m.local.Holds(req.ToRunID) {
 		return m.local.Tell(ctx, req)
 	}
 	return m.up.Tell(ctx, req)
@@ -180,7 +180,7 @@ func (m *Messenger) Tell(ctx context.Context, req messaging.TellRequest) error {
 // the refusal back. A run the local broker holds a record for is a local target
 // whatever its peer lease says, so it never leaves this broker.
 func (m *Messenger) Reachable(runID string) bool {
-	if m.local.Reachable(runID) || m.local.Holds(runID) || m.registry.Owns(runID) {
+	if m.local.Holds(runID) || m.registry.Owns(runID) {
 		return true
 	}
 	return m.up != nil
