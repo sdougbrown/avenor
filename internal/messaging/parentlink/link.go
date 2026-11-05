@@ -322,7 +322,7 @@ func (l *Link) Send(ctx context.Context, req messaging.SendRequest) (messaging.S
 	if err != nil {
 		return fail(messaging.OutcomeNotSent, err)
 	}
-	payload, err := payloadFor(req.Body)
+	payload, err := payloadForSender(req.Body, req.From.RunID, sender)
 	if err != nil {
 		return fail(messaging.OutcomeNotSent, err)
 	}
@@ -515,7 +515,7 @@ func (l *Link) Reply(ctx context.Context, req messaging.ReplyRequest) (messaging
 	if err != nil {
 		return fail(messaging.OutcomeNotSent, route.edgeGeneration, err)
 	}
-	payload, err := payloadFor(req.Body)
+	payload, err := payloadForSender(req.Body, req.From.RunID, sender)
 	if err != nil {
 		return fail(messaging.OutcomeNotSent, route.edgeGeneration, err)
 	}
@@ -561,7 +561,7 @@ func (l *Link) Tell(ctx context.Context, req messaging.TellRequest) error {
 	if err != nil {
 		return err
 	}
-	payload, err := payloadFor(string(req.Payload))
+	payload, err := payloadForSender(string(req.Payload), req.FromRunID, sender)
 	if err != nil {
 		return err
 	}
@@ -843,4 +843,44 @@ func payloadFor(body string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("%w: the message body is not one JSON value", messaging.ErrInvalidRequest)
 	}
 	return payload, nil
+}
+
+// payloadForSender renders a message body for one parent hop. The parent
+// authenticates this branch's run by the key this branch published it under,
+// while a branch-local surface names the run the way this branch knows it, so a
+// body naming that run is re-bound to the envelope sender: otherwise the parent
+// reads one participant as two and refuses the send.
+//
+// A body naming any other run is passed through unchanged. That run is not this
+// participant under another name, and the parent refuses the disagreement
+// rather than adopting the identity.
+func payloadForSender(body, runID, sender string) (json.RawMessage, error) {
+	payload, err := payloadFor(body)
+	if err != nil {
+		return nil, err
+	}
+	if runID == "" || sender == "" || runID == sender {
+		return payload, nil
+	}
+	fields := map[string]any{}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&fields); err != nil {
+		// Not a JSON object, so there is no routing field to re-bind and the
+		// parent classifies the body itself.
+		return payload, nil
+	}
+	// A JSON null unmarshals into a nil map without error.
+	if fields == nil {
+		return payload, nil
+	}
+	if named, _ := fields["from_run_id"].(string); named != runID {
+		return payload, nil
+	}
+	fields["from_run_id"] = sender
+	rendered, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", messaging.ErrInvalidRequest, err)
+	}
+	return rendered, nil
 }
