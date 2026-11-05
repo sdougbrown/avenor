@@ -404,7 +404,7 @@ func TestMessagingAskRealPoo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "done"})
+	endpoint := newFakeEndpoint(t, scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_cli", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "tell", "target": "supervisor", "message": "child-tell-marker"}}}}}, scriptedTurn{Text: "done"})
 	var replies int
 	idPattern := regexp.MustCompile(`"reply_to": "([^"]+)"`)
 	endpoint.respond = func(body map[string]any) (scriptedTurn, bool) {
@@ -433,6 +433,10 @@ func TestMessagingAskRealPoo(t *testing.T) {
 	provider, session, log, _ := startProvider(t, opts)
 	awaitPrompt(t, startPrompt(provider, session.SessionID, "initial"))
 	log.waitForCount(t, "session.end", 1, 10*time.Second)
+	received, err := tr.Receive(t.Context(), messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "supervisor"}, Generation: pre.Generation, Timeout: 10 * time.Second})
+	if err != nil || len(received.Messages) != 1 || received.Messages[0].FromRunID != "child" || !strings.Contains(string(received.Messages[0].Payload), "child-tell-marker") {
+		t.Fatalf("child tell: %+v %v", received, err)
+	}
 	id, err := messaging.NewMsgID(time.Now(), time.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
