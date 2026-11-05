@@ -29,6 +29,7 @@ func app() *clicontract.App {
 		Commands: []*clicontract.Command{
 			runCmd,
 			feedCommand(),
+			messageCommand(),
 			{
 				Name:  "probe",
 				Short: "run a one-shot backend probe and write the transcript",

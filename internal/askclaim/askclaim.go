@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/sdougbrown/avenor/internal/messaging"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/childmessaging"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 // messageIDPattern restricts record names to a single safe path component.
@@ -83,6 +86,48 @@ func Record(dir, messageID, askerRunID string) error {
 		_ = os.Remove(path)
 	}
 	return err
+}
+
+// Provider adds disk-backed ask claims to the shared messaging provider.
+type Provider struct {
+	*childmessaging.MessageProvider
+	// Dir holds the inbound ask records.
+	Dir string
+}
+
+var _ router.AskClaimer = (*Provider)(nil)
+
+// ClaimAsk atomically claims an ask and reads its stamped asker.
+func (p *Provider) ClaimAsk(id string) (string, bool) {
+	if p.Dir == "" || !validID(id) {
+		return "", false
+	}
+	claimed := filepath.Join(p.Dir, id+".claimed")
+	source := filepath.Join(p.Dir, id+".json")
+	if err := os.Link(source, claimed); err != nil {
+		return "", false
+	}
+	_ = os.Remove(source)
+	raw, err := os.ReadFile(claimed)
+	if err != nil {
+		return "", false
+	}
+	var record struct {
+		AskerRunID string `json:"asker_run_id"`
+	}
+	if json.Unmarshal(raw, &record) != nil || record.AskerRunID == "" {
+		return "", false
+	}
+	return record.AskerRunID, true
+}
+
+// RestoreAsk returns a claimed ask to the queue without trusting the caller.
+func (p *Provider) RestoreAsk(id, _ string) {
+	if p.Dir == "" || !validID(id) {
+		return
+	}
+	claimed := filepath.Join(p.Dir, id+".claimed")
+	_ = os.Rename(claimed, filepath.Join(p.Dir, id+".json"))
 }
 
 // BrokerKey hashes a normalized broker URL and run ID for local identity files.

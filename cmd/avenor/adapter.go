@@ -14,6 +14,9 @@ import (
 // long-running servers return their shutdown status.
 type exitCode int
 
+// failureResult carries a structured refusal with a nonzero exit status.
+type failureResult map[string]any
+
 // avenorAdapter routes the library's dispatch through Avenor's conventions:
 // handlers that print their own output return nil or an exitCode, other
 // results are written as one JSON value, and nothing lands on stdout for
@@ -50,6 +53,9 @@ func (avenorAdapter) Write(w io.Writer, result any) error {
 }
 
 func (avenorAdapter) ExitCode(inv clicontract.Invocation, result any, handlerErr error) int {
+	if _, ok := result.(failureResult); ok {
+		return 1
+	}
 	if ec, ok := result.(exitCode); ok {
 		return int(ec)
 	}

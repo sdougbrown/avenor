@@ -339,6 +339,36 @@ Then spawn runtimes via `avenor control spawn`. See [stable.md](stable.md),
 [messaging.md](messaging.md#running-a-hub) and
 [control-protocol.md](control-protocol.md) for full details.
 
+## avenor message
+
+Send broker messages as the current child run, not as the supervisor:
+
+```sh
+avenor message --action tell --target supervisor --message "Status update"
+avenor message --action ask --target supervisor --message "Question?" --timeout-ms 30000
+avenor message --action reply --reply-to MESSAGE_ID --message "Answer"
+avenor message --action withdraw --message-id MESSAGE_ID
+```
+
+`--target` accepts a broker run ID or label. An ask reply needs the claim
+record written by the feed; `--asks-dir` selects its directory when the feed
+uses a non-default location. A second reply to the same ask, or a reply to an
+ask with no record, reports `edge-absent`. The broker resolves a reply to a tell
+without a claim record. Use `withdraw` with `--message-id` to close an open ask.
+
+Each command uses `AVENOR_BROKER_URL`, `AVENOR_BROKER_TOKEN` and
+`AVENOR_RUN_ID`, or the respective `--broker-url`, `--token` and `--run-id`
+flags. Prefer the environment for the token: command arguments can be visible
+to other processes. `--timeout-ms` takes 0 to 600000, and the router refuses
+any other value with `invalid_request`. Zero or omission uses the shared default
+of 600 seconds.
+
+Results are JSON with `action`, `outcome`, `text` and, where applicable,
+`message_id` and `reply`. Router outcomes exit 0, including `timed-out`: the
+ask remains open for a later reply. Refusals and transport errors exit 1;
+missing action or credentials exit 2. Router refusals include `code` and `text` on stdout. See [messaging.md](messaging.md)
+for the transport and addressing rules.
+
 ## avenor control
 
 Send commands to a running supervisor or standalone run with a control socket. The supervisor must be listening on `--control-socket`.

@@ -13,6 +13,7 @@ state named in each file is the acceptance bar for that feature.
 | Broker messages | [broker-messaging.md](broker-messaging.md) | spawned child ↔ supervisor ask/reply over the broker; the child-ask leg does not pass with the installed extension — [messaging.md](messaging.md#the-bound-generation) step 3 is the recipe that does |
 | Broker feed | [feed-broker.md](feed-broker.md) | `avenor feed broker` → poo feed NDJSON |
 | Messaging tools | [messaging.md](messaging.md) | `avenor_message` (six actions) + `avenor_peers` (list/rename/last) from a host session and its children |
+| Child message CLI | [message-cli.md](message-cli.md) | `avenor message --action tell|ask|reply|withdraw` as a broker child |
 | Pi completion notices | [pi-completions.md](pi-completions.md) | real `pi --mode rpc` host + `avenor` supervisor + `pi` children → footer `avenor` status and `avenor-completion` messages |
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
 | Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |
