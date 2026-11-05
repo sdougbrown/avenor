@@ -81,10 +81,10 @@ func (m *Messenger) Close() error {
 }
 
 // Send admits an ask locally, in a child's queue through a relay, or in the
-// parent broker's store when no branch here can answer it. A run the local
-// broker holds a record for is answered or refused here even when its peer
-// lease has expired: the target lives on this broker, so the send never
-// travels upward.
+// parent broker's store. The parent's store answers only when no branch here
+// can. A run the local broker holds a record for is answered or refused here,
+// even when its peer lease has expired. The target lives on this broker, so
+// the send never travels upward.
 func (m *Messenger) Send(ctx context.Context, req messaging.SendRequest) (messaging.SendResult, error) {
 	if m.registry.Owns(req.To.RunID) {
 		return m.sendToChild(ctx, req)
@@ -175,10 +175,10 @@ func (m *Messenger) Tell(ctx context.Context, req messaging.TellRequest) error {
 }
 
 // Reachable reports whether runID can be reached from here. A branch with a
-// parent reports every target it cannot answer itself as reachable: the parent
-// is the authority on what its descendants own, and the ask that follows carries
-// the refusal back. A run the local broker holds a record for is a local target
-// whatever its peer lease says, so it never leaves this broker.
+// parent reports every target it cannot answer itself as reachable. The parent
+// is the authority on what its descendants own, and the ask that follows
+// carries the refusal back. A run the local broker holds a record for is a
+// local target whatever its peer lease says. It never leaves this broker.
 func (m *Messenger) Reachable(runID string) bool {
 	if m.local.Holds(runID) || m.registry.Owns(runID) {
 		return true

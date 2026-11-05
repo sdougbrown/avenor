@@ -2973,7 +2973,7 @@ func (m localMessenger) Reachable(runID string) bool {
 
 // Holds reports whether this broker holds a record for runID, whatever the
 // run's peer lease says. A held target stays this broker's to answer or
-// refuse: a send that names it is never forwarded to a parent.
+// refuse. A send that names it is never forwarded to a parent.
 func (m localMessenger) Holds(runID string) bool {
 	return m.broker.GetRun(runID) != nil
 }

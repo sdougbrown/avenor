@@ -14,9 +14,9 @@ type RecordedSend struct {
 }
 
 // Recorder is a messaging.Seam that records the operations it serves and
-// forwards them to the seam it wraps, so a test can observe that a broker
-// path reached the messaging seam. ReachableFunc and HoldsFunc, when set,
-// answer Reachable and Holds instead of the wrapped seam.
+// forwards them to the seam it wraps. A test reads the recording to observe
+// that a broker path reached the messaging seam. ReachableFunc and HoldsFunc,
+// when set, answer Reachable and Holds instead of the wrapped seam.
 type Recorder struct {
 	Local         messaging.Seam
 	ReachableFunc func(runID string) bool
