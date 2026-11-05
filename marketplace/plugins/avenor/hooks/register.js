@@ -16,17 +16,13 @@
 //   service. A queued peer ask is submitted as `$.prompt.submit` when the
 //   session is idle (the host queues it and starts the turn) or appended as
 //   a row when a main-loop turn is running.
-// - Outbound asks: the avenor MCP surface's own `message` tool already
-//   carries an `ask` action; a `tool.call` hook on `mcp__avenor__message`
-//   serves that action through this session's broker credentials (an
-//   expects_reply send blocking on `/wait_reply` in the hook, the same shape
-//   the avenor surfaces' ask action takes, leaving the ask open for a later
-//   answer when that wait fails, as the pi and core ask paths do). It also
-//   answers an inbound peer message this session received — an ask or a tell,
-//   addressed by its message id; those correlations live in this module's
-//   table, not in an edge store the MCP server could claim, and a tell's
-//   answer names no target because the broker resolves the recorded return
-//   route. Every other action passes through to the MCP server. The hook, not
+// - Outbound asks: a `tool.call` hook on `mcp__avenor__message` serves asks
+//   through this session's broker credentials and blocks on `/wait_reply`.
+//   Failed waits leave the ask open for a late answer, as Pi and core do.
+//   The hook also answers inbound asks or tells by message id using its local
+//   correlations. A tell's answer omits the target; the broker resolves its
+//   recorded return route. Other actions pass through to the MCP server.
+//   The hook, not
 //   `$.tool.register`:
 //   the plugin also ships an MCP server named "avenor", and a registered tool
 //   under `mcp__avenor__*` would be refused as a replacement for it. A failed
@@ -136,10 +132,8 @@ async function deliverOutbound(d, ref, text) {
   // edge pending, so the model's retry still rides it.
   const askId = peekReply(target.runId)
   const hasReply = askId !== null
-  // A tell pins the generation the resolution read: its id is versioned, and a
-  // versioned send names the generation it was admitted under, so an unpinned
-  // tell is refused outright. A reply names no generation — its edge's
-  // generation is the broker's to resolve, not this send's to assert.
+  // Versioned tells require the generation read during target resolution.
+  // Replies omit it because the broker resolves the original edge's generation.
   const body = hasReply
     ? buildAgentMessage({
         fromRunId: broker.runID,

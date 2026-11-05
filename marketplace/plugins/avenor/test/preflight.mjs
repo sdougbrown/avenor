@@ -611,10 +611,8 @@ if (timedOutAsk.reply !== undefined) {
   console.log('FAIL: a timed-out ask carried a reply', timedOutAsk)
   process.exit(1)
 }
-// #533 keeps a timed-out ask open so a late answer can still land, and an open
-// edge from the probe refuses the probe's own ask back as a mutual ask. The
-// probe is this ask's target, so it answers now: the late answer lands as an
-// ordinary inbound message and the edge is consumed before the next ask.
+// Timeouts leave asks open for late answers. Answer this one before the next
+// ask, which would otherwise be refused as a mutual ask.
 const lateTimeoutAnswer = await probeSendTo('claude-parent', {
   id: timedOutAsk.message_id + '.reply',
   message: 'the late answer to the timed-out ask',
@@ -910,10 +908,8 @@ if (listingsRead !== 1) {
 await drainProbe()
 
 console.log('=== 11f. the reply action answers an inbound tell by message id, with no listing ===')
-// A tell opens no ask edge, so its answer can only name the id it answers: the
-// broker resolves the recorded return route. The listing here hides the peer,
-// which is what a fresh directory read of a hidden peer looks like; the reply
-// must land anyway, without the hook reading it.
+// The broker resolves a tell's recorded return route by message id.
+// Even an empty directory must not prevent the reply or require a listing read.
 let tellReplyListings = 0
 const tellReplyRunId = freshRunId('claude-tellreply')
 const tellReplyCopy = await layerCopy({ base: '2.1.311' }, {
@@ -961,9 +957,7 @@ if (tellReplyBody.reply_to !== tellReplyID || tellReplyRow.from_run_id !== tellR
 }
 
 console.log('=== 11g. a replaced generation still refuses the tell ===')
-// Pinning the generation must not weaken the fence: a listing whose generation
-// the broker has since replaced makes the tell name a generation the store does
-// not hold, and the send is refused rather than retargeted to the replacement.
+// A stale generation must be refused rather than retargeted to a replacement.
 const replacedListing = await probeSessions()
 const staleRunId = freshRunId('claude-stale')
 const staleCopy = await layerCopy({ base: '2.1.311' }, {
@@ -985,10 +979,8 @@ if (!staleSend || staleSend.isDelivered !== false ||
 }
 
 console.log('=== 11h. an open ask survives a flood of inbound tells ===')
-// The reply correlation is what lets a plain send ride an ask's edge. A flood
-// of unrelated tells must not forget that ask when the bounded table overflows:
-// a tell opened no edge, so it is the one to forget. Otherwise the send becomes
-// a new tell and the asker's wait never resolves.
+// Tell chatter must not evict an unanswered ask's correlation and turn its
+// answer into an unrelated tell.
 const floodRunId = freshRunId('claude-flood')
 const floodCopy = await layerCopy({ base: '2.1.311' }, {
   AVENOR_BROKER_URL: BROKER,
@@ -1028,10 +1020,8 @@ if (!afterFloodSend || afterFloodSend.isDelivered !== true) {
   console.log('FAIL: the send after the flood was not delivered', afterFloodSend)
   process.exit(1)
 }
-// A reply that completes a live edge comes back through the asker's wait, not
-// as a queued row, so the wait body is where the proper reply is observed. On
-// the regression the send became a new tell: it still claims delivered, and the
-// wait expires with no reply.
+// Queue admission alone also succeeds for an unrelated tell. Only the asker's
+// wait completing with the answer proves the reply used the open edge.
 const floodWaitShape = await until('the flood ask to unblock', () => floodWait)
 console.log(JSON.stringify({ check: 'the flood ask unblocked with the answer', status: floodWaitShape.status }))
 const floodWaitBody = floodWaitShape.body || ''
@@ -1089,11 +1079,8 @@ if (!remintRow || refusedRow) {
 }
 
 console.log('=== 11e. a failed wait keeps its ask open, so a late answer still lands ===')
-// A wait that fails for a reason the broker did not classify — a cut connection
-// rather than its own 504 — reports possibly-pending and leaves the ask's edge
-// live (#533: a timed-out or abandoned ask stays open for a later answer; the
-// hook does not retract it, matching the pi and core ask paths). A reply
-// arriving afterwards therefore completes the edge instead of being refused.
+// A cut wait reports possibly-pending without retracting the edge.
+// A later answer must still complete it, matching Pi and core behavior.
 let waitCutOnce = false
 const lateAskRunId = freshRunId('claude-lateask')
 const lateAskCopy = await layerCopy({ base: '2.1.311' }, {
