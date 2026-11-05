@@ -359,8 +359,9 @@ without a claim record. Use `withdraw` with `--message-id` to close an open ask.
 Each command uses `AVENOR_BROKER_URL`, `AVENOR_BROKER_TOKEN` and
 `AVENOR_RUN_ID`, or the respective `--broker-url`, `--token` and `--run-id`
 flags. Prefer the environment for the token: command arguments can be visible
-to other processes. A non-negative `--timeout-ms` is capped at 600000; zero
-or omission uses the shared default of 600 seconds.
+to other processes. `--timeout-ms` takes 0 to 600000, and the router refuses
+any other value with `invalid_request`. Zero or omission uses the shared default
+of 600 seconds.
 
 Results are JSON with `action`, `outcome`, `text` and, where applicable,
 `message_id` and `reply`. Router outcomes exit 0, including `timed-out`: the

@@ -39,14 +39,6 @@ func messageCommand() *clicontract.Command {
 	}
 }
 
-// clampMessageTimeout caps the wait at the messaging limit.
-func clampMessageTimeout(timeout int) int {
-	if max := int(messaging.MaxWait.Milliseconds()); timeout > max {
-		return max
-	}
-	return timeout
-}
-
 // handleMessage routes one command through the shared child messaging router.
 func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer) (any, error) {
 	if inv.Flags["action"] == "" {
@@ -65,7 +57,7 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 		}
 	}
 	if inv.Supplied["timeout-ms"] {
-		input["timeout_ms"] = clampMessageTimeout(inv.Ints["timeout-ms"])
+		input["timeout_ms"] = inv.Ints["timeout-ms"]
 	}
 	raw, err := json.Marshal(input)
 	if err != nil {

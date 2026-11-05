@@ -168,18 +168,13 @@ func TestMessageRoundTrips(t *testing.T) {
 	if code := runDeclared([]string{"message", "--action=tell", "--target=missing", "--message=x"}, &out, &stderr); code != 1 || !strings.Contains(out.String(), `"code": "unknown_target"`) {
 		t.Fatalf("unknown target: %d %s %s", code, &out, &stderr)
 	}
-}
-
-// TestClampMessageTimeout checks the upper wait boundary.
-func TestClampMessageTimeout(t *testing.T) {
-	for _, tc := range []struct{ in, want int }{{0, 0}, {600000, 600000}, {600001, 600000}, {int(^uint(0) >> 1), 600000}} {
-		if got := clampMessageTimeout(tc.in); got != tc.want {
-			t.Errorf("clamp(%d) = %d, want %d", tc.in, got, tc.want)
-		}
+	out.Reset()
+	stderr.Reset()
+	if code := runDeclared([]string{"message", "--action=ask", "--target=missing", "--message=x", "--timeout-ms=600001"}, &out, &stderr); code != 1 || !strings.Contains(out.String(), `"code": "invalid_request"`) {
+		t.Fatalf("over-limit timeout: %d %s %s", code, &out, &stderr)
 	}
 }
 
-// TestMessageUsage checks that missing credentials and action are usage errors.
 func TestMessageUsage(t *testing.T) {
 	for _, missing := range []string{"", "AVENOR_BROKER_URL", "AVENOR_BROKER_TOKEN", "AVENOR_RUN_ID"} {
 		t.Run(missing, func(t *testing.T) {
