@@ -151,7 +151,9 @@ module path) and the committed live-broker hook-contract drive
 against a quiet `avenor stable` (self-registration/naming, idle and
 subagent-turn idle delivery, tell sends ride no edge, ask correlation,
 reply-edge unblock, the `reply` action answering the ask the hook polled and
-passing an unknown `reply_to` through, busy-path append, an unpaired
+passing an unknown `reply_to` through, the message tool's `tell` served as the
+session's own peer with its listing generation and no ask-edge consumption,
+tell refusals for unknown, ambiguous and partial listings, busy-path append, an unpaired
 `turn.complete` clamping at zero with the next live turn still appending, two
 outstanding asks from one peer (a plain send riding the newest, the `reply`
 action still reaching the older by id), the ask tool's reply

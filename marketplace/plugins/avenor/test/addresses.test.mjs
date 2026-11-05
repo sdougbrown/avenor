@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { parseAvenorAddress, parseMessageTarget, matchSession } from '../hooks/addresses.js'
+import { parseAvenorAddress, parseMessageTarget, parseTellTarget, matchSession } from '../hooks/addresses.js'
 
 test('parseAvenorAddress: only the avenor: prefix is ours', () => {
   assert.equal(parseAvenorAddress('avenor:rt_1'), 'rt_1')
@@ -103,4 +103,18 @@ test('message targets accept plain refs, self, and avenor addresses without whit
     assert.equal(parseMessageTarget(input), null)
   }
   assert.equal(parseAvenorAddress('scout'), null)
+})
+
+test('tell targets accept spaced labels and empty strings; ask keeps its rule', () => {
+  // A broker label may contain spaces, so a tell must resolve it on this
+  // session's peer client instead of falling through to the MCP server's own
+  // supervisor. An empty ref is admitted and refused as unknown, never sent.
+  assert.equal(parseTellTarget('front end'), 'front end')
+  assert.equal(parseTellTarget('avenor:front end'), 'front end')
+  assert.equal(parseTellTarget(''), '')
+  assert.equal(parseTellTarget('avenor:'), '')
+  assert.equal(parseTellTarget(undefined), null)
+  assert.equal(parseTellTarget(7), null)
+  // The ask target rule is unchanged by the tell seam.
+  assert.equal(parseMessageTarget('front end'), null)
 })

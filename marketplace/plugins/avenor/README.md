@@ -37,12 +37,23 @@ avenor runs become addressable like teammates:
   unconfigured. A send that answers a peer's pending inbound ask
   (`expects_reply`) rides that ask's reply edge, unblocking the asker's own
   wait.
+- **Tell:** a `message` `tell` is served by the same hook, so it is delivered
+  by this session's registered peer rather than the MCP server's own
+  supervisor. It pins the generation from the same `/sessions` read that
+  resolved the target, and it is a plain send: it never consumes an ask edge
+  the way `SendMessage` can. The result is the router's tell shape (`action`,
+  `outcome`, `message_id`, `label`, `text`); an unknown, ambiguous or
+  partial-listing target is refused with the router's error object before
+  anything is sent.
 - **Ask:** the avenor MCP surface's `message` tool already carries an `ask`
   action; with the peer layer on, a `tool.call` hook serves that action
   through this session's own broker credentials (an `expects_reply` send
   blocking on `/wait_reply`, the same shape the avenor surfaces' ask action
   takes, bounded by `timeout_ms`, 0–600000 ms). Resolution and the ask's
-  generation pin come from one `/sessions` read, not two. A failed ask
+  generation pin come from one `/sessions` read, not two. A target that does
+  not resolve to exactly one run is refused with the router's error object
+  (`code`, `text`), the same refusal a tell returns, before anything is sent.
+  A failed ask
   renders the shared ask sentences from `schemas/message.outcome.json`
   (`not-sent`, `timed-out`, `possibly-pending`, …) — the same text and the
   same withdraw guidance a pi or Go peer's ask returns — and classifies the

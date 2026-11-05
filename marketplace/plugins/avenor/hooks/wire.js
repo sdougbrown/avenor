@@ -8,9 +8,9 @@
 // parsed row's `expectsReply` field mirrors pi's `InboundAsk.expects_reply`,
 // and it alone decides whether a frame invites a reply.
 // A hooks module imports its own files and "claude-code", nothing else, so the
-// ask and reply templates and their escaping are copied from the schemas rather
-// than imported; change schemas/message.outcome.json and messaging-text.ts
-// first. Nothing here touches the engine call object.
+// ask, reply and tell templates and their escaping are copied from the schemas
+// rather than imported; change schemas/message.outcome.json and
+// messaging-text.ts first. Nothing here touches the engine call object.
 
 export const MAX_WAIT_MS = 600000
 
@@ -272,6 +272,40 @@ export function renderReplyText(messageId, outcome) {
   const known = Object.prototype.hasOwnProperty.call(REPLY_TEMPLATES, outcome)
   const template = known ? REPLY_TEMPLATES[outcome] : REPLY_TEMPLATES["not-sent"]
   return substitute(template, { message_id: quote(messageId) })
+}
+
+/**
+ * The tell column of schemas/message.outcome.json for the outcomes this hook
+ * produces: a new tell never becomes `withdrawn`, so that row is omitted. A
+ * send refusal the broker did not classify is rendered as possibly-pending,
+ * the contract's conservative reading, so a message is never reported as
+ * provably unsent without the broker saying so.
+ */
+const TELL_TEMPLATES = {
+  sent: "message {message_id} delivered to {target}",
+  "not-sent": "message {message_id} not sent to {target}; nothing is pending",
+  "auth-rejected": "message {message_id} to {target} was rejected (not authorized); nothing is pending",
+  "possibly-pending": 'message {message_id} to {target} may still be pending; if no reply arrives, withdraw it with avenor_message action="withdraw" message_id={message_id}',
+}
+
+/** The shared tell sentence for an outcome the hook produced itself. */
+export function renderTellText(messageId, target, outcome) {
+  const known = Object.prototype.hasOwnProperty.call(TELL_TEMPLATES, outcome)
+  const template = known ? TELL_TEMPLATES[outcome] : TELL_TEMPLATES["possibly-pending"]
+  return substitute(template, { message_id: quote(messageId), target: quote(target) })
+}
+
+/**
+ * A refused /send body carries the outcome the broker documented for it. Only
+ * a tell-renderable outcome is kept; anything else (an unenveloped transport
+ * failure, an edge outcome a tell cannot have) reads as possibly-pending, so
+ * the model never re-sends a message whose delivery was not proven absent.
+ */
+export function tellFailureOutcome(body) {
+  const entry = body === null || typeof body !== "object" ? {} : body
+  const declared = typeof entry.outcome === "string" ? entry.outcome : ""
+  const tellOutcomes = ["auth-rejected", "not-sent", "possibly-pending"]
+  return tellOutcomes.indexOf(declared) === -1 ? "possibly-pending" : declared
 }
 
 /**

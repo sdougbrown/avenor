@@ -16,12 +16,15 @@
 //   service. A queued peer ask is submitted as `$.prompt.submit` when the
 //   session is idle (the host queues it and starts the turn) or appended as
 //   a row when a main-loop turn is running.
-// - Outbound asks: a `tool.call` hook on `mcp__avenor__message` serves asks
-//   through this session's broker credentials and blocks on `/wait_reply`.
-//   Failed waits leave the ask open for a late answer, as Pi and core do.
-//   The hook also answers inbound asks or tells by message id using its local
-//   correlations. A tell's answer omits the target; the broker resolves its
-//   recorded return route. Other actions pass through to the MCP server.
+// - Outbound message actions: a `tool.call` hook on `mcp__avenor__message`
+//   serves tells and asks through this session's broker credentials, so they
+//   come from the conversation that loaded the plugin instead of the MCP
+//   server's own supervisor. A tell pins the listing's generation and never
+//   rides an ask edge; an ask blocks on `/wait_reply` and a failed wait leaves
+//   it open for a late answer, as Pi and core do. The hook also answers inbound
+//   asks or tells by message id using its local correlations. A tell's answer
+//   omits the target; the broker resolves its recorded return route. Other
+//   actions pass through to the MCP server.
 //   The hook, not
 //   `$.tool.register`:
 //   the plugin also ships an MCP server named "avenor", and a registered tool
@@ -47,7 +50,7 @@
 // top-level function declarations; pass-through is returning undefined,
 // never calling `next`.
 
-import { parseAvenorAddress, parseMessageTarget, matchSession } from "./addresses.js"
+import { parseAvenorAddress, parseMessageTarget, parseTellTarget, matchSession } from "./addresses.js"
 import {
   mintMessageID,
   randomHex,
@@ -58,7 +61,9 @@ import {
   normalizeAskTimeoutMs,
   renderAskFailure,
   renderReplyText,
+  renderTellText,
   askFailureOutcome,
+  tellFailureOutcome,
   quote,
 } from "./wire.js"
 
@@ -87,8 +92,8 @@ export async function register(on) {
 
   await on("turn.complete", async (d, e) => turnTicked(d, e, -1))
 
-  await on("tool.call", { tool: "mcp__avenor__message" }, async (d, e) => serveAskHook(d, e))
-  await on("tool.call", { tool: "mcp__plugin_avenor_avenor__message" }, async (d, e) => serveAskHook(d, e))
+  await on("tool.call", { tool: "mcp__avenor__message" }, async (d, e) => serveMessageHook(d, e))
+  await on("tool.call", { tool: "mcp__plugin_avenor_avenor__message" }, async (d, e) => serveMessageHook(d, e))
 }
 
 // --- session.send: outbound brokerage ---
@@ -114,16 +119,9 @@ async function deliverIfAvenor(d, e) {
 
 async function deliverOutbound(d, ref, text) {
   const target = await resolveTarget(d, ref)
-  if (target.match === "none") {
-    return undelivered('no avenor run matches "' + ref + '"')
-  }
-  const ambiguous = target.match === "ambiguous"
-  if (ambiguous) {
-    return undelivered('"' + ref + '" names several avenor runs (' + target.candidates.join(", ") + ")")
-  }
-  const incomplete = target.match === "incomplete"
-  if (incomplete) {
-    return undelivered(listingIncomplete(target.incomplete, ref))
+  const refusal = targetRefusal(target, ref)
+  if (refusal !== null) {
+    return undelivered(refusal.text)
   }
   // A peer this session owes an ask to takes the send as the ask's reply, so
   // the asker's own wait unblocks; every other send is a plain tell. The
@@ -424,12 +422,22 @@ async function turnTicked(d, e, delta) {
  * main-loop axis only counts.
  */
 
-// --- the avenor message tool's ask action, served by the peer layer ---
+// --- the avenor message tool's peer actions, served by the peer layer ---
 
-async function serveAskHook(d, e) {
+/**
+ * Serve the message tool's peer actions through this session's broker identity.
+ * A tell, an ask and a reply all belong to the conversation that loaded the
+ * plugin, but the stock MCP server owns its own supervisor and resolves against
+ * that supervisor's universe. The hook is the session identity boundary, so it
+ * serves those three and passes every other action through untouched. A tell
+ * is a plain send: it never rides an ask edge the way SendMessage does, because
+ * the model named a new message rather than answering one.
+ */
+async function serveMessageHook(d, e) {
+  const isTell = e.action === "tell"
   const isAsk = e.action === "ask"
   const isReply = e.action === "reply"
-  if (!isAsk && !isReply) {
+  if (!isTell && !isAsk && !isReply) {
     // Every other action belongs to the MCP surface's own supervisor.
     return undefined
   }
@@ -440,6 +448,18 @@ async function serveAskHook(d, e) {
   }
   if (isReply) {
     return serveReply(d, e)
+  }
+  if (isTell) {
+    // A tell's target and text are canonically admitted as strings: labels may
+    // contain spaces, and the message may be empty. Both stay on this session's
+    // peer client; only an absent or non-string field is left to the MCP
+    // surface's admission.
+    const tellRef = parseTellTarget(e.target)
+    const tellMessage = typeof e.message === "string" ? e.message : null
+    if (tellRef === null || tellMessage === null) {
+      return undefined
+    }
+    return serveTell(d, tellRef, tellMessage)
   }
   const ref = parseMessageTarget(e.target)
   if (ref === null) {
@@ -452,23 +472,62 @@ async function serveAskHook(d, e) {
   return serveAsk(d, ref, message, e.timeout_ms)
 }
 
+/**
+ * One explicit tell through this session's broker credentials. The generation
+ * comes from the same fresh listing that resolved the target, because a
+ * versioned tell is refused when it names none. No correlation table is read:
+ * an explicit tell is a new message, never an answer to a queued ask.
+ */
+async function serveTell(d, ref, message) {
+  let target
+  try {
+    target = await resolveTarget(d, ref, true)
+  } catch (err) {
+    await logLayer(d, "tell target resolution failed: " + errorText(err))
+    return toolError(listingRefusal("tell", ref))
+  }
+  const refusal = targetRefusal(target, ref)
+  if (refusal !== null) {
+    return toolError(refusal)
+  }
+  const messageId = mintMessageID(await d.clock.now())
+  let response
+  try {
+    response = await brokerPost(d, "/send", buildAgentMessage({
+      fromRunId: broker.runID,
+      toRunId: target.runId,
+      messageId: messageId,
+      message: message,
+      role: "agent",
+      generation: target.generation,
+    }))
+  } catch (err) {
+    const outcome = tellFailureOutcome(httpBody(err))
+    await logLayer(d, "tell " + messageId + " was not sent: " + errorText(err))
+    return tellOutcome(outcome, messageId, target.label)
+  }
+  if (response.queued !== true) {
+    const outcome = tellFailureOutcome(response)
+    await logLayer(d, "tell " + messageId + " was not queued: the broker answered " + JSON.stringify(response))
+    return tellOutcome(outcome, messageId, target.label)
+  }
+  const acked = typeof response.message_id === "string" && response.message_id !== ""
+    ? response.message_id
+    : messageId
+  return tellOutcome("sent", acked, target.label)
+}
+
 async function serveAsk(d, ref, message, rawTimeout) {
   let target
   try {
     target = await resolveTarget(d, ref, true)
   } catch (err) {
     await logLayer(d, "ask target resolution failed: " + errorText(err))
-    return askOutcome("not-sent", null,
-      "ask to " + quote(ref) + " was not sent: the avenor broker did not answer the run listing")
+    return toolError(listingRefusal("ask", ref))
   }
-  if (target.match === "none") {
-    return askOutcome("not-sent", null, 'no avenor run matches "' + ref + '"')
-  }
-  if (target.match === "ambiguous") {
-    return askOutcome("not-sent", null, '"' + ref + '" names several avenor runs (' + target.candidates.join(", ") + ")")
-  }
-  if (target.match === "incomplete") {
-    return askOutcome("not-sent", null, listingIncomplete(target.incomplete, ref))
+  const refusal = targetRefusal(target, ref)
+  if (refusal !== null) {
+    return toolError(refusal)
   }
   return runAsk(d, target, ref, message, rawTimeout)
 }
@@ -584,6 +643,29 @@ function replyOutcome(outcome, messageId) {
   }
 }
 
+/** The tell action's result, in the same router shape. */
+function tellOutcome(outcome, messageId, label) {
+  return {
+    result: JSON.stringify({
+      action: "tell",
+      outcome: outcome,
+      message_id: messageId,
+      label: label,
+      text: renderTellText(messageId, label, outcome),
+    }),
+  }
+}
+
+/**
+ * A router tool error (schemas/message_route.result.json `error`): the fixed
+ * code and its rendered sentence, never raw wire text. The tool.call return
+ * channel carries it as content, so the model reads the same error object the
+ * MCP surface's failed call publishes.
+ */
+function toolError(refusal) {
+  return { result: JSON.stringify({ code: refusal.code, text: refusal.text }) }
+}
+
 // --- broker client ---
 
 /**
@@ -611,6 +693,7 @@ async function resolveTarget(d, ref, allowSelf = false) {
     match: hit.match,
     runId: hit.runId,
     candidates: hit.candidates,
+    label: hit.match === "unique" ? hit.label : "",
     generation: typeof answer.generation === "string" ? answer.generation : "",
     incomplete: "",
   }
@@ -620,6 +703,41 @@ async function resolveTarget(d, ref, allowSelf = false) {
 function listingIncomplete(detail, ref) {
   return "the peer listing is incomplete: " + detail + "; " + quote(ref) +
     " was not resolved against it, because a row it missed can shadow the run or label that ref names"
+}
+
+/**
+ * The one gate every outbound peer action shares: only a target that resolved to
+ * exactly one run may send. The refusal carries the router's error code and its
+ * rendered sentence, so SendMessage, tell and ask report the same failure the
+ * same way; a match state this layer does not know is refused rather than sent
+ * with no target.
+ */
+function targetRefusal(target, ref) {
+  if (target.match === "unique") {
+    return null
+  }
+  if (target.match === "none") {
+    return { code: "unknown_target", text: "no run matches " + quote(ref) }
+  }
+  if (target.match === "ambiguous") {
+    return {
+      code: "ambiguous_name",
+      text: quote(ref) + " matches " + target.candidates.length + " runs: " +
+        target.candidates.map(quote).join(", "),
+    }
+  }
+  if (target.match === "incomplete") {
+    return { code: "refused", text: listingIncomplete(target.incomplete, ref) }
+  }
+  return { code: "refused", text: quote(ref) + " was not sent: the target did not resolve to exactly one run" }
+}
+
+/** A resolution that never reached the listing, in the same error shape. */
+function listingRefusal(action, ref) {
+  return {
+    code: "refused",
+    text: action + " to " + quote(ref) + " was not sent: the avenor broker did not answer the run listing",
+  }
 }
 
 async function brokerGet(d, path) {

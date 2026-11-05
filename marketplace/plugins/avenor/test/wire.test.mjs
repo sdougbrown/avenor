@@ -18,7 +18,9 @@ import {
   quote,
   renderAskFailure,
   renderReplyText,
+  renderTellText,
   askFailureOutcome,
+  tellFailureOutcome,
 } from '../hooks/wire.js'
 
 test('mintMessageID: versioned shape with an encoded twenty-minute horizon', () => {
@@ -269,6 +271,37 @@ test('renderReplyText: the shared reply sentences, byte-identical to messaging-t
   )
   // A fact a peer controls is quoted, never interpolated raw.
   assert.equal(renderReplyText('a"b', 'replied'), 'reply to "a\\"b" delivered')
+})
+
+test('renderTellText: the shared tell sentences, byte-identical to messaging-text', () => {
+  assert.equal(
+    renderTellText('av1.m.1', 'mesh-a', 'sent'),
+    'message "av1.m.1" delivered to "mesh-a"',
+  )
+  assert.equal(
+    renderTellText('av1.m.1', 'mesh-a', 'not-sent'),
+    'message "av1.m.1" not sent to "mesh-a"; nothing is pending',
+  )
+  assert.equal(
+    renderTellText('av1.m.1', 'mesh-a', 'auth-rejected'),
+    'message "av1.m.1" to "mesh-a" was rejected (not authorized); nothing is pending',
+  )
+  assert.equal(
+    renderTellText('av1.m.1', 'mesh-a', 'possibly-pending'),
+    'message "av1.m.1" to "mesh-a" may still be pending; if no reply arrives, withdraw it with avenor_message action="withdraw" message_id="av1.m.1"',
+  )
+  // An outcome the tell column cannot render never claims the message was lost.
+  assert.equal(renderTellText('av1.m.1', 'mesh-a', 'invented'), renderTellText('av1.m.1', 'mesh-a', 'possibly-pending'))
+})
+
+test('tellFailureOutcome: only a broker-declared tell outcome is kept', () => {
+  assert.equal(tellFailureOutcome({ outcome: 'not-sent' }), 'not-sent')
+  assert.equal(tellFailureOutcome({ outcome: 'auth-rejected' }), 'auth-rejected')
+  assert.equal(tellFailureOutcome({ outcome: 'possibly-pending' }), 'possibly-pending')
+  // An outcome a tell cannot have, or no outcome at all, is uncertain delivery.
+  assert.equal(tellFailureOutcome({ outcome: 'edge-absent' }), 'possibly-pending')
+  assert.equal(tellFailureOutcome({ error: 'boom' }), 'possibly-pending')
+  assert.equal(tellFailureOutcome(null), 'possibly-pending')
 })
 
 test('askFailureOutcome: classified from the wire facts, never from prose', () => {

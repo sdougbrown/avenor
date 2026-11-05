@@ -21,10 +21,16 @@
 // 5b a subagent turn is not the main loop, 5c an unpaired turn.complete clamps
 // at zero without making the next live turn read idle, 5d two outstanding asks
 // from one peer (a plain send rides the newest, the reply action reaches the
-// older by id), 6b a timed-out ask is classified from the wire facts, 9b a
+// older by id), 6b a timed-out ask is classified from the wire facts, 6c the
+// message tool's tell action is served as this session with its listing's
+// generation and no ask edge, 6d a spaced label and an empty tell stay on that
+// tell path while a non-string message passes through, 9b a
 // failed /poll-control pauses the loop without killing it, 11a a broker-less
 // session stays off with one reason line, 11b a
-// partial listing refuses every ref, 11c one ask reads one listing, 11d the
+// partial listing refuses every ref, 11b2 unknown and ambiguous tell and ask
+// refusals send nothing, a non-throw tell refusal classifies from its body, and
+// a label-less row falls back to its run id, 11b3 a failed listing read refuses
+// ask and tell without a send, 11c one ask reads one listing, 11d the
 // reply action answers an inbound tell by message id without reading a listing
 // that hides the peer, 11d2 a tell with only an envelope id still names it in
 // the frame, 11e a tell pinned to a replaced generation is still
@@ -43,6 +49,9 @@ const PLUGIN = fileURLToPath(new URL('..', import.meta.url))
 const BROKER = process.argv[2]
 
 const events = []
+// Every /send body the layer under test posts, so a step can assert the exact
+// envelope (identity, generation, and whether it carried an ask edge).
+const sentBodies = []
 const hooks = {}
 function record(kind, line) {
   const row = { t: Date.now(), kind, line }
@@ -141,6 +150,9 @@ d.http = {
       failNextPoll = false
       throw new Error('the poll connection was pulled')
     }
+    if (url.endsWith('/send') && typeof init.body === 'string') {
+      sentBodies.push(JSON.parse(init.body))
+    }
     const res = await fetch(url, init)
     const text = await res.text()
     return { status: res.status, ok: res.ok, headers: {}, text }
@@ -198,6 +210,11 @@ async function probeWait(messageId, generation, timeoutMs = 30000) {
 async function probeSessions() {
   const res = await fetch(BROKER + '/sessions', { headers: { 'X-Avenor-Run-Id': probe.runId, 'X-Avenor-Run-Token': probe.token } })
   return JSON.parse(await res.text())
+}
+async function probeName(name) {
+  const res = await post('/session_name', { name }, true)
+  if (!res.ok) throw new Error('naming probe failed: ' + res.status + ' ' + res.text)
+  record('probe.named', name)
 }
 async function probePoll(agentOnly = true) {
   const res = await post('/poll-control', { agent_only: agentOnly }, true)
@@ -627,10 +644,149 @@ if (!lateTimeoutAnswer.ok) {
 await until('the late answer to arrive as an inbound message',
   () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('the late answer to the timed-out ask')))
 
+console.log('=== 6c. the message tool tell action is served as this session, with no edge ===')
+// The stock MCP server runs against its own supervisor, so a tell it serves
+// does not come from this Claude session. The hook must serve the tell through
+// this session's registered broker identity instead, pinning the generation its
+// own listing advertised — and an explicit tell must never consume the ask
+// edge a plain SendMessage would ride.
+await drainProbe()
+const tellListing = await probeSessions()
+const tellEdgeAsk = mintAskID()
+await probeSendTo('claude-parent', {
+  id: tellEdgeAsk, message: 'the ask an explicit tell must not answer',
+  expectsReply: true, generation: tellListing.generation,
+})
+let tellEdgeWait = null
+probeWait(tellEdgeAsk, tellListing.generation, 30000).then((r) => {
+  tellEdgeWait = r
+  return r
+}).catch((err) => waitRejected('the ask an explicit tell must not answer', err))
+await until('the ask that must survive an explicit tell',
+  () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('the ask an explicit tell must not answer')))
+const tellMarks = sentBodies.length
+const tellTool = await callHook('tool.call{"tool":"mcp__plugin_avenor_avenor__message"}').hook(d, {
+  tool: 'mcp__plugin_avenor_avenor__message',
+  action: 'tell',
+  target: 'probe-peer',
+  message: 'a tell through the message tool',
+})
+if (tellTool === undefined || typeof tellTool.result !== 'string') {
+  console.log('FAIL: the tell action passed through to the MCP server instead of the peer layer')
+  process.exit(1)
+}
+const tellResult = JSON.parse(tellTool.result)
+const tellSends = sentBodies.slice(tellMarks)
+const tellBody = tellSends[0] === undefined ? {} : tellSends[0]
+console.log(JSON.stringify({ check: 'message tool tell', tellResult, sends: tellSends.length,
+  from: tellBody.from_run_id, generation: tellBody.generation, message_id: tellBody.message_id }))
+if (tellResult.action !== 'tell' || tellResult.outcome !== 'sent' || tellResult.label !== 'probe-peer' ||
+    !/^av1\.[0-9a-z]+\.[0-9a-f]{32}$/.test(tellResult.message_id) ||
+    tellResult.text !== 'message "' + tellResult.message_id + '" delivered to "probe-peer"' ||
+    tellSends.length !== 1 || tellBody.from_run_id !== 'claude-parent' ||
+    tellBody.payload.from_run_id !== 'claude-parent' || tellBody.payload.role !== 'agent' ||
+    tellBody.generation !== tellListing.generation || tellBody.message_id !== tellResult.message_id ||
+    tellBody.payload.expects_reply !== undefined || tellBody.payload.reply_to !== undefined) {
+  console.log('FAIL: the message tool tell is not this session\'s pinned plain send', { tellResult, tellBody })
+  process.exit(1)
+}
+const tellRow = await until('the probe to receive the message tool tell', async () => {
+  const rows = await probePoll()
+  return rows.find((m) => m && m.type === 'agent_message' &&
+    JSON.stringify(m).includes('a tell through the message tool')) ?? null
+})
+const tellPayload = typeof tellRow.payload === 'string' ? JSON.parse(tellRow.payload) : tellRow.payload
+console.log(JSON.stringify({ check: 'probe received the tell', from: tellRow.from_run_id, payload: tellPayload }))
+if (tellRow.from_run_id !== 'claude-parent' || tellPayload.id !== tellResult.message_id ||
+    tellPayload.expects_reply !== undefined || tellPayload.reply_to !== undefined) {
+  console.log('FAIL: the tell route or payload is not the plain peer tell', tellRow)
+  process.exit(1)
+}
+// The ask edge is still open: a plain SendMessage now must still ride it.
+const tellEdgeAnswer = await callHook('session.send').hook(d, {
+  to: `avenor:${probe.runId}`, text: 'the ask survives the explicit tell', origin: { kind: 'model' },
+})
+const tellEdgeShape = await until('the ask to unblock after the explicit tell', () => tellEdgeWait)
+console.log(JSON.stringify({ check: 'the ask still rode its edge', delivered: tellEdgeAnswer, ok: tellEdgeShape.ok }))
+if (!tellEdgeAnswer || tellEdgeAnswer.isDelivered !== true || !tellEdgeShape.ok ||
+    !(tellEdgeShape.body || '').includes('the ask survives the explicit tell')) {
+  console.log('FAIL: the explicit tell consumed the ask edge', tellEdgeShape)
+  process.exit(1)
+}
+
+console.log('=== 6d. spaced labels and empty text stay on this session\'s tell path ===')
+// A broker label may contain spaces, and the shared router admits an empty
+// message string. Both must remain on this session's peer client instead of
+// falling through to the MCP server's unrelated supervisor.
+await probeName('front end')
+const spacedMarks = sentBodies.length
+const spacedTool = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'tell', target: 'front end', message: 'a tell to a spaced label',
+})
+if (spacedTool === undefined || typeof spacedTool.result !== 'string') {
+  console.log('FAIL: a spaced label tell fell through to the MCP server')
+  process.exit(1)
+}
+const spacedTell = JSON.parse(spacedTool.result)
+const spacedSends = sentBodies.slice(spacedMarks)
+console.log(JSON.stringify({ check: 'spaced label tell', spacedTell, sends: spacedSends.length,
+  from: spacedSends[0] === undefined ? null : spacedSends[0].from_run_id }))
+if (spacedTell.action !== 'tell' || spacedTell.outcome !== 'sent' || spacedTell.label !== 'front end' ||
+    spacedSends.length !== 1 || spacedSends[0].from_run_id !== 'claude-parent' ||
+    spacedSends[0].to_run_id !== probe.runId || spacedSends[0].payload.message !== 'a tell to a spaced label') {
+  console.log('FAIL: a spaced label tell did not stay on this session\'s peer client', spacedTell)
+  process.exit(1)
+}
+const spacedRow = await until('the probe to receive the spaced-label tell', async () => {
+  const rows = await probePoll()
+  return rows.find((m) => m && m.type === 'agent_message' &&
+    JSON.stringify(m).includes('a tell to a spaced label')) ?? null
+})
+if (spacedRow.from_run_id !== 'claude-parent') {
+  console.log('FAIL: the spaced-label tell arrived from another identity', spacedRow)
+  process.exit(1)
+}
+const emptyMarks = sentBodies.length
+const emptyTool = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'tell', target: 'front end', message: '',
+})
+if (emptyTool === undefined || typeof emptyTool.result !== 'string') {
+  console.log('FAIL: an empty tell fell through to the MCP server')
+  process.exit(1)
+}
+const emptyTell = JSON.parse(emptyTool.result)
+const emptySends = sentBodies.slice(emptyMarks)
+console.log(JSON.stringify({ check: 'empty message tell', emptyTell, sends: emptySends.length,
+  from: emptySends[0] === undefined ? null : emptySends[0].from_run_id }))
+if (emptyTell.action !== 'tell' || emptyTell.outcome !== 'sent' || emptyTell.label !== 'front end' ||
+    emptySends.length !== 1 || emptySends[0].from_run_id !== 'claude-parent' ||
+    emptySends[0].to_run_id !== probe.runId || emptySends[0].payload.message !== '') {
+  console.log('FAIL: an empty tell did not stay on this session\'s peer client', emptyTell)
+  process.exit(1)
+}
+// Only an absent or non-string message is left to the MCP surface's admission:
+// the hook must pass it through untouched and send nothing of its own.
+const malformedMarks = sentBodies.length
+const missingMessageTell = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'tell', target: 'front end', message: undefined,
+})
+const numericMessageTell = await callHook('tool.call{"tool":"mcp__avenor__message"}').hook(d, {
+  tool: 'mcp__avenor__message', action: 'tell', target: 'front end', message: 7,
+})
+console.log(JSON.stringify({ check: 'non-string tell messages pass through', missingMessageTell, numericMessageTell,
+  sends: sentBodies.length - malformedMarks }))
+if (missingMessageTell !== undefined || numericMessageTell !== undefined ||
+    sentBodies.length !== malformedMarks) {
+  console.log('FAIL: a non-string tell message did not pass through to the MCP surface')
+  process.exit(1)
+}
+await probeName('probe-peer')
+await drainProbe()
+
 console.log('=== 7. unknown avenor ref (before any gate) ===')
 const miss = await callHook('session.send').hook(d, { to: 'avenor:nope', text: 'z', origin: { kind: 'model' } })
 console.log(JSON.stringify({ check: 'unknown ref', miss }))
-if (!miss || miss.isDelivered !== false || !miss.reason.includes('no avenor run matches')) {
+if (!miss || miss.isDelivered !== false || !miss.reason.includes('no run matches')) {
   console.log('FAIL: unknown ref behavior')
   process.exit(1)
 }
@@ -782,6 +938,11 @@ function askHookCall(copy, fields) {
     tool: 'mcp__avenor__message', action: 'ask', ...fields,
   })
 }
+function tellHookCall(copy, fields) {
+  return copy.hooks['tool.call{"tool":"mcp__avenor__message"}'](copy.d, {
+    tool: 'mcp__avenor__message', action: 'tell', ...fields,
+  })
+}
 
 const offShapes = [
   { what: 'no base, a suffixed version', answer: { version: '2.1.311-prod' }, logged: '2.1.311-prod' },
@@ -851,7 +1012,7 @@ if (!onLine) {
   process.exit(1)
 }
 const onSend = await onCopy.hooks['session.send'](onCopy.d, { to: 'avenor:nobody-here', text: 'x', origin: { kind: 'model' } })
-if (!onSend || onSend.isDelivered !== false || !onSend.reason.includes('no avenor run matches')) {
+if (!onSend || onSend.isDelivered !== false || !onSend.reason.includes('no run matches')) {
   console.log('FAIL: the armed copy did not resolve through the broker', onSend)
   process.exit(1)
 }
@@ -859,27 +1020,182 @@ if (!onSend || onSend.isDelivered !== false || !onSend.reason.includes('no aveno
 console.log('=== 11b. a partial peer listing refuses every ref instead of matching a subset ===')
 // The row IS in the listing the broker returned, so a resolver that matched the
 // subset would deliver to it; a listing flagged peers_error must refuse instead.
-const partial = await layerCopy({ base: '2.1.311' }, {
-  AVENOR_BROKER_URL: BROKER,
-  AVENOR_RUN_ID: freshRunId('claude-partial'),
-}, listingStub({
+const partialListing = listingStub({
   sessions: [{ run_id: 'visible-run', label: 'visible' }],
   generation: 'gen-partial',
   peers_error: 'the broker could not read every peer',
-}, () => {}))
+}, () => {})
+let partialSends = 0
+const partial = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: freshRunId('claude-partial'),
+}, async (url, init = {}) => {
+  if (String(url).endsWith('/send')) partialSends += 1
+  return partialListing(url, init)
+})
 const partialSend = await partial.hooks['session.send'](partial.d, {
   to: 'avenor:visible', text: 'x', origin: { kind: 'model' },
 })
 const partialAsk = JSON.parse((await askHookCall(partial, { target: 'avenor:visible', message: 'hi' })).result)
-console.log(JSON.stringify({ check: 'partial listing refusals', partialSend, partialAsk }))
+const partialTell = JSON.parse((await tellHookCall(partial, { target: 'avenor:visible', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'partial listing refusals', partialSend, partialAsk, partialTell, sends: partialSends }))
 if (!partialSend || partialSend.isDelivered !== false ||
     !partialSend.reason.includes('the peer listing is incomplete')) {
   console.log('FAIL: a send resolved against a partial listing', partialSend)
   process.exit(1)
 }
-if (partialAsk.outcome !== 'not-sent' || partialAsk.message_id !== undefined ||
+if (partialAsk.code !== 'refused' || partialAsk.outcome !== undefined ||
     !partialAsk.text.includes('the peer listing is incomplete')) {
   console.log('FAIL: an ask resolved against a partial listing', partialAsk)
+  process.exit(1)
+}
+if (partialTell.code !== 'refused' || !partialTell.text.includes('the peer listing is incomplete') ||
+    partialSends !== 0) {
+  console.log('FAIL: a tell resolved against a partial listing', partialTell)
+  process.exit(1)
+}
+
+console.log('=== 11b2. unknown and ambiguous tell refusals never send or guess ===')
+// The router's own error vocabulary: an unknown target is unknown_target, and a
+// label matching two runs is ambiguous_name with both candidates. Neither may
+// fall through to a send, and a tell must never replay an uncertain one.
+let refusalSends = 0
+const refusalListing = listingStub({
+  sessions: [
+    { run_id: 'peer-a', label: 'twin' },
+    { run_id: 'peer-b', label: 'twin' },
+    { run_id: 'peer-c', label: 'unique-peer' },
+    { run_id: 'peer-x' },
+  ],
+  generation: 'gen-refuse',
+}, () => {})
+const refusalCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: freshRunId('claude-tellrefuse'),
+}, async (url, init = {}) => {
+  if (String(url).endsWith('/send')) {
+    refusalSends += 1
+    return {
+      status: 403,
+      ok: false,
+      headers: {},
+      text: JSON.stringify({ error: 'not this caller', code: 'sender-mismatch', outcome: 'auth-rejected' }),
+    }
+  }
+  return refusalListing(url, init)
+})
+const unknownTell = JSON.parse((await tellHookCall(refusalCopy, { target: 'ghost', message: 'hi' })).result)
+const ambiguousTell = JSON.parse((await tellHookCall(refusalCopy, { target: 'twin', message: 'hi' })).result)
+const unknownAsk = JSON.parse((await askHookCall(refusalCopy, { target: 'ghost', message: 'hi' })).result)
+const ambiguousAsk = JSON.parse((await askHookCall(refusalCopy, { target: 'twin', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'tell and ask refusals', unknownTell, ambiguousTell, unknownAsk, ambiguousAsk,
+  sends: refusalSends }))
+if (unknownTell.code !== 'unknown_target' || unknownTell.text !== 'no run matches "ghost"') {
+  console.log('FAIL: an unknown tell target is not the router error', unknownTell)
+  process.exit(1)
+}
+if (ambiguousTell.code !== 'ambiguous_name' ||
+    ambiguousTell.text !== '"twin" matches 2 runs: "peer-a", "peer-b"') {
+  console.log('FAIL: an ambiguous tell target is not the router error', ambiguousTell)
+  process.exit(1)
+}
+if (unknownAsk.code !== 'unknown_target' || unknownAsk.text !== 'no run matches "ghost"') {
+  console.log('FAIL: an unknown ask target is not the router error', unknownAsk)
+  process.exit(1)
+}
+if (ambiguousAsk.code !== 'ambiguous_name' ||
+    ambiguousAsk.text !== '"twin" matches 2 runs: "peer-a", "peer-b"') {
+  console.log('FAIL: an ambiguous ask target is not the router error', ambiguousAsk)
+  process.exit(1)
+}
+if (refusalSends !== 0) {
+  console.log('FAIL: a refused tell or ask reached the broker', refusalSends)
+  process.exit(1)
+}
+// A send the broker refuses is classified from its own envelope, and the hook
+// makes exactly one attempt: an uncertain tell is never re-sent or retried as
+// an ask.
+const refusedTell = JSON.parse((await tellHookCall(refusalCopy, { target: 'unique-peer', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'refused tell outcome', refusedTell, sends: refusalSends }))
+if (refusedTell.action !== 'tell' || refusedTell.outcome !== 'auth-rejected' ||
+    refusedTell.label !== 'unique-peer' || refusalSends !== 1 ||
+    refusedTell.text !== 'message "' + refusedTell.message_id +
+      '" to "unique-peer" was rejected (not authorized); nothing is pending') {
+  console.log('FAIL: a refused tell was not classified from the broker envelope', refusedTell)
+  process.exit(1)
+}
+// A resolved row without a label is still labeled by its run id, never by an
+// empty string.
+const labelFallbackMarks = refusalSends
+const missingLabelTell = JSON.parse((await tellHookCall(refusalCopy, { target: 'avenor:peer-x', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'a label-less row is labeled by its run id', missingLabelTell,
+  sends: refusalSends - labelFallbackMarks }))
+if (missingLabelTell.action !== 'tell' || missingLabelTell.outcome !== 'auth-rejected' ||
+    missingLabelTell.label !== 'peer-x' || refusalSends - labelFallbackMarks !== 1 ||
+    missingLabelTell.text !== 'message "' + missingLabelTell.message_id +
+      '" to "peer-x" was rejected (not authorized); nothing is pending') {
+  console.log('FAIL: a label-less tell target was not labeled by its run id', missingLabelTell)
+  process.exit(1)
+}
+// A broker that answers 200 with queued:false has not queued the tell: the
+// outcome comes from the body, and the uncertain message is never re-sent.
+let unqueuedSends = 0
+const unqueuedCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: freshRunId('claude-tellunq'),
+}, async (url, init = {}) => {
+  if (String(url).endsWith('/send')) {
+    unqueuedSends += 1
+    return {
+      status: 200,
+      ok: true,
+      headers: {},
+      text: JSON.stringify({ queued: false, outcome: 'auth-rejected' }),
+    }
+  }
+  return refusalListing(url, init)
+})
+const unqueuedTell = JSON.parse((await tellHookCall(unqueuedCopy, { target: 'unique-peer', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'a non-throw refusal is classified from the body', unqueuedTell,
+  sends: unqueuedSends }))
+if (unqueuedTell.action !== 'tell' || unqueuedTell.outcome !== 'auth-rejected' ||
+    unqueuedTell.label !== 'unique-peer' || unqueuedSends !== 1 ||
+    unqueuedTell.text !== 'message "' + unqueuedTell.message_id +
+      '" to "unique-peer" was rejected (not authorized); nothing is pending') {
+  console.log('FAIL: a non-throw tell refusal was not classified from the broker body', unqueuedTell)
+  process.exit(1)
+}
+
+console.log('=== 11b3. a failed listing read refuses ask and tell without a send ===')
+// The listing never reached the resolver, so neither action has a target. Both
+// must report the router's refused error exactly once, without retrying the
+// read or falling back to a send.
+let listingFailSends = 0
+let listingFailReads = 0
+const listingFailCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: freshRunId('claude-listfail'),
+}, async (url, init = {}) => {
+  if (String(url).endsWith('/sessions')) {
+    listingFailReads += 1
+    throw new Error('the run listing was cut')
+  }
+  if (String(url).endsWith('/send')) listingFailSends += 1
+  const res = await fetch(url, init)
+  const text = await res.text()
+  return { status: res.status, ok: res.ok, headers: {}, text }
+})
+const unresolvedAsk = JSON.parse((await askHookCall(listingFailCopy, { target: 'probe-peer', message: 'hi' })).result)
+const unresolvedTell = JSON.parse((await tellHookCall(listingFailCopy, { target: 'probe-peer', message: 'hi' })).result)
+console.log(JSON.stringify({ check: 'a failed listing read refuses both actions', unresolvedAsk, unresolvedTell,
+  reads: listingFailReads, sends: listingFailSends }))
+if (unresolvedAsk.code !== 'refused' || unresolvedAsk.outcome !== undefined ||
+    !unresolvedAsk.text.endsWith('did not answer the run listing') ||
+    unresolvedTell.code !== 'refused' || unresolvedTell.outcome !== undefined ||
+    !unresolvedTell.text.endsWith('did not answer the run listing') ||
+    listingFailReads !== 2 || listingFailSends !== 0) {
+  console.log('FAIL: a failed listing read did not refuse both actions cleanly',
+    { unresolvedAsk, unresolvedTell, reads: listingFailReads, sends: listingFailSends })
   process.exit(1)
 }
 
