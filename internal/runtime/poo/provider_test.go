@@ -620,9 +620,13 @@ func TestMessagingTakeCheck(t *testing.T) {
 }
 
 func TestMessagingMissingRunIsNotFallback(t *testing.T) {
-	b := broker.New("")
+	b := broker.New(broker.MakeToken())
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
 	opts := helperStartOptions()
-	opts.Broker, opts.RuntimeID, opts.MessagingOn = b, "missing", true
+	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "missing", "token", true
 	p := NewWithOptions(opts)
 	defer p.Close()
 	_, err := p.Start(context.Background(), avruntime.StartOptions{})
