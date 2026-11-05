@@ -292,6 +292,9 @@ function resultLines(details: unknown, args: ResultArgs, expanded: boolean): str
     `Result: ${label} — ${state}`,
     `Run: ${runId}`,
     ...(result.timed_out === true ? ['Warning: wait timed out; the run is still active.'] : []),
+    ...(result.backgrounded === true
+      ? ['The wait was backgrounded; the run keeps going and its completion is delivered automatically.']
+      : []),
     ...(pending ? [`Permission: ${selected(pending, 'description')}`] : []),
     guidance(state, pending, runId),
     ...(result.output_truncated === true

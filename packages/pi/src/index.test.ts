@@ -56,6 +56,7 @@ async function createMultiSupervisorHarness(options: {
   inspectTool?: any
   brokerReceiveTool?: any
   dial?: any
+  backgroundAfterMs?: number
   subAgentEnv?: { brokerUrl: string; runId: string; token: string }
   /** Supervisor mock; provides isCurrentInstance for singleton-scope tests. */
   supervisor?: { isCurrentInstance?: (supervisorId: string) => boolean }
@@ -89,6 +90,7 @@ async function createMultiSupervisorHarness(options: {
     extOptions: {
       pollIntervalMs: options.pollIntervalMs ?? 5,
       ...(options.idleSendTimeoutMs !== undefined && { idleSendTimeoutMs: options.idleSendTimeoutMs }),
+      ...(options.backgroundAfterMs !== undefined && { backgroundAfterMs: options.backgroundAfterMs }),
       ...(options.subAgentEnv !== undefined && { subAgentEnv: options.subAgentEnv }),
     },
     ui: { confirm },
@@ -1631,6 +1633,164 @@ describe('Avenor Pi extension', () => {
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
     expect(completions).toHaveLength(1)
     expect(completions[0]).toContain('interrupted answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  /** A blocking wait that never settles on its own and rejects when the
+   * wait's abort reaches it, the way a real result fetch does. */
+  function hangUntilAborted(): any {
+    return mock(async (args: { signal?: AbortSignal } = {}) =>
+      new Promise<never>((_resolve, reject) => {
+        const signal = args.signal
+        if (signal?.aborted) return reject(signal.reason ?? new Error('aborted'))
+        signal?.addEventListener('abort', () => reject(signal.reason ?? new Error('aborted')), { once: true })
+      }),
+    )
+  }
+
+  /** Assert the backgrounded run's completion notice reaches the session. */
+  async function expectCompletionDelivered(h: { sendUserMessage: any }, marker: string) {
+    let resolveCompletion!: () => void
+    const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
+    h.sendUserMessage.mockImplementation(() => resolveCompletion())
+    await completionSent
+    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+    expect(completions).toHaveLength(1)
+    expect(completions[0]).toContain(marker)
+  }
+
+  it('backgrounds an unbounded avenor_result at the wait bound and delivers the completion later', async () => {
+    const SOCK = '/tmp/background.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'backgrounded answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const result = await settleWithin(resultPromise, 'avenor_result never backgrounded at the wait bound')
+    expect(result.details).toMatchObject({ backgrounded: true, run_id: 'r1', ready: false })
+
+    done = true
+    await expectCompletionDelivered(h, 'backgrounded answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('respects an explicit timeout instead of backgrounding at the wait bound', async () => {
+    const SOCK = '/tmp/timeout-bound.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK, timeout: '5m' }, undefined, undefined, h.ctx)
+    let settled = false
+    resultPromise.then(() => { settled = true }, () => { settled = true })
+    await new Promise(resolve => setTimeout(resolve, scaleMs(120)))
+    expect(settled).toBe(false)
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('backgrounds a blocking wait on command and keeps delivery flowing', async () => {
+    const SOCK = '/tmp/command-background.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'commanded answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+    })
+
+    // No waits in flight: the command reports it and changes nothing.
+    await h.registeredCommands['avenor-background'].handler('', h.ctx)
+    expect(h.notify.mock.calls.some(([c]) => String(c).includes('No blocking avenor waits'))).toBe(true)
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    await new Promise(resolve => setTimeout(resolve, scaleMs(20)))
+
+    await h.registeredCommands['avenor-background'].handler('', h.ctx)
+    const result = await settleWithin(resultPromise, 'the command never backgrounded the wait')
+    expect(result.details).toMatchObject({ backgrounded: true, run_id: 'r1' })
+    expect(h.notify.mock.calls.some(([c]) => String(c).includes('1 blocking wait'))).toBe(true)
+
+    done = true
+    await expectCompletionDelivered(h, 'commanded answer')
+
+    await h.eventHandlers.session_shutdown()
+  })
+
+  it('backgrounds a blocking spawn wait on command and keeps delivery flowing', async () => {
+    const SOCK = '/tmp/spawn-background.sock'
+    let done = false
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      if (args.supervisorId === SOCK) {
+        return done
+          ? { run_id: 'r1', label: 'worker', status: 'done', runtime_id: 'rt1', final_output: 'spawn answer' }
+          : { run_id: 'r1', label: 'worker', status: 'running', runtime_id: 'rt1' }
+      }
+      return { run_id: args.runId, label: args.runId, status: 'done' }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      resultTool: hangUntilAborted(),
+      // An observer that never completes keeps the blocking spawn wait inside
+      // waitForRun, so the command's interrupt is what ends it.
+      observeRun: mock(async () => ({
+        subscribe: (_cb: (snapshot: unknown) => void) => () => {},
+        snapshot: () => ({ last_event: null, transcript: [], pending_permission: false, ended: false }),
+        close: async () => {},
+      })),
+    })
+
+    const spawnPromise = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
+    await new Promise(resolve => setTimeout(resolve, scaleMs(20)))
+
+    await h.registeredCommands['avenor-background'].handler('', h.ctx)
+    const spawnResult = await settleWithin(spawnPromise, 'the command never backgrounded the spawn wait')
+    expect(String(spawnResult.content[0].text)).toContain('still running in the background')
+    expect(spawnResult.details).toMatchObject({ backgrounded: true, run_id: 'r1' })
+
+    done = true
+    await expectCompletionDelivered(h, 'spawn answer')
 
     await h.eventHandlers.session_shutdown()
   })
