@@ -127,8 +127,7 @@ func (p *Provider) RestoreAsk(id, _ string) {
 		return
 	}
 	claimed := filepath.Join(p.Dir, id+".claimed")
-	_ = os.Link(claimed, filepath.Join(p.Dir, id+".json"))
-	_ = os.Remove(claimed)
+	_ = os.Rename(claimed, filepath.Join(p.Dir, id+".json"))
 }
 
 // BrokerKey hashes a normalized broker URL and run ID for local identity files.
