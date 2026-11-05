@@ -250,6 +250,13 @@ gate. An auto `run`, `loop`, or `team` node must not declare
 `completion.kind: explicit`: the supervisor completes it from the declared
 contract, and no worker handoff exists.
 
+### Messaging
+
+An assignment may set `messaging` to enable or disable poo messaging for a
+`run` node. Omitted defaults off for workflow nodes. Loop and team nodes refuse
+`messaging: true` with `messaging is not supported for loop and team phases`;
+explicit `false` is accepted. Poo messaging is not available at launch yet.
+
 ### Permission policy
 
 An `assignment` declares how a dispatched node's permission requests are

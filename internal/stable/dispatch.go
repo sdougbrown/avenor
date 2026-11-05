@@ -528,6 +528,7 @@ func resolveAssignmentSelection(assignment *workflow.Assignment) (*workflow.Exec
 		Agent:       assignment.Agent,
 		Model:       assignment.Model,
 		AutoApprove: assignment.AutoApprove,
+		Messaging:   assignment.Messaging,
 	}
 	thinking := assignment.Thinking
 	if assignment.PermissionPolicy != nil {
@@ -635,7 +636,7 @@ func rosterFileForIdentity(assignment *workflow.Assignment) string {
 func assignmentEmpty(assignment *workflow.Assignment) bool {
 	return assignment.Role == "" && assignment.RosterFile == "" && assignment.RosterEntry == "" &&
 		assignment.Backend == "" && assignment.Agent == "" && assignment.Model == "" && assignment.Thinking == "" &&
-		!assignment.AutoApprove && assignment.PermissionPolicy == nil
+		!assignment.AutoApprove && assignment.PermissionPolicy == nil && assignment.Messaging == nil
 }
 
 // rosterFileDigest returns the "sha256:<hex>" digest of a roster file's

@@ -478,6 +478,9 @@
           "auto_approve": {
             "type": "boolean"
           },
+          "messaging": {
+            "type": "boolean"
+          },
           "permission_policy": {
             "type": "object",
             "properties": {

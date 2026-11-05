@@ -6555,6 +6555,9 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.PermissionDecider = ec.Selection.PermissionDecider
 		params.PermissionModelDecider = ec.Selection.PermissionModelDecider
 	}
+	if ec.Selection != nil {
+		params.Messaging = ec.Selection.Messaging
+	}
 	if ec.Action.Run != nil {
 		params.Prompt = ec.Action.Run.Prompt
 		params.PromptFile = ec.Action.Run.PromptFile
@@ -6600,6 +6603,9 @@ func (s *Supervisor) loopExecutor() workflow.Executor {
 type loopExecutor struct{ sup *Supervisor }
 
 func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
+	if ec.Selection != nil && ec.Selection.Messaging != nil && *ec.Selection.Messaging {
+		return fmt.Errorf("messaging is not supported for loop and team phases")
+	}
 	params := SpawnParams{
 		WorkflowID:   string(ec.WorkflowID),
 		NodeID:       string(ec.NodeID),
@@ -6663,6 +6669,9 @@ func (s *Supervisor) teamExecutor() workflow.Executor {
 type teamExecutor struct{ sup *Supervisor }
 
 func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext) error {
+	if ec.Selection != nil && ec.Selection.Messaging != nil && *ec.Selection.Messaging {
+		return fmt.Errorf("messaging is not supported for loop and team phases")
+	}
 	params := SpawnParams{
 		WorkflowID:   string(ec.WorkflowID),
 		NodeID:       string(ec.NodeID),

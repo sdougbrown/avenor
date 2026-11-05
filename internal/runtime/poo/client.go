@@ -91,6 +91,8 @@ type permissionAsk struct {
 	id        json.RawMessage
 }
 
+var messagingReady = false
+
 // startClient spawns the resolved binary and returns the connected client. The
 // command and its args are the recorded launch identity, so the process is
 // exactly the one the session owns.
@@ -100,10 +102,15 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 	}
 	proc := launcher.Command(ctx, opts.LaunchWrapper, opts.Launch.Command, LaunchArgs(opts.Launch)...)
 	proc.Dir = opts.Dir
-	// The child receives this launch's identity and none of the parent's, the
-	// same scrub every backend process goes through. It is given no broker
-	// credentials: nothing in a poo binary spends them.
+	// The child receives this launch's identity and none of the parent's.
+	// Broker credentials require messaging and a ready messaging surface.
 	proc.Env = runtime.LaunchEnv(proc.Environ(), opts.Provenance)
+	if opts.MessagingOn && opts.Broker != nil && messagingReady {
+		url, runID, token := runtime.ProvisionPeer(opts).Run()
+		if url != "" {
+			proc.Env = append(proc.Env, "AVENOR_BROKER_URL="+url, "AVENOR_RUN_ID="+runID, "AVENOR_BROKER_TOKEN="+token)
+		}
+	}
 
 	stdin, err := proc.StdinPipe()
 	if err != nil {

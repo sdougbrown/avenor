@@ -328,6 +328,7 @@ type Assignment struct {
 	Agent       string `json:"agent,omitempty"`
 	Model       string `json:"model,omitempty"`
 	Thinking    string `json:"thinking,omitempty"`
+	Messaging   *bool  `json:"messaging,omitempty"`
 	// AutoApprove requests an unattended permission policy for nodes
 	// dispatched with this assignment: every permission request is resolved
 	// as allow and no file permission handler is derived. It travels with
@@ -384,6 +385,7 @@ type ExecutionSelection struct {
 	// nil inherits the environment, true and false force the choice for the
 	// node's runtime (pi: a session directory instead of --no-session).
 	PersistSessions *bool `json:"persist_sessions,omitempty"`
+	Messaging       *bool `json:"messaging,omitempty"`
 	// AutoApprove carries the assignment's unattended permission policy:
 	// every permission request is resolved as allow and no file permission
 	// handler is derived for the spawned runtime.
