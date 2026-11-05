@@ -13,10 +13,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
 func TestPooInboxWakePreservesParkedSupervisor(t *testing.T) {
+	testPooInboxWake(t, false)
+}
+
+func TestPooInboxWakeRetainsPermissionAsk(t *testing.T) {
+	testPooInboxWake(t, true)
+}
+
+func testPooInboxWake(t *testing.T, ask bool) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	if err := os.Mkdir(home, 0700); err != nil {
@@ -36,10 +45,17 @@ func TestPooInboxWakePreservesParkedSupervisor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
+		if ask && n == 2 {
+			fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"echo wake\\\"}\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+			return
+		}
 		fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"answer-%d\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", n)
 	}))
 	t.Cleanup(server.Close)
 	settings := map[string]any{"version": 1, "endpoints": map[string]any{"fake": map[string]any{"endpoint": server.URL + "/v1"}}, "models": map[string]any{"test-model": map[string]any{"endpoint": "fake", "model_id": "test-model", "api": "chat_completions", "tools_mode": "native", "ops": []string{"chat"}, "context_limit": 200000}}, "roles": map[string]any{"chat": "test-model"}, "session": map[string]any{"mode": "logged", "dir": filepath.Join(root, "sessions")}}
+	if ask {
+		settings["permission"] = map[string]any{"unmatched": "ask", "fallback": "deny", "askers": []string{"wire"}, "chain_timeout_s": 60}
+	}
 	data, err := json.Marshal(settings)
 	if err != nil {
 		t.Fatal(err)
@@ -54,8 +70,24 @@ func TestPooInboxWakePreservesParkedSupervisor(t *testing.T) {
 	if err := os.WriteFile(rosterPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "poo-wake"), MaxRuntimes: 2})
+	socket := newStableSocketPath(t, "poo-wake")
+	sup := newTestSupervisor(t, Config{ControlSocket: socket, MaxRuntimes: 2})
 	t.Cleanup(func() { _ = sup.Shutdown("kill"); _ = sup.broker.Stop() })
+	if ask {
+		if err := sup.control.Start(socket); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { sup.control.Stop() })
+		conn, err := client.Dial(socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		if _, err := conn.Identity(); err != nil {
+			t.Fatal(err)
+		}
+		attachOwnerForTest(t, conn, socket)
+	}
 	sentinel := filepath.Join(root, "done.env")
 	eventPath := filepath.Join(root, "events.ndjson")
 	on := true
@@ -85,6 +117,33 @@ func TestPooInboxWakePreservesParkedSupervisor(t *testing.T) {
 	}
 	sessionID := statusBefore.(map[string]any)["session_id"].(string)
 	sessionLog := filepath.Join(root, "sessions", sessionID+".jsonl")
+	if ask {
+		waitFor(t, "parked permission ask", func() bool {
+			data, _ := os.ReadFile(sessionLog)
+			return strings.Contains(string(data), `"record":"permission.asked"`)
+		})
+		if err := sup.RuntimePrompt(spawned.RuntimeID, "continue", ""); err != nil {
+			t.Fatal(err)
+		}
+		var requestID string
+		waitFor(t, "permission request replay", func() bool {
+			data, _ := os.ReadFile(eventPath)
+			for _, line := range strings.Split(string(data), "\n") {
+				var event map[string]any
+				if json.Unmarshal([]byte(line), &event) == nil && event["event"] == "permission.request" {
+					requestID, _ = event["request_id"].(string)
+				}
+			}
+			return requestID != ""
+		})
+		if err := sup.RuntimeAnswerPermission(spawned.RuntimeID, requestID, "allow", ""); err != nil {
+			t.Fatal(err)
+		}
+		waitForStableChild(t, child, func(active, completed bool, phase, label string) bool {
+			return !active && phase == "done" && calls.Load() >= 3
+		})
+		return
+	}
 	waitFor(t, "wake settlement", func() bool {
 		data, _ := os.ReadFile(sessionLog)
 		return calls.Load() >= 2 && strings.Count(string(data), `"record":"run.settled"`) >= 2
