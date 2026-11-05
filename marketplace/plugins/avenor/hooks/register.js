@@ -16,12 +16,15 @@
 //   service. A queued peer ask is submitted as `$.prompt.submit` when the
 //   session is idle (the host queues it and starts the turn) or appended as
 //   a row when a main-loop turn is running.
-// - Outbound asks: a `tool.call` hook on `mcp__avenor__message` serves asks
-//   through this session's broker credentials and blocks on `/wait_reply`.
-//   Failed waits leave the ask open for a late answer, as Pi and core do.
-//   The hook also answers inbound asks or tells by message id using its local
-//   correlations. A tell's answer omits the target; the broker resolves its
-//   recorded return route. Other actions pass through to the MCP server.
+// - Outbound message actions: a `tool.call` hook on `mcp__avenor__message`
+//   serves tells and asks through this session's broker credentials, so they
+//   come from the conversation that loaded the plugin instead of the MCP
+//   server's own supervisor. A tell pins the listing's generation and never
+//   rides an ask edge; an ask blocks on `/wait_reply` and a failed wait leaves
+//   it open for a late answer, as Pi and core do. The hook also answers inbound
+//   asks or tells by message id using its local correlations. A tell's answer
+//   omits the target; the broker resolves its recorded return route. Other
+//   actions pass through to the MCP server.
 //   The hook, not
 //   `$.tool.register`:
 //   the plugin also ships an MCP server named "avenor", and a registered tool
@@ -58,7 +61,9 @@ import {
   normalizeAskTimeoutMs,
   renderAskFailure,
   renderReplyText,
+  renderTellText,
   askFailureOutcome,
+  tellFailureOutcome,
   quote,
 } from "./wire.js"
 
@@ -87,8 +92,8 @@ export async function register(on) {
 
   await on("turn.complete", async (d, e) => turnTicked(d, e, -1))
 
-  await on("tool.call", { tool: "mcp__avenor__message" }, async (d, e) => serveAskHook(d, e))
-  await on("tool.call", { tool: "mcp__plugin_avenor_avenor__message" }, async (d, e) => serveAskHook(d, e))
+  await on("tool.call", { tool: "mcp__avenor__message" }, async (d, e) => serveMessageHook(d, e))
+  await on("tool.call", { tool: "mcp__plugin_avenor_avenor__message" }, async (d, e) => serveMessageHook(d, e))
 }
 
 // --- session.send: outbound brokerage ---
@@ -424,12 +429,22 @@ async function turnTicked(d, e, delta) {
  * main-loop axis only counts.
  */
 
-// --- the avenor message tool's ask action, served by the peer layer ---
+// --- the avenor message tool's peer actions, served by the peer layer ---
 
-async function serveAskHook(d, e) {
+/**
+ * Serve the message tool's peer actions through this session's broker identity.
+ * A tell, an ask and a reply all belong to the conversation that loaded the
+ * plugin, but the stock MCP server owns its own supervisor and resolves against
+ * that supervisor's universe. The hook is the session identity boundary, so it
+ * serves those three and passes every other action through untouched. A tell
+ * is a plain send: it never rides an ask edge the way SendMessage does, because
+ * the model named a new message rather than answering one.
+ */
+async function serveMessageHook(d, e) {
+  const isTell = e.action === "tell"
   const isAsk = e.action === "ask"
   const isReply = e.action === "reply"
-  if (!isAsk && !isReply) {
+  if (!isTell && !isAsk && !isReply) {
     // Every other action belongs to the MCP surface's own supervisor.
     return undefined
   }
@@ -443,13 +458,67 @@ async function serveAskHook(d, e) {
   }
   const ref = parseMessageTarget(e.target)
   if (ref === null) {
-    return askOutcome("not-sent", null, "ask target must be a run id, label, or self without whitespace")
+    // A malformed target is the MCP surface's admission to refuse; the hook
+    // only intercepts a tell it can send.
+    return isTell ? undefined : askOutcome("not-sent", null, "ask target must be a run id, label, or self without whitespace")
   }
   const message = typeof e.message === "string" ? e.message : ""
   if (message === "") {
-    return askOutcome("not-sent", null, "ask message must be a non-empty string")
+    return isTell ? undefined : askOutcome("not-sent", null, "ask message must be a non-empty string")
   }
-  return serveAsk(d, ref, message, e.timeout_ms)
+  return isTell ? serveTell(d, ref, message) : serveAsk(d, ref, message, e.timeout_ms)
+}
+
+/**
+ * One explicit tell through this session's broker credentials. The generation
+ * comes from the same fresh listing that resolved the target, because a
+ * versioned tell is refused when it names none. No correlation table is read:
+ * an explicit tell is a new message, never an answer to a queued ask.
+ */
+async function serveTell(d, ref, message) {
+  let target
+  try {
+    target = await resolveTarget(d, ref, true)
+  } catch (err) {
+    await logLayer(d, "tell target resolution failed: " + errorText(err))
+    return tellError("refused",
+      "tell to " + quote(ref) + " was not sent: the avenor broker did not answer the run listing")
+  }
+  if (target.match === "none") {
+    return tellError("unknown_target", "no run matches " + quote(ref))
+  }
+  if (target.match === "ambiguous") {
+    return tellError("ambiguous_name", quote(ref) + " matches " +
+      target.candidates.length + " runs: " + target.candidates.map(quote).join(", "))
+  }
+  if (target.match === "incomplete") {
+    return tellError("refused", listingIncomplete(target.incomplete, ref))
+  }
+  const messageId = mintMessageID(await d.clock.now())
+  let response
+  try {
+    response = await brokerPost(d, "/send", buildAgentMessage({
+      fromRunId: broker.runID,
+      toRunId: target.runId,
+      messageId: messageId,
+      message: message,
+      role: "agent",
+      generation: target.generation,
+    }))
+  } catch (err) {
+    const outcome = tellFailureOutcome(httpBody(err))
+    await logLayer(d, "tell " + messageId + " was not sent: " + errorText(err))
+    return tellOutcome(outcome, messageId, target.label)
+  }
+  if (response.queued !== true) {
+    const outcome = tellFailureOutcome(response)
+    await logLayer(d, "tell " + messageId + " was not queued: the broker answered " + JSON.stringify(response))
+    return tellOutcome(outcome, messageId, target.label)
+  }
+  const acked = typeof response.message_id === "string" && response.message_id !== ""
+    ? response.message_id
+    : messageId
+  return tellOutcome("sent", acked, target.label)
 }
 
 async function serveAsk(d, ref, message, rawTimeout) {
@@ -584,6 +653,29 @@ function replyOutcome(outcome, messageId) {
   }
 }
 
+/** The tell action's result, in the same router shape. */
+function tellOutcome(outcome, messageId, label) {
+  return {
+    result: JSON.stringify({
+      action: "tell",
+      outcome: outcome,
+      message_id: messageId,
+      label: label,
+      text: renderTellText(messageId, label, outcome),
+    }),
+  }
+}
+
+/**
+ * A router tool error (schemas/message_route.result.json `error`): the fixed
+ * code and its rendered sentence, never raw wire text. The tool.call return
+ * channel carries it as content, so the model reads the same error object the
+ * MCP surface's failed call publishes.
+ */
+function tellError(code, text) {
+  return { result: JSON.stringify({ code: code, text: text }) }
+}
+
 // --- broker client ---
 
 /**
@@ -607,10 +699,15 @@ async function resolveTarget(d, ref, allowSelf = false) {
   const targetRef = allowSelf && ref === "self" && broker !== null ? broker.runID : ref
   const excludeRunId = allowSelf || broker === null ? "" : broker.runID
   const hit = matchSession(sessions, targetRef, excludeRunId)
+  const resolved = hit.match === "unique" ? sessions.find((row) => row !== null &&
+    typeof row === "object" && row.run_id === hit.runId) : null
+  const rowLabel = resolved !== undefined && resolved !== null &&
+    typeof resolved.label === "string" && resolved.label !== "" ? resolved.label : ""
   return {
     match: hit.match,
     runId: hit.runId,
     candidates: hit.candidates,
+    label: hit.match === "unique" ? (rowLabel !== "" ? rowLabel : hit.runId) : "",
     generation: typeof answer.generation === "string" ? answer.generation : "",
     incomplete: "",
   }
