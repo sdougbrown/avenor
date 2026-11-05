@@ -50,12 +50,8 @@ func payloadObject(t *testing.T, raw json.RawMessage) map[string]any {
 	return payload
 }
 
-// TestCrossBranchAskBindsThePayloadSenderToTheParentIdentity pins the upward
-// sender binding: a branch-local surface names its run the way this branch knows
-// it, while the parent authenticates the same participant by the namespaced key
-// it published. The hop has to re-bind the payload's sender to that key, or the
-// parent reads one send as two identities and refuses it. The reply must still
-// follow the route the relay recorded into the asking branch.
+// Payload routing must use the parent's qualified identity without losing the
+// return route to the asking branch.
 func TestCrossBranchAskBindsThePayloadSenderToTheParentIdentity(t *testing.T) {
 	_, first, second := crossBranch(t)
 	asker := first.key("asker")
@@ -120,10 +116,7 @@ func TestCrossBranchAskBindsThePayloadSenderToTheParentIdentity(t *testing.T) {
 	}
 }
 
-// TestBranchTellBindsThePayloadSenderToTheParentIdentity pins the same binding
-// on the link's tell hop, which carries a tell with no message id: the parent
-// authenticates the run by its published key, so the payload's branch-local
-// sender has to become that key before the parent reads it.
+// Legacy tells without message IDs use a separate forwarding path.
 func TestBranchTellBindsThePayloadSenderToTheParentIdentity(t *testing.T) {
 	parent := startBranch(t, "", "hub")
 	first := startBranch(t, parent.url(), "asker")
@@ -156,10 +149,7 @@ func TestBranchTellBindsThePayloadSenderToTheParentIdentity(t *testing.T) {
 	assertNumberedPayload(t, queued[0].Payload)
 }
 
-// TestLinkForwardsAPayloadNamingAnotherRunUnchanged pins the refusal the binding
-// must not weaken: a body that names a run which is not the asking run is not a
-// second spelling of the same participant, so the link forwards it as it stands
-// and the parent refuses the mismatch instead of adopting the identity.
+// Qualifying the envelope must not launder a forged payload sender.
 func TestLinkForwardsAPayloadNamingAnotherRunUnchanged(t *testing.T) {
 	stub := newStubBroker(t, func(req stubRequest) (int, string) {
 		switch req.Path {

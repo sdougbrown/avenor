@@ -845,15 +845,8 @@ func payloadFor(body string) (json.RawMessage, error) {
 	return payload, nil
 }
 
-// payloadForSender renders a message body for one parent hop. The parent
-// authenticates this branch's run by the key this branch published it under,
-// while a branch-local surface names the run the way this branch knows it, so a
-// body naming that run is re-bound to the envelope sender: otherwise the parent
-// reads one participant as two and refuses the send.
-//
-// A body naming any other run is passed through unchanged. That run is not this
-// participant under another name, and the parent refuses the disagreement
-// rather than adopting the identity.
+// payloadForSender qualifies a local payload sender to match the authenticated
+// envelope. Foreign sender claims stay unchanged so the parent rejects them.
 func payloadForSender(body, runID, sender string) (json.RawMessage, error) {
 	payload, err := payloadFor(body)
 	if err != nil {
