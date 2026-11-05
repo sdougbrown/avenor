@@ -4100,21 +4100,63 @@ func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Prov
 	}()
 }
 
+// writeIdleEvent publishes one event from an idle run through the canonical
+// writer. A permission request needs a claim before publication, and it gets
+// the same two refusals the canonical path gives: a request that cannot be
+// claimed is not published, and a failed publication ends the claim it made.
 func (s *Supervisor) writeIdleEvent(child *childRuntime, writer *runtimeFanoutWriter, ev events.Event) {
-	if ev.Event == "permission.request" {
-		requestID, _ := ev.Fields["request_id"].(string)
-		options, _ := ev.Fields["options"].([]any)
-		if requestID != "" && s.control != nil {
-			// Prepare must precede publication so the request is answerable.
-			// It releases control locks before Write takes writeMu then controlMu.
-			// A pre-publication direct answer can race this write; its response
-			// also passes through the canonical writer.
-			s.control.PreparePermissionClaim(child.id, requestID, control.PermissionResolverNoResolver, options)
-		}
+	requestID, publish := s.prepareIdleRequest(child, ev)
+	if !publish {
+		return
 	}
 	if err := writer.Write(ev); err != nil {
+		if requestID != "" && s.control != nil {
+			// A claim whose request never reached the log is unreachable.
+			s.control.EndPermissionClaim(child.id, requestID)
+		}
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s idle event write: %v\n", child.id, err)
 	}
+}
+
+// prepareIdleRequest decides whether one idle event may be published, and
+// claims a permission request's ID on the way. It mirrors the canonical
+// path's admission: no claim for a closing child, no publication over a claim
+// someone else holds.
+func (s *Supervisor) prepareIdleRequest(child *childRuntime, ev events.Event) (string, bool) {
+	if ev.Event != "permission.request" {
+		return "", true
+	}
+	requestID, _ := ev.Fields["request_id"].(string)
+	options, _ := ev.Fields["options"].([]any)
+	if requestID == "" || s.control == nil {
+		return requestID, true
+	}
+	if !s.idleClaimAdmitted(child) {
+		// The child is closing, so nothing can answer this request: do not
+		// prepare a claim no path can resolve, and do not publish a request
+		// nothing will answer.
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s is closing; dropping idle permission request %s\n", child.id, requestID)
+		return requestID, false
+	}
+	// Prepare must precede publication so the request is answerable. It
+	// releases control locks before Write takes writeMu then controlMu. A
+	// pre-publication direct answer can race this write; its response also
+	// passes through the canonical writer.
+	if !s.control.PreparePermissionClaim(child.id, requestID, control.PermissionResolverNoResolver, options) {
+		// A claim is already pending for this request, so the canonical path
+		// refuses to publish it and this one refuses too: poo's held replay can
+		// otherwise republish a live request invisibly.
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission request %s is already claimed\n", child.id, requestID)
+		return requestID, false
+	}
+	return requestID, true
+}
+
+// idleClaimAdmitted applies the admission gate the canonical claim path
+// checks: once the supervisor, the child or its event writer is closing, a
+// prepared claim has no owner that could answer it.
+func (s *Supervisor) idleClaimAdmitted(child *childRuntime) bool {
+	return child.lifecycleCtx.Err() == nil && !child.lc.isShuttingDown() && !child.lc.isWriterClosing()
 }
 
 func (s *Supervisor) stopIdleWatcher(child *childRuntime) {

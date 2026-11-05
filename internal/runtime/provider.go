@@ -24,6 +24,20 @@ type Provider interface {
 }
 
 // UnpromptedRuns identifies providers that can start runs without a prompt.
+//
+// A provider that reports true accepts the contract the supervisor's idle
+// watcher relies on, and both halves are load-bearing:
+//
+//   - Events closes the returned channel once the context is cancelled and the
+//     subscription is gone. The supervisor joins on that close to keep at most
+//     one subscriber per child, and it drains the attempt's channel the same
+//     way before the watcher subscribes; a channel that never closes wedges the
+//     run goroutine instead of failing.
+//   - Events survives a consumer that is draining after cancellation: events
+//     published during the handover reach one of the two subscribers, and a
+//     permission request is not lost in the gap.
+//
+// A backend that cannot promise both must not report it.
 type UnpromptedRuns interface {
 	WakesUnprompted() bool
 }
