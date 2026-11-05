@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
@@ -56,8 +57,9 @@ func TestMessageRoundTrips(t *testing.T) {
 		t.Fatal("message not received")
 		return messaging.InboundMessage{}
 	}
+	dir := t.TempDir()
 	var out, stderr bytes.Buffer
-	if code := runDeclared([]string{"message", "tell", "--text=hello"}, &out, &stderr); code != 0 {
+	if code := runDeclared([]string{"message", "--action=tell", "--target=supervisor", "--message=hello"}, &out, &stderr); code != 0 {
 		t.Fatalf("tell: %d %s", code, &stderr)
 	}
 	msg := receive()
@@ -71,7 +73,7 @@ func TestMessageRoundTrips(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		var o, e bytes.Buffer
-		code := runDeclared([]string{"message", "ask", "--text=question", "--timeout-ms=5000"}, &o, &e)
+		code := runDeclared([]string{"message", "--action=ask", "--target=supervisor", "--message=question", "--timeout-ms=5000"}, &o, &e)
 		done <- result{code, o.String(), e.String()}
 	}()
 	msg = receive()
@@ -95,23 +97,8 @@ func TestMessageRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send: %+v %v", sent, err)
 	}
-	other, _, err := b.EnsureRun("other", "other")
-	if err != nil {
+	if err := askclaim.Record(dir, id, "supervisor"); err != nil {
 		t.Fatal(err)
-	}
-	out.Reset()
-	stderr.Reset()
-	if code := runDeclared([]string{"message", "reply", "--reply-to=" + id, "--to=other", "--text=wrong recipient"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "sent"`) {
-		t.Fatalf("wrong recipient: exit %d, stdout %s, stderr %s", code, &out, &stderr)
-	}
-	otherTr, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "other", Token: other})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = otherTr.Close() })
-	otherMsgs, err := otherTr.Receive(t.Context(), messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "other"}, Generation: pre.Generation})
-	if err != nil || len(otherMsgs.Messages) != 1 || !strings.Contains(string(otherMsgs.Messages[0].Payload), "wrong recipient") {
-		t.Fatalf("fallback delivery: %+v %v", otherMsgs, err)
 	}
 	type waitResult struct {
 		result messaging.WaitResult
@@ -122,19 +109,19 @@ func TestMessageRoundTrips(t *testing.T) {
 		result, err := tr.Wait(t.Context(), messaging.WaitRequest{Sender: messaging.Identity{RunID: "supervisor"}, MessageID: id, Generation: pre.Generation, Timeout: 5 * time.Second})
 		waiting <- waitResult{result, err}
 	}()
-	select {
-	case pending := <-waiting:
-		t.Fatalf("wrong recipient completed ask: %+v", pending)
-	case <-time.After(50 * time.Millisecond):
-	}
 	out.Reset()
 	stderr.Reset()
-	if code := runDeclared([]string{"message", "reply", "--reply-to=" + id, "--to=supervisor", "--text=child answer"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "replied"`) {
+	if code := runDeclared([]string{"message", "--action=reply", "--reply-to=" + id, "--asks-dir=" + dir, "--message=child answer"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "replied"`) {
 		t.Fatalf("reply: %d %s %s", code, &out, &stderr)
 	}
 	waited := <-waiting
 	if waited.err != nil || waited.result.Outcome != messaging.OutcomeReplied || !strings.Contains(string(waited.result.Reply.Payload), "child answer") {
 		t.Fatalf("wait: %+v", waited)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := runDeclared([]string{"message", "--action=reply", "--reply-to=" + id, "--asks-dir=" + dir, "--message=again"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "edge-absent"`) {
+		t.Fatalf("second reply: %d %s %s", code, &out, &stderr)
 	}
 	tellID, err := messaging.NewMsgID(time.Now(), time.Time{})
 	if err != nil {
@@ -145,7 +132,7 @@ func TestMessageRoundTrips(t *testing.T) {
 	}
 	out.Reset()
 	stderr.Reset()
-	if code := runDeclared([]string{"message", "reply", "--reply-to=" + tellID, "--text=notice answer"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "sent"`) {
+	if code := runDeclared([]string{"message", "--action=reply", "--reply-to=" + tellID, "--asks-dir=" + dir, "--message=notice answer"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "sent"`) {
 		t.Fatalf("tell reply: exit %d, stdout %s, stderr %s", code, &out, &stderr)
 	}
 	msg = receive()
@@ -154,7 +141,7 @@ func TestMessageRoundTrips(t *testing.T) {
 	}
 	out.Reset()
 	stderr.Reset()
-	if code := runDeclared([]string{"message", "ask", "--text=timeout", "--timeout-ms=10"}, &out, &stderr); code != 0 {
+	if code := runDeclared([]string{"message", "--action=ask", "--target=supervisor", "--message=timeout", "--timeout-ms=10"}, &out, &stderr); code != 0 {
 		t.Fatalf("timeout: %d %s", code, &stderr)
 	}
 	var v map[string]any
@@ -163,25 +150,37 @@ func TestMessageRoundTrips(t *testing.T) {
 	}
 	out.Reset()
 	stderr.Reset()
-	if code := runDeclared([]string{"message", "tell", "--target=missing", "--text=x"}, &out, &stderr); code != 1 {
+	if code := runDeclared([]string{"message", "--action=tell", "--target=missing", "--message=x"}, &out, &stderr); code != 1 || !strings.Contains(out.String(), `"code": "unknown_target"`) {
 		t.Fatalf("unknown target: %d %s %s", code, &out, &stderr)
-	}
-	out.Reset()
-	stderr.Reset()
-	if code := runDeclared([]string{"message", "ask", "--text=x", "--timeout-ms=-1"}, &out, &stderr); code != 2 {
-		t.Fatalf("negative timeout: %d %s", code, &stderr)
 	}
 }
 
-// TestMessageUsage checks that missing credentials and invalid inputs are usage errors.
-func TestMessageUsage(t *testing.T) {
-	for _, k := range []string{"AVENOR_BROKER_URL", "AVENOR_BROKER_TOKEN", "AVENOR_RUN_ID"} {
-		t.Setenv(k, "")
-	}
-	for _, args := range [][]string{{"message", "tell", "--text=x"}, {"message", "ask", "--text=x"}, {"message", "reply", "--text=x", "--reply-to=id"}, {"message", "ask", "--text=x", "--timeout-ms=-1"}} {
-		var out, stderr bytes.Buffer
-		if code := runDeclared(args, &out, &stderr); code != 2 {
-			t.Errorf("%v exit %d: %s", args, code, &stderr)
+// TestClampMessageTimeout checks the upper wait boundary.
+func TestClampMessageTimeout(t *testing.T) {
+	for _, tc := range []struct{ in, want int }{{0, 0}, {600000, 600000}, {600001, 600000}, {int(^uint(0) >> 1), 600000}} {
+		if got := clampMessageTimeout(tc.in); got != tc.want {
+			t.Errorf("clamp(%d) = %d, want %d", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestMessageUsage checks that missing credentials and action are usage errors.
+func TestMessageUsage(t *testing.T) {
+	for _, missing := range []string{"", "AVENOR_BROKER_URL", "AVENOR_BROKER_TOKEN", "AVENOR_RUN_ID"} {
+		t.Run(missing, func(t *testing.T) {
+			for _, k := range []string{"AVENOR_BROKER_URL", "AVENOR_BROKER_TOKEN", "AVENOR_RUN_ID"} {
+				t.Setenv(k, "valid")
+			}
+			args := []string{"message", "--action=tell", "--target=x", "--message=x"}
+			if missing == "" {
+				args = []string{"message"}
+			} else {
+				t.Setenv(missing, "")
+			}
+			var out, stderr bytes.Buffer
+			if code := runDeclared(args, &out, &stderr); code != 2 {
+				t.Errorf("%v exit %d: %s", args, code, &stderr)
+			}
+		})
 	}
 }
