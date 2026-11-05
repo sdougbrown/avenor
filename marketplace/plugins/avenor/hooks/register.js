@@ -34,8 +34,8 @@
 //
 // - Identity: a run id and an attach credential in the environment are a
 //   provisioned identity — a spawned child joins the broker as the run its
-//   launcher already holds, with neither a `/register` call nor a
-//   `/session_name` write. The credential is a one-shot grant: the layer trades
+//   launcher already holds, with neither a `/register` call nor a name write.
+//   The credential is a one-shot grant: the layer trades
 //   it at `POST /attach` for the run's own credential, so a run has one inbound
 //   consumer and a second session holding the same environment (a nested
 //   session spawned from a provisioned one's shell) is refused with the
