@@ -173,6 +173,27 @@ func TestMessageRoundTrips(t *testing.T) {
 	if code := runDeclared([]string{"message", "--action=ask", "--target=missing", "--message=x", "--timeout-ms=600001"}, &out, &stderr); code != 1 || !strings.Contains(out.String(), `"code": "invalid_request"`) {
 		t.Fatalf("over-limit timeout: %d %s %s", code, &out, &stderr)
 	}
+	// The credential flags override the environment.
+	t.Setenv("AVENOR_BROKER_URL", "invalid-url")
+	t.Setenv("AVENOR_RUN_ID", "nobody")
+	t.Setenv("AVENOR_BROKER_TOKEN", "wrong")
+	out.Reset()
+	stderr.Reset()
+	if code := runDeclared([]string{"message", "--action=tell", "--target=supervisor", "--message=by flags", "--broker-url=http://" + b.Addr(), "--run-id=child", "--token=" + child}, &out, &stderr); code != 0 {
+		t.Fatalf("tell by flags: %d %s %s", code, &out, &stderr)
+	}
+	msg = receive()
+	if msg.FromRunID != "child" || !strings.Contains(string(msg.Payload), "by flags") {
+		t.Fatalf("tell by flags delivery: %+v", msg)
+	}
+}
+
+// TestMessageRejectsInvalidBrokerURL checks that a bad --broker-url fails the command.
+func TestMessageRejectsInvalidBrokerURL(t *testing.T) {
+	var out, stderr bytes.Buffer
+	if code := runDeclared([]string{"message", "--action=tell", "--target=x", "--message=x", "--broker-url=invalid-url", "--run-id=r", "--token=t"}, &out, &stderr); code != 1 || !strings.Contains(stderr.String(), "avenor message:") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, out.String(), stderr.String())
+	}
 }
 
 func TestMessageUsage(t *testing.T) {

@@ -21,12 +21,10 @@ import (
 func messageCommand() *clicontract.Command {
 	return &clicontract.Command{
 		Name: "message", Short: "send messages as the current child run",
-		PersistentFlags: []clicontract.Flag{
+		Flags: []clicontract.Flag{
 			{Name: "broker-url", Kind: clicontract.String, Usage: "broker URL (default: $AVENOR_BROKER_URL)"},
 			{Name: "run-id", Kind: clicontract.String, Usage: "caller run id (default: $AVENOR_RUN_ID)"},
 			{Name: "token", Kind: clicontract.String, Usage: "broker token (default: $AVENOR_BROKER_TOKEN; prefer the environment)"},
-		},
-		Flags: []clicontract.Flag{
 			{Name: "action", Kind: clicontract.String, Usage: "tell, ask, reply or withdraw", Required: true},
 			{Name: "target", Kind: clicontract.String, Usage: "recipient run id or label"},
 			{Name: "message", Kind: clicontract.String, Usage: "message text"},
