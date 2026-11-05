@@ -93,14 +93,16 @@ async function deliver(id, sessionDir, ask) {
 }
 
 /** One file per pending ask, written only while the poller owns the delivery.
- * The MCP server claims it by rename before answering, so two processes never
- * both believe the same ask is theirs. */
+ * The MCP server claims it by linking it to `<id>.claimed` before answering.
+ * The link fails once a claim exists, so an ask is answered at most once. */
 function rememberAsk(sessionDir, ask) {
   if (!MESSAGE_ID.test(ask.messageId)) return;
   const dir = asksDirFor(undefined, path.basename(sessionDir));
   if (dir === "") return;
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // A redelivered ask that was already answered stays answered.
+    if (fs.existsSync(path.join(dir, ask.messageId + ".claimed"))) return;
     const file = path.join(dir, ask.messageId + ".json");
     fs.writeFileSync(file, JSON.stringify({ message_id: ask.messageId, asker_run_id: ask.fromRunId }) + "\n", {
       mode: 0o600,
