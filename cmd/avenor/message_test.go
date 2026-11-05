@@ -148,6 +148,15 @@ func TestMessageRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &v); err != nil || v["outcome"] != "timed-out" {
 		t.Fatalf("timeout output: %s %v", &out, err)
 	}
+	timeoutID, ok := v["message_id"].(string)
+	if !ok || timeoutID == "" {
+		t.Fatalf("timeout missing message id: %s", &out)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := runDeclared([]string{"message", "--action=withdraw", "--message-id=" + timeoutID}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "withdrawn"`) {
+		t.Fatalf("withdraw: %d %s %s", code, &out, &stderr)
+	}
 	out.Reset()
 	stderr.Reset()
 	if code := runDeclared([]string{"message", "--action=tell", "--target=missing", "--message=x"}, &out, &stderr); code != 1 || !strings.Contains(out.String(), `"code": "unknown_target"`) {

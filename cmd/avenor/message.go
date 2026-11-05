@@ -27,10 +27,11 @@ func messageCommand() *clicontract.Command {
 			{Name: "token", Kind: clicontract.String, Usage: "broker token (default: $AVENOR_BROKER_TOKEN; prefer the environment)"},
 		},
 		Flags: []clicontract.Flag{
-			{Name: "action", Kind: clicontract.String, Usage: "tell, ask or reply", Required: true},
+			{Name: "action", Kind: clicontract.String, Usage: "tell, ask, reply or withdraw", Required: true},
 			{Name: "target", Kind: clicontract.String, Usage: "recipient run id or label"},
 			{Name: "message", Kind: clicontract.String, Usage: "message text"},
-			{Name: "reply-to", Kind: clicontract.String, Usage: "message id"},
+			{Name: "reply-to", Kind: clicontract.String, Usage: "message id to reply to"},
+			{Name: "message-id", Kind: clicontract.String, Usage: "message id to withdraw"},
 			{Name: "timeout-ms", Kind: clicontract.Int, Usage: "wait in milliseconds (maximum 600000)"},
 			{Name: "asks-dir", Kind: clicontract.String, Usage: "directory of feed ask records"},
 		},
@@ -58,7 +59,7 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 		return nil, usageErrorf("avenor message: --broker-url, --token and --run-id (or their environment variables) are required")
 	}
 	input := map[string]any{"action": inv.Flags["action"]}
-	for _, field := range []struct{ flag, key string }{{"target", "target"}, {"message", "message"}, {"reply-to", "reply_to"}} {
+	for _, field := range []struct{ flag, key string }{{"target", "target"}, {"message", "message"}, {"reply-to", "reply_to"}, {"message-id", "message_id"}} {
 		if inv.Supplied[field.flag] {
 			input[field.key] = inv.Flags[field.flag]
 		}
