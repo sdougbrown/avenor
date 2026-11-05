@@ -10,8 +10,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
@@ -23,6 +27,9 @@ const backendID = "poo"
 // errOneSession is the refusal a provider that already serves a session gives:
 // poo runs one session per process.
 var errOneSession = errors.New("poo runs one session per process")
+
+var messagingPollInterval = 100 * time.Millisecond
+var messagingPollLimit = 10 * time.Second
 
 // Provider is the poo backend: one process, one session.
 type Provider struct {
@@ -72,13 +79,13 @@ var _ runtime.Provider = (*Provider)(nil)
 func (p *Provider) RecoveredDenialIsCompletion() bool { return true }
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	p.mu.Lock()
 	merged := runtime.MergeStartOptions(p.opts, opts)
+	open := len(p.sessions)
+	p.mu.Unlock()
 	if err := runtime.ValidateThinkingForBackend(backendID, merged.Thinking); err != nil {
 		return runtime.Session{}, err
 	}
-	p.mu.Lock()
-	open := len(p.sessions)
-	p.mu.Unlock()
 	if open > 0 {
 		return runtime.Session{}, errOneSession
 	}
@@ -86,11 +93,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	c, err := p.openProcess(ctx, merged)
-	if err != nil {
-		return runtime.Session{}, err
-	}
-
 	params := protocol.CreateParams{
 		WorkingDir: workingDir,
 		Profile:    merged.Agent,
@@ -98,29 +100,71 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if merged.Model != "" {
 		params.Models = &protocol.ModelRoles{Chat: merged.Model}
 	}
-	info, err := c.createSession(ctx, params)
+	baseline := time.Now()
+	var warning string
+	c, info, merged, err := p.openSession(ctx, merged, baseline, &warning, func(c *client) (protocol.SessionInfo, error) {
+		info, err := c.createSession(ctx, params)
+		return info, describeCreateFailure(merged, err)
+	})
 	if err != nil {
-		// A refused create leaves nothing running, so a later attempt
-		// starts clean.
-		p.discardProcess(c)
-		return runtime.Session{}, describeCreateFailure(merged, err)
+		return runtime.Session{}, err
 	}
-
+	on := merged.MessagingOn
 	p.mu.Lock()
+	p.opts = merged
 	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
 	p.mu.Unlock()
 
 	return runtime.Session{
-		SessionID: info.SessionID,
-		Backend:   backendID,
-		Dir:       merged.Dir,
-		PID:       c.pid(),
+		SessionID:        info.SessionID,
+		Backend:          backendID,
+		Dir:              merged.Dir,
+		PID:              c.pid(),
+		MessagingOn:      &on,
+		MessagingWarning: warning,
 	}, nil
+}
+
+func checkMessaging(ctx context.Context, opts runtime.StartOptions, info protocol.SessionInfo, baseline time.Time) error {
+	if opts.Broker == nil || opts.RuntimeID == "" {
+		return &messagingFailure{reason: "broker identity was not provisioned"}
+	}
+	found := false
+	for _, tool := range info.Tools {
+		if tool.Name == "call_cli" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return &messagingFailure{reason: "the session did not offer call_cli"}
+	}
+	ctx, cancel := context.WithTimeout(ctx, messagingPollLimit)
+	defer cancel()
+	for {
+		stamp, ok := opts.Broker.LastPolled(opts.RuntimeID)
+		if !ok {
+			return fmt.Errorf("broker has no run record for %s", opts.RuntimeID)
+		}
+		if stamp.After(baseline) {
+			return nil
+		}
+		timer := time.NewTimer(messagingPollInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return &messagingFailure{reason: fmt.Sprintf("the broker saw no poll from run %s within %s", opts.RuntimeID, messagingPollLimit)}
+		case <-timer.C:
+		}
+	}
 }
 
 // describeCreateFailure names the field poo refused, because the server's own
 // message names the value and not what the roster entry should change.
 func describeCreateFailure(opts runtime.StartOptions, err error) error {
+	if err == nil {
+		return nil
+	}
 	switch refusedCode(err) {
 	case protocol.DataUnknownProfile:
 		return fmt.Errorf("poo profile %q is not offered by this binary: %w", opts.Agent, err)
@@ -138,8 +182,8 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	// The launch is the identity the session was created with: the supervisor
 	// resolves it from the session's own record before this provider exists, so
 	// the process that resumes is the one the session belongs to.
-	merged := runtime.MergeStartOptions(p.opts, runtime.StartOptions{})
 	p.mu.Lock()
+	merged := runtime.MergeStartOptions(p.opts, runtime.StartOptions{})
 	st := p.sessions[sessionID]
 	c := p.client
 	other := len(p.sessions) > 0 && st == nil
@@ -154,10 +198,11 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	if st != nil {
 		if c != nil && c.live() {
 			return runtime.Session{
-				SessionID: sessionID,
-				Backend:   backendID,
-				Dir:       merged.Dir,
-				PID:       c.pid(),
+				SessionID:   sessionID,
+				Backend:     backendID,
+				Dir:         merged.Dir,
+				PID:         c.pid(),
+				MessagingOn: &merged.MessagingOn,
 			}, nil
 		}
 		// The process behind the known session is gone: reap it, so the
@@ -167,25 +212,30 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 			p.discardProcess(c)
 		}
 	}
-	c, err := p.openProcess(ctx, merged)
+	baseline := time.Now()
+	var warning string
+	c, info, merged, err := p.openSession(ctx, merged, baseline, &warning, func(c *client) (protocol.SessionInfo, error) {
+		info, err := c.loadSession(ctx, protocol.LoadParams{SessionID: sessionID})
+		if err != nil {
+			err = describeLoadFailure(sessionID, err)
+		}
+		return info, err
+	})
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	info, err := c.loadSession(ctx, protocol.LoadParams{SessionID: sessionID})
-	if err != nil {
-		p.discardProcess(c)
-		return runtime.Session{}, describeLoadFailure(sessionID, err)
-	}
-
 	p.mu.Lock()
+	p.opts = merged
 	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
 	p.mu.Unlock()
 
 	return runtime.Session{
-		SessionID: info.SessionID,
-		Backend:   backendID,
-		Dir:       merged.Dir,
-		PID:       c.pid(),
+		SessionID:        info.SessionID,
+		Backend:          backendID,
+		Dir:              merged.Dir,
+		PID:              c.pid(),
+		MessagingOn:      &merged.MessagingOn,
+		MessagingWarning: warning,
 	}, nil
 }
 
@@ -204,6 +254,66 @@ func describeLoadFailure(sessionID string, err error) error {
 	}
 }
 
+type messagingFailure struct{ reason string }
+
+func (e *messagingFailure) Error() string { return e.reason }
+
+// manifestRefusal checks text because poo v0.2.0's wire ErrorData has only
+// Code and Detail, with the field name in the detail; stderr has no code.
+func manifestRefusal(text string) bool {
+	return strings.Contains(text, "feeds.paths") || strings.Contains(text, "cli_registry.paths")
+}
+
+// openSession applies the same fallback to creation and cross-process resume.
+func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, baseline time.Time, warning *string, open func(*client) (protocol.SessionInfo, error)) (*client, protocol.SessionInfo, runtime.StartOptions, error) {
+	for {
+		var c *client
+		var err error
+		if opts.MessagingOn && runtime.ProvisionPeer(opts) == nil {
+			err = &messagingFailure{reason: "the run has no broker identity"}
+		} else if opts.MessagingOn {
+			if _, ok := opts.Broker.LastPolled(opts.RuntimeID); !ok {
+				// A missing record violates a provisioning invariant, not a poo
+				// messaging capability. Return a retryable error rather than
+				// misreporting a version failure or hiding it with fallback.
+				err = fmt.Errorf("broker has no run record for %s", opts.RuntimeID)
+			}
+		}
+		if err == nil {
+			c, err = p.openProcess(ctx, opts)
+		}
+		var info protocol.SessionInfo
+		if err == nil {
+			info, err = open(c)
+			if err != nil && manifestRefusal(err.Error()) {
+				err = &messagingFailure{reason: err.Error()}
+			}
+			if err == nil && opts.MessagingOn {
+				err = checkMessaging(ctx, opts, info, baseline)
+			}
+			if err != nil {
+				if info.SessionID != "" {
+					_ = c.closeSession(info.SessionID)
+				}
+				p.discardProcess(c)
+			}
+		}
+		if err == nil {
+			return c, info, opts, nil
+		}
+		var failure *messagingFailure
+		if !opts.MessagingOn || !errors.As(err, &failure) || ctx.Err() != nil {
+			return nil, protocol.SessionInfo{}, opts, err
+		}
+		if opts.Messaging != nil && *opts.Messaging {
+			return nil, protocol.SessionInfo{}, opts, &runtime.MessagingUnavailableError{Reason: "poo messaging requires poo v0.2.0 or later: " + failure.reason}
+		}
+		*warning = failure.reason
+		log.Printf("warning: poo messaging unavailable: %s", failure.reason)
+		opts.MessagingOn = false
+	}
+}
+
 // openProcess starts the process and completes the handshake. A process that
 // cannot complete the handshake is torn down, so a refused start or resume
 // leaves nothing running.
@@ -213,7 +323,25 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 		return nil, err
 	}
 	if _, err := c.initialize(ctx, p.versions()); err != nil {
+		exited := errors.Is(err, syscall.EPIPE)
+		select {
+		case <-c.stdoutDone:
+			exited = true
+		default:
+		}
 		p.discardProcess(c)
+		cause := c.exitCause()
+		if opts.MessagingOn && exited && ctx.Err() == nil {
+			for _, line := range strings.Split(cause, "\n") {
+				if manifestRefusal(line) {
+					line = strings.TrimSpace(line)
+					if runes := []rune(line); len(runes) > 400 {
+						line = string(runes[:400])
+					}
+					return nil, &messagingFailure{reason: line}
+				}
+			}
+		}
 		return nil, err
 	}
 	return c, nil

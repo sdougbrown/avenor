@@ -3927,12 +3927,17 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		if failErr != nil {
 			s.reportLifecycleError(child, failErr)
 		}
+		var unavailable *runtime.MessagingUnavailableError
+		if errors.As(err, &unavailable) {
+			return childAttemptResult{exitCode: 1, stopReason: runtime.MessagingUnavailableStopReason}
+		}
 		return childAttemptResult{exitCode: 1}
 	}
 	child.mu.Lock()
 	child.session = session
 	attemptProvider := child.provider
 	child.mu.Unlock()
+	s.recordMessagingOutcome(child, session)
 
 	turnCtx, cancelTurn := context.WithCancel(ctx)
 	child.mu.Lock()
@@ -4609,7 +4614,20 @@ func (s *Supervisor) installChildProvider(child *childRuntime, provider runtime.
 	child.providerLifecycle = lifecycle
 	child.mu.Unlock()
 	child.writeMu.Unlock()
+	s.recordMessagingOutcome(child, session)
 	return lifecycle
+}
+
+func (s *Supervisor) recordMessagingOutcome(child *childRuntime, session runtime.Session) {
+	child.mu.Lock()
+	if session.MessagingOn != nil {
+		child.messagingOn = *session.MessagingOn
+	}
+	child.session.MessagingWarning = ""
+	child.mu.Unlock()
+	if session.MessagingWarning != "" {
+		s.emitChildError(child, "messaging unavailable: "+session.MessagingWarning, "warning")
+	}
 }
 
 func (s *Supervisor) ensureChildProviderLifecycle(child *childRuntime) *permissionProviderLifecycle {

@@ -1,5 +1,14 @@
 package runtime
 
+// MessagingUnavailableError reports that an explicit messaging request cannot be met.
+type MessagingUnavailableError struct{ Reason string }
+
+func (e *MessagingUnavailableError) Error() string {
+	return e.Reason
+}
+
+const MessagingUnavailableStopReason = "messaging_unavailable"
+
 const SessionIDConflictStopReason = "session_id_conflict"
 
 // ToolDeniedStopReason classifies a turn the backend ended with a clean
@@ -21,7 +30,7 @@ const DegenerateReasoningStreamStopReason = "degenerate_reasoning_stream"
 // retries; an exhausted quota needs a fallback model or a later attempt, not
 // another call in the same run.
 func IsRetryableFailure(exitCode int, stopReason string) bool {
-	if stopReason == SessionIDConflictStopReason {
+	if stopReason == SessionIDConflictStopReason || stopReason == MessagingUnavailableStopReason {
 		return false
 	}
 	return exitCode == 1 || stopReason == RateLimitedStopReason

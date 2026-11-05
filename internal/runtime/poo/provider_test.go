@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,7 +25,10 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/backendlaunch"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 	avruntime "github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/poo/wire/protocol"
 )
 
@@ -99,6 +103,7 @@ type fakeEndpoint struct {
 	turns    []scriptedTurn
 	index    int
 	requests []map[string]any
+	respond  func(map[string]any) (scriptedTurn, bool)
 }
 
 func newFakeEndpoint(t *testing.T, turns ...scriptedTurn) *fakeEndpoint {
@@ -117,6 +122,11 @@ func (e *fakeEndpoint) serve(w http.ResponseWriter, r *http.Request) {
 	e.mu.Lock()
 	e.requests = append(e.requests, decoded)
 	turn := e.nextLocked()
+	if e.respond != nil {
+		if response, ok := e.respond(decoded); ok {
+			turn = response
+		}
+	}
 	e.mu.Unlock()
 
 	if turn.Delay > 0 {
@@ -305,6 +315,312 @@ func (f pooFixture) startOptions(t *testing.T) avruntime.StartOptions {
 			Args:     []string{"serve"},
 			Settings: f.settings,
 		},
+	}
+}
+
+func setupRealPooMessaging(t *testing.T, stateHome, feedsPath, registryPath, runID string) (*broker.Broker, string) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("POO_FEEDS_PATH", feedsPath)
+	t.Setenv("POO_CLI_REGISTRY_PATH", registryPath)
+	if runID == "" {
+		return nil, ""
+	}
+	avenor := filepath.Join(t.TempDir(), "avenor")
+	cmd := exec.Command("go", "build", "-o", avenor, "../../../cmd/avenor")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build avenor: %v\n%s", err, out)
+	}
+	old := avenorExecutable
+	avenorExecutable = func() (string, error) { return avenor, nil }
+	t.Cleanup(func() { avenorExecutable = old })
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	token, ok, err := b.EnsureRun(runID, "")
+	if err != nil || !ok {
+		t.Fatalf("EnsureRun: %v %v", ok, err)
+	}
+	return b, token
+}
+
+func TestMessagingWakeRealPoo(t *testing.T) {
+	b, token := setupRealPooMessaging(t, t.TempDir(), "", "", "child")
+	if _, _, err := b.EnsureRun("supervisor", ""); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "done"})
+	fixture := newPooFixture(t, endpoint)
+	opts := fixture.startOptions(t)
+	opts.MessagingOn, opts.Broker, opts.RuntimeID, opts.BrokerToken = true, b, "child", token
+	provider, session, log, _ := startProvider(t, opts)
+	if session.MessagingOn == nil || !*session.MessagingOn {
+		t.Fatal("messaging did not take")
+	}
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "initial"))
+	log.waitForCount(t, "session.end", 1, 10*time.Second)
+	if err := b.SendTo("supervisor", "child", "agent_message", json.RawMessage(`{"id":"wake-id","message":"wake-marker","expects_reply":false}`), "wake-id"); err != nil {
+		t.Fatal(err)
+	}
+	log.waitForCount(t, "session.end", 2, 30*time.Second)
+	found := false
+	for _, text := range endpoint.promptTexts() {
+		if strings.Contains(text, `<feed name="avenor-inbox"`) && strings.Contains(text, "wake-marker") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("wake input missing: %#v", endpoint.promptTexts())
+	}
+	if _, err := provider.Resume(context.Background(), session.SessionID); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "follow-up"))
+}
+
+func TestMessagingAskRealPoo(t *testing.T) {
+	b, childToken := setupRealPooMessaging(t, t.TempDir(), "", "", "child")
+	parentToken, _, err := b.EnsureRun("supervisor", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "supervisor", Token: parentToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+	pre, err := tr.Preflight(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := newFakeEndpoint(t, scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_cli", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "tell", "target": "supervisor", "message": "child-tell-marker"}}}}}, scriptedTurn{Text: "done"})
+	var replies int
+	idPattern := regexp.MustCompile(`"reply_to": "([^"]+)"`)
+	endpoint.respond = func(body map[string]any) (scriptedTurn, bool) {
+		if replies >= 2 {
+			return scriptedTurn{}, false
+		}
+		messages, _ := body["messages"].([]any)
+		for _, raw := range messages {
+			m, _ := raw.(map[string]any)
+			text, _ := m["content"].(string)
+			if m["role"] != "user" || !strings.Contains(text, `<feed name="avenor-inbox"`) {
+				continue
+			}
+			match := idPattern.FindStringSubmatch(text)
+			if len(match) != 2 {
+				continue
+			}
+			replies++
+			return scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_cli", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "reply", "reply_to": match[1], "message": "answer"}}}}}, true
+		}
+		return scriptedTurn{}, false
+	}
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": map[string]any{"unmatched": "allow"}})
+	opts := fixture.startOptions(t)
+	opts.MessagingOn, opts.Broker, opts.RuntimeID, opts.BrokerToken = true, b, "child", childToken
+	provider, session, log, _ := startProvider(t, opts)
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "initial"))
+	log.waitForCount(t, "session.end", 1, 10*time.Second)
+	received, err := tr.Receive(t.Context(), messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "supervisor"}, Generation: pre.Generation, Timeout: 10 * time.Second})
+	if err != nil || len(received.Messages) != 1 || received.Messages[0].FromRunID != "child" || !strings.Contains(string(received.Messages[0].Payload), "child-tell-marker") {
+		t.Fatalf("child tell: %+v %v", received, err)
+	}
+	id, err := messaging.NewMsgID(time.Now(), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"id": id, "message": "question", "expects_reply": true})
+	if _, err := tr.Send(t.Context(), messaging.SendRequest{From: messaging.Identity{RunID: "supervisor"}, To: messaging.Identity{RunID: "child"}, MessageID: id, Generation: pre.Generation, Body: string(payload)}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := tr.Wait(t.Context(), messaging.WaitRequest{Sender: messaging.Identity{RunID: "supervisor"}, MessageID: id, Generation: pre.Generation, Timeout: 30 * time.Second})
+	if err != nil || result.Outcome != messaging.OutcomeReplied || !strings.Contains(string(result.Reply.Payload), "answer") {
+		t.Fatalf("wait: %+v %v", result, err)
+	}
+	log.waitForCount(t, "session.end", 2, 30*time.Second)
+	if !endpoint.sawToolText("edge-absent") {
+		t.Fatalf("second reply result missing: %#v", endpoint.toolTexts())
+	}
+}
+
+func TestMessagingOffRealPoo(t *testing.T) {
+	setupRealPooMessaging(t, t.TempDir(), "", "", "")
+	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "done"})
+	fixture := newPooFixture(t, endpoint)
+	opts := fixture.startOptions(t)
+	opts.MessagingOn = false
+	provider, session, _, _ := startProvider(t, opts)
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "initial"))
+	raw, rpcErr, err := provider.client.call(t.Context(), protocol.MethodSessionGet, protocol.GetParams{SessionID: session.SessionID})
+	if err != nil || rpcErr != nil {
+		t.Fatalf("session/get: %v %v", err, rpcErr)
+	}
+	var result protocol.GetResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range result.Jobs {
+		if job.JobID == "feed:avenor-inbox" {
+			t.Fatalf("unexpected inbox: %+v", result.Jobs)
+		}
+	}
+	if strings.Contains(result.Prompt.Text, "avenor_message") {
+		t.Fatalf("unexpected registry entry: %s", result.Prompt.Text)
+	}
+	requests, err := json.Marshal(endpoint.requestBodies())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(requests, []byte("avenor_message")) {
+		t.Fatalf("model saw messaging entry: %s", requests)
+	}
+}
+
+func TestMessagingOutcomeRealPoo(t *testing.T) {
+	b, token := setupRealPooMessaging(t, t.TempDir(), "", "", "rt_child")
+	for _, tc := range []struct {
+		profile string
+		want    bool
+	}{{"code", true}, {"search", false}} {
+		t.Run(tc.profile, func(t *testing.T) {
+			f := newPooFixture(t, newFakeEndpoint(t))
+			opts := f.startOptions(t)
+			opts.Agent, opts.MessagingOn, opts.Broker, opts.RuntimeID, opts.BrokerToken = tc.profile, true, b, "rt_child", token
+			p := NewWithOptions(opts)
+			t.Cleanup(func() { _ = p.Close() })
+			s, err := p.Start(context.Background(), avruntime.StartOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.MessagingOn == nil || *s.MessagingOn != tc.want {
+				t.Fatalf("messaging outcome = %v, want %v", s.MessagingOn, tc.want)
+			}
+			if p.opts.MessagingOn != tc.want {
+				t.Fatalf("effective options = %v", p.opts.MessagingOn)
+			}
+			for _, key := range []string{"AVENOR_BROKER_URL", "AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN", "POO_FEEDS_PATH", "POO_CLI_REGISTRY_PATH"} {
+				found := false
+				for _, entry := range p.client.proc.Env {
+					if strings.HasPrefix(entry, key+"=") && strings.TrimPrefix(entry, key+"=") != "" {
+						found = true
+					}
+				}
+				if found != tc.want {
+					t.Errorf("%s present = %v, want %v", key, found, tc.want)
+				}
+			}
+			if tc.want {
+				raw, rpcErr, err := p.client.call(context.Background(), protocol.MethodSessionGet, protocol.GetParams{SessionID: s.SessionID})
+				if err != nil || rpcErr != nil {
+					t.Fatalf("session/get: %v %v", err, rpcErr)
+				}
+				var result protocol.GetResult
+				if err := json.Unmarshal(raw, &result); err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, job := range result.Jobs {
+					if job.JobID == "feed:avenor-inbox" {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("inbox job missing: %+v", result.Jobs)
+				}
+			}
+		})
+	}
+}
+
+func TestMessagingTakeCheck(t *testing.T) {
+	oldInterval, oldLimit := messagingPollInterval, messagingPollLimit
+	messagingPollInterval, messagingPollLimit = 20*time.Millisecond, 180*time.Millisecond
+	t.Cleanup(func() { messagingPollInterval, messagingPollLimit = oldInterval, oldLimit })
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	token, _, err := b.EnsureRun("take", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := helperStartOptions()
+	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "take", token, true
+	info := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_cli"}}}
+	baseline := time.Now()
+	t.Setenv(helperEnv, "messaging-poll")
+	c, err := startClient(context.Background(), opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkMessaging(context.Background(), opts, info, baseline); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.shutdown()
+	baseline = time.Now()
+	for _, tc := range []struct {
+		name    string
+		opts    avruntime.StartOptions
+		info    protocol.SessionInfo
+		reason  string
+		failure bool
+	}{
+		{"old poll", opts, info, "no poll", true},
+		{"no poll", func() avruntime.StartOptions { o := opts; o.RuntimeID = "empty"; return o }(), info, "no poll", true},
+		{"no tool", opts, protocol.SessionInfo{}, "call_cli", true},
+		{"missing record", func() avruntime.StartOptions { o := opts; o.RuntimeID = "missing"; return o }(), info, "no run record", false},
+		{"no broker", func() avruntime.StartOptions { o := opts; o.Broker = nil; return o }(), info, "not provisioned", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "no poll" {
+				if _, _, err := b.EnsureRun("empty", ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			started := time.Now()
+			err := checkMessaging(context.Background(), tc.opts, tc.info, baseline)
+			var failure *messagingFailure
+			if err == nil || !strings.Contains(err.Error(), tc.reason) || errors.As(err, &failure) != tc.failure {
+				t.Fatalf("error = %v", err)
+			}
+			if strings.Contains(tc.reason, "no poll") && time.Since(started) < messagingPollLimit {
+				t.Fatal("check returned early")
+			}
+		})
+	}
+}
+
+func TestMessagingMissingRunIsNotFallback(t *testing.T) {
+	b := broker.New(broker.MakeToken())
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	opts := helperStartOptions()
+	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "missing", "token", true
+	p := NewWithOptions(opts)
+	defer p.Close()
+	on := true
+	for _, tc := range []struct {
+		name      string
+		messaging *bool
+	}{
+		{"default", nil},
+		{"explicit", &on},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The resolved messaging state accompanies an explicit request.
+			_, err := p.Start(context.Background(), avruntime.StartOptions{Messaging: tc.messaging, MessagingOn: true})
+			var unavailable *avruntime.MessagingUnavailableError
+			if err == nil || !strings.Contains(err.Error(), "broker has no run record for missing") || errors.As(err, &unavailable) {
+				t.Fatalf("error = %v, want provisioning error without fallback", err)
+			}
+		})
 	}
 }
 
@@ -1799,6 +2115,15 @@ func runHelperServer(mode string) int {
 	}
 	runPrompts := 0
 	inspectWaits := 0
+	if mode == "messaging-poll" {
+		go func() {
+			body, _ := json.Marshal(map[string]string{"run_id": os.Getenv("AVENOR_RUN_ID"), "token": os.Getenv("AVENOR_BROKER_TOKEN")})
+			resp, err := http.Post(os.Getenv("AVENOR_BROKER_URL")+"/poll-control", "application/json", bytes.NewReader(body))
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+	}
 	write := func(value any) {
 		encoded, err := json.Marshal(value)
 		if err != nil {

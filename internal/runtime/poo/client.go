@@ -68,6 +68,7 @@ type client struct {
 	pending     map[string]chan rpcReply
 	asks        map[string]permissionAsk
 	subs        map[string][]chan events.Event
+	subscribed  map[string]bool
 	held        map[string][]events.Event
 	holds       map[string]int
 	submissions map[string][]events.Event
@@ -91,12 +92,6 @@ type permissionAsk struct {
 	id        json.RawMessage
 }
 
-// messagingReady holds broker credentials back from every poo child until the
-// backend writes the feed and cli-registry manifests that use them. A child
-// given credentials without those manifests could receive asks it has no tool to
-// answer.
-var messagingReady = false
-
 // startClient spawns the resolved binary and returns the connected client. The
 // command and its args are the recorded launch identity, so the process is
 // exactly the one the session owns.
@@ -107,10 +102,18 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 	proc := launcher.Command(ctx, opts.LaunchWrapper, opts.Launch.Command, LaunchArgs(opts.Launch)...)
 	proc.Dir = opts.Dir
 	// The child receives this launch's identity and none of the parent's.
-	// Broker credentials require messaging and a ready messaging surface.
+	// Broker credentials require messaging.
 	proc.Env = runtime.LaunchEnv(proc.Environ(), opts.Provenance)
-	if opts.MessagingOn && messagingReady {
-		proc.Env = append(proc.Env, runtime.ProvisionPeer(opts).RunEnv()...)
+	if opts.MessagingOn {
+		peer := runtime.ProvisionPeer(opts)
+		if peer != nil {
+			paths, err := messagingManifests(peer.URL, peer.RunID)
+			if err != nil {
+				return nil, &messagingFailure{reason: fmt.Sprintf("poo messaging manifests: %v", err)}
+			}
+			proc.Env = append(proc.Env, peer.RunEnv()...)
+			proc.Env = append(proc.Env, runtime.EnvPooFeedsPath+"="+paths.feeds, runtime.EnvPooCLIRegistryPath+"="+paths.registry)
+		}
 	}
 
 	stdin, err := proc.StdinPipe()
@@ -148,6 +151,7 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 		pending:     map[string]chan rpcReply{},
 		asks:        map[string]permissionAsk{},
 		subs:        map[string][]chan events.Event{},
+		subscribed:  map[string]bool{},
 		held:        map[string][]events.Event{},
 		holds:       map[string]int{},
 		submissions: map[string][]events.Event{},
@@ -644,8 +648,10 @@ func (c *client) answerPermission(sessionID, requestID string, response runtime.
 	return nil
 }
 
-// deliver fans an event out to the session's subscribers, or holds it until a
-// subscriber attaches or the prompt's acceptance is recorded.
+// deliver fans an event out to the session's subscribers. It holds events
+// until the first subscriber attaches or the prompt's acceptance is recorded;
+// events between subscriptions belong to an unattended run and are not replayed,
+// except permission requests and their answers.
 func (c *client) deliver(ev events.Event) {
 	c.mu.Lock()
 	if c.subs == nil {
@@ -656,7 +662,9 @@ func (c *client) deliver(ev events.Event) {
 	// names it, and a subscriber attaches only after Start returns: both are
 	// held here and flushed when someone is listening.
 	if c.holds[ev.SessionID] > 0 || len(c.subs[ev.SessionID]) == 0 {
-		c.held[ev.SessionID] = appendBounded(c.held[ev.SessionID], ev)
+		if c.holds[ev.SessionID] > 0 || !c.subscribed[ev.SessionID] || ev.Event == "permission.request" || ev.Event == "avenor.permission.answered" {
+			c.held[ev.SessionID] = appendBounded(c.held[ev.SessionID], ev)
+		}
 		c.mu.Unlock()
 		return
 	}
@@ -697,6 +705,10 @@ func (c *client) subscribe(sessionID string, ch chan events.Event) {
 		return
 	}
 	c.subs[sessionID] = append(c.subs[sessionID], ch)
+	if c.subscribed == nil {
+		c.subscribed = make(map[string]bool)
+	}
+	c.subscribed[sessionID] = true
 	// The events held before this subscriber attached are published before the
 	// lock is released: a concurrent deliver that sees the subscriber therefore
 	// publishes a newer event after the held ones, never ahead of them.

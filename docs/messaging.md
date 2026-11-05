@@ -69,6 +69,16 @@ spawns start a separate supervisor whose broker has no reader for this session.
 These children need an address supplied in the brief; the extension does not
 forward their asks to the parent.
 
+## Poo feed surface
+
+`SurfaceFeed` is the broker surface used by `avenor feed broker` and `avenor message`. For an enabled poo child, Avenor starts the broker feed as `avenor-inbox`; poo presents incoming messages to the model as `<feed name="avenor-inbox" …>` inputs. The feed drains the broker queue at most once and records incoming asks before delivering them. An ask's input names its message ID and instructs the model to answer through `call_cli`:
+
+```json
+{"name":"avenor_message","args":{"action":"reply","reply_to":"MESSAGE_ID","message":"answer"}}
+```
+
+The `avenor_message` registry entry invokes `avenor message` as the child. See [poo messaging](backends.md#messaging) for the switch, launch checks and credential visibility.
+
 ## Child CLI messages
 
 A child with broker credentials can use `avenor message --action tell`,

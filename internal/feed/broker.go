@@ -21,6 +21,11 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
+// DefaultLockDir returns the feed lock directory under stateHome.
+func DefaultLockDir(stateHome string) string {
+	return filepath.Join(stateHome, "feed-locks")
+}
+
 // Broker holds the credentials and output for one feed consumer.
 type Broker struct {
 	// RunID identifies the receiving run.

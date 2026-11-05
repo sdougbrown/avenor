@@ -31,6 +31,49 @@ import (
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
+func TestProviderMessagingRetryOutcome(t *testing.T) {
+	sup := newTestSupervisor(t, Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := sup.control.SubscribeEvents(ctx)
+	child := &childRuntime{id: "rt_retry", messagingOn: true}
+	off := false
+	child.session = runtime.Session{SessionID: "retry", MessagingOn: &off, MessagingWarning: "fallback"}
+	sup.recordMessagingOutcome(child, child.session)
+	if child.messagingOn || child.session.MessagingWarning != "" {
+		t.Fatalf("retry outcome not consumed: %+v", child.session)
+	}
+	sup.recordMessagingOutcome(child, child.session)
+	select {
+	case ev := <-stream:
+		if ev.Event != "avenor.error" || ev.Fields["source"] != "warning" || ev.Fields["message"] != "messaging unavailable: fallback" {
+			t.Fatalf("warning event = %+v", ev)
+		}
+	default:
+		t.Fatal("missing warning event")
+	}
+	select {
+	case ev := <-stream:
+		t.Fatalf("duplicate event = %+v", ev)
+	default:
+	}
+}
+
+func TestProviderMessagingOutcome(t *testing.T) {
+	sup := newTestSupervisor(t, Config{})
+	child := &childRuntime{messagingOn: true}
+	provider := &permRecordingProvider{}
+	sup.installChildProvider(child, provider, runtime.Session{})
+	if !child.messagingOn {
+		t.Fatal("provider without an outcome changed messaging")
+	}
+	off := false
+	sup.installChildProvider(child, provider, runtime.Session{MessagingOn: &off})
+	if child.messagingOn {
+		t.Fatal("provider's off outcome was not recorded")
+	}
+}
+
 func TestNewSupervisor(t *testing.T) {
 	t.Parallel()
 	sup := newTestSupervisor(t, Config{

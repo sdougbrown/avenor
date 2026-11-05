@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -39,7 +38,7 @@ func handleFeedBroker(ctx context.Context, inv clicontract.Invocation, stderr io
 	if brokerURL == "" || runID == "" || token == "" {
 		return nil, usageErrorf("avenor feed broker: broker URL, run id, and token are required")
 	}
-	lockDir := orDefault(inv.Flags["lock-dir"], filepath.Join(appdir.StateHome(), "feed-locks"))
+	lockDir := orDefault(inv.Flags["lock-dir"], feed.DefaultLockDir(appdir.StateHome()))
 	signal.Ignore(syscall.SIGPIPE)
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

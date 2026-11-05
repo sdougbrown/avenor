@@ -137,11 +137,15 @@ type RunState struct {
 	peerRetiredAt time.Time
 	peerPolling   bool
 	// peerActivity lets admitted sends finish before retirement removes their edges.
-	peerActivity        sync.RWMutex
-	ControlQueue        []*ControlMessage
-	pollDeliveries      int
-	RegisteredAt        time.Time
-	LastSeen            time.Time
+	peerActivity   sync.RWMutex
+	ControlQueue   []*ControlMessage
+	pollDeliveries int
+	RegisteredAt   time.Time
+	LastSeen       time.Time
+	// LastPolled records every authenticated poll, regardless of caller. The
+	// take check needs this separate from LastSeen, which tracks peer leases.
+	// It is guarded by Mu.
+	LastPolled          time.Time
 	Reports             []Report
 	Finishes            []Finish
 	Replies             []Reply
@@ -1076,6 +1080,7 @@ func (b *Broker) handlePollControl(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st.Mu.Lock()
+	st.LastPolled = time.Now()
 	if st.peer {
 		if code := st.peerUnavailableLocked(time.Now()); code != "" {
 			st.Mu.Unlock()
@@ -2356,6 +2361,20 @@ func (b *Broker) GetRun(runID string) *RunState {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.runs[runID]
+}
+
+// LastPolled returns the last authenticated control poll and whether the run exists.
+func (b *Broker) LastPolled(runID string) (time.Time, bool) {
+	if b == nil {
+		return time.Time{}, false
+	}
+	st := b.GetRun(runID)
+	if st == nil {
+		return time.Time{}, false
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	return st.LastPolled, true
 }
 
 // CreateRun registers a new run under name, the display label its peers see.

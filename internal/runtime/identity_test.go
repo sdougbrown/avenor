@@ -81,6 +81,11 @@ func TestScrubIdentityEnv(t *testing.T) {
 			want: []string{"PATH=/usr/bin"},
 		},
 		{
+			name:    "inherited poo manifests are scrubbed",
+			environ: []string{"POO_FEEDS_PATH=/parent/feeds", "POO_CLI_REGISTRY_PATH=/parent/registry", "PATH=/usr/bin"},
+			want:    []string{"PATH=/usr/bin"},
+		},
+		{
 			name:    "nil environ",
 			environ: nil,
 			want:    nil,

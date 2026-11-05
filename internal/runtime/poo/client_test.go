@@ -154,6 +154,22 @@ func TestReleaseKeepsTheSubmittedEventsAheadOfTheHeldOnes(t *testing.T) {
 	}
 }
 
+func TestParkedPermissionEventsSurviveSubscriptionGap(t *testing.T) {
+	c := newBareClient()
+	c.subscribed = map[string]bool{}
+	first := make(chan events.Event, 4)
+	c.subscribe("ses_1", first)
+	c.unsubscribe("ses_1", first)
+	for _, name := range []string{"agent.message", "permission.request", "avenor.permission.answered", "session.end"} {
+		c.deliver(namedEvent(name))
+	}
+	next := make(chan events.Event, 4)
+	c.subscribe("ses_1", next)
+	if len(next) != 2 || (<-next).Event != "permission.request" || (<-next).Event != "avenor.permission.answered" {
+		t.Fatal("parked permission events were not replayed in order")
+	}
+}
+
 // TestHeldEventsKeepOnlyTheNewest proves the hold buffer a session queues
 // through is bounded: past heldEventLimit the oldest event is dropped, so a
 // session whose subscriber never attaches cannot grow the buffer without limit

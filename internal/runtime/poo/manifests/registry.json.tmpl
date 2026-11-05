@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "tools": {
+    "avenor_message": {
+      "description": "Send, ask, reply to or withdraw an Avenor message",
+      "command": [{{json .Executable}}, "message", {{json .AsksFlag}}],
+      "env": {"AVENOR_BROKER_URL": "env:AVENOR_BROKER_URL", "AVENOR_RUN_ID": "env:AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN": "env:AVENOR_BROKER_TOKEN"},
+      "timeout": {{json .Timeout}},
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          {{/* resume is owner-only; control_reply has no supported surface. */}}
+          "action": {"type": "string", "enum": ["tell", "ask", "reply", "withdraw"]},
+          "target": {"type": "string"},
+          "message": {"type": "string"},
+          "reply_to": {"type": "string"},
+          "message_id": {"type": "string"},
+          "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 600000}
+        },
+        "required": ["action"],
+        "additionalProperties": false
+      },
+      "bindings": [
+        {"property": "action", "style": "equals", "flag": "--action"},
+        {"property": "target", "style": "equals", "flag": "--target"},
+        {"property": "message", "style": "equals", "flag": "--message"},
+        {"property": "reply_to", "style": "equals", "flag": "--reply-to"},
+        {"property": "message_id", "style": "equals", "flag": "--message-id"},
+        {"property": "timeout_ms", "style": "equals", "flag": "--timeout-ms"}
+      ],
+      "output": {"mode": "raw"}
+    }
+  }
+}
