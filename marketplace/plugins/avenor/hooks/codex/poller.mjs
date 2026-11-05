@@ -93,8 +93,8 @@ async function deliver(id, sessionDir, ask) {
 }
 
 /** One file per pending ask, written only while the poller owns the delivery.
- * The MCP server claims it by rename before answering, so two processes never
- * both believe the same ask is theirs. */
+ * The MCP server claims it by linking it to `<id>.claimed` before answering.
+ * The link fails once a claim exists, so an ask is answered at most once. */
 function rememberAsk(sessionDir, ask) {
   if (!MESSAGE_ID.test(ask.messageId)) return;
   const dir = asksDirFor(undefined, path.basename(sessionDir));

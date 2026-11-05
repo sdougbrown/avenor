@@ -8,9 +8,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/childmessaging"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
@@ -27,8 +27,6 @@ const codexPeerFileArg = "codex_peer_file"
 
 // codexPeerRecordVersion is the only record shape this reader understands.
 const codexPeerRecordVersion = 1
-
-var codexAskID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // codexPeerRecord is the identity the session-start hook writes once per Codex
 // thread: the broker run the thread acts as, its own credential, and the broker
@@ -112,8 +110,9 @@ func loopbackHost(host string) bool {
 
 // provider builds the shared broker-authenticated provider over this peer's own
 // credentials, so tell, ask, reply, withdraw, peers and last all speak as the
-// Codex session rather than as the supervisor.
-func (p *codexPeer) provider(ctx context.Context) (*codexPeerProvider, error) {
+// Codex session rather than as the supervisor. A reply claims the ask record the
+// poller wrote under the peer's asks directory.
+func (p *codexPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
 	shared, err := childmessaging.NewMessageProvider(messaging.SurfaceMCP, childmessaging.Options{
 		RunID:     p.record.RunID,
 		Token:     p.record.RunToken,
@@ -126,56 +125,7 @@ func (p *codexPeer) provider(ctx context.Context) (*codexPeerProvider, error) {
 		_ = shared.Close()
 		return nil, err
 	}
-	return &codexPeerProvider{MessageProvider: shared, asksDir: filepath.Join(p.dir, "asks")}, nil
-}
-
-// codexPeerProvider adds the inbound-ask handoff to the shared child provider.
-// The poller records each ask it delivered; the router asks this provider to
-// claim one before it answers, so an ask answered here cannot also be answered
-// by a second consumer.
-type codexPeerProvider struct {
-	*childmessaging.MessageProvider
-	asksDir string
-}
-
-// ClaimAsk takes ownership of one pending ask by renaming its record. A rename
-// is the handoff: exactly one process can win it, and the loser reports the
-// asker as unknown, which the router renders as edge-absent.
-func (p *codexPeerProvider) ClaimAsk(messageID string) (string, bool) {
-	if p.asksDir == "" || !codexAskID.MatchString(messageID) {
-		return "", false
-	}
-	src := filepath.Join(p.asksDir, messageID+".json")
-	dst := filepath.Join(p.asksDir, messageID+".claimed")
-	if err := os.Rename(src, dst); err != nil {
-		return "", false
-	}
-	raw, err := os.ReadFile(dst)
-	if err != nil {
-		return "", false
-	}
-	var ask struct {
-		AskerRunID string `json:"asker_run_id"`
-	}
-	if err := json.Unmarshal(raw, &ask); err != nil || ask.AskerRunID == "" {
-		return "", false
-	}
-	return ask.AskerRunID, true
-}
-
-// RestoreAsk renames a claimed ask back after a failed reply, so the model's
-// retry still finds the edge. The record already holds the asker the poller
-// wrote, so one atomic rename restores it: no write sits between the pair for a
-// concurrent claim to lose, and a caller-supplied asker is never trusted.
-func (p *codexPeerProvider) RestoreAsk(messageID, askerRunID string) {
-	if p.asksDir == "" || !codexAskID.MatchString(messageID) {
-		return
-	}
-	claimed := filepath.Join(p.asksDir, messageID+".claimed")
-	if _, err := os.Stat(claimed); err != nil {
-		return
-	}
-	_ = os.Rename(claimed, filepath.Join(p.asksDir, messageID+".json"))
+	return &askclaim.Provider{MessageProvider: shared, Dir: filepath.Join(p.dir, "asks")}, nil
 }
 
 // splitCodexPeerFile removes the hook's binding from the router's input. The

@@ -143,29 +143,6 @@ func TestMessageSurfaceRejectsAStaleCodexRecord(t *testing.T) {
 	}
 }
 
-func TestAskClaimIsASingleHandoff(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "asks")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "av1.ask.json"), []byte(`{"message_id":"av1.ask","asker_run_id":"rt_asker"}`), 0o600); err != nil {
-		t.Fatalf("write ask: %v", err)
-	}
-	provider := &codexPeerProvider{asksDir: dir}
-
-	asker, ok := provider.ClaimAsk("av1.ask")
-	if !ok || asker != "rt_asker" {
-		t.Fatalf("claim = (%q,%v), want (rt_asker,true)", asker, ok)
-	}
-	if _, ok := provider.ClaimAsk("av1.ask"); ok {
-		t.Fatal("one ask was claimed twice")
-	}
-	provider.RestoreAsk("av1.ask", "rt_asker")
-	if asker, ok := provider.ClaimAsk("av1.ask"); !ok || asker != "rt_asker" {
-		t.Fatalf("after restore claim = (%q,%v), want (rt_asker,true)", asker, ok)
-	}
-}
-
 func TestResumeIgnoresACodexPeerBinding(t *testing.T) {
 	file := writeCodexPeerRecord(t, "http://127.0.0.1:9", "rt_codex", "tok")
 	server := &Server{
