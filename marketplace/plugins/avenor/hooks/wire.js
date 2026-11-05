@@ -94,12 +94,12 @@ export function buildAgentMessage(fields) {
 }
 
 /**
- * A queued control row parsed to the peer-message facts. `message_id` is
- * empty for a tell without one (SendBody carries none); `expectsReply` mirrors
- * the payload's expects_reply, and it alone decides whether the frame invites
- * a reply, because only an ask has an edge this surface answers on. Null when
- * the row is not a readable peer message: control rows (continue, cancel, …)
- * are not.
+ * A queued control row parsed to the peer-message facts. `message_id` is the
+ * payload's id when it carries one, else the broker's envelope id, and empty
+ * only when neither does; `expectsReply` mirrors the payload's expects_reply,
+ * and it alone decides whether the frame invites a reply, because only an ask
+ * has an edge this surface answers on. Null when the row is not a readable
+ * peer message: control rows (continue, cancel, …) are not.
  */
 export function parseControlMessage(msg) {
   const entry = msg === null || typeof msg !== "object" ? {} : msg

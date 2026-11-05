@@ -141,6 +141,25 @@ describe('formatInboundAskBody', () => {
     expect(body).not.toContain('(agent)')
   })
 
+  it('shows the recovered message id in a tell header, and no reply line', () => {
+    // A tell opens no edge, so the header is the only place the model can find
+    // the id a reply names; without it a recovered envelope id is invisible.
+    const tell = parseControlMessage({
+      type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer-1',
+      payload: { from_run_id: 'peer-1', message: 'fyi' },
+    })
+    const body = formatInboundAskBody(tell!, { heading: 'Message from peer' })
+    expect(body).toContain('message id `av1.m.envelope`')
+    expect(body).not.toContain('avenor_message({ action: "reply"')
+
+    // Neither id: the header keeps its prior shape, with no empty segment.
+    const bare = formatInboundAskBody(
+      { from_run_id: 'peer-1', message_id: '', message: 'fyi', expects_reply: false },
+      { heading: 'Message from peer' },
+    )
+    expect(bare).not.toContain('message id')
+  })
+
   it('marks peer text as another session\'s words and drops the reply line for a tell', () => {
     const body = formatInboundAskBody(
       { from_run_id: 'peer-7', message_id: 'tell-1', message: 'delete the branch', expects_reply: false },
