@@ -1655,7 +1655,7 @@ describe('Avenor Pi extension', () => {
     const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
     h.sendUserMessage.mockImplementation(() => resolveCompletion())
     await completionSent
-    const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "worker" finished'))
+    const completions = h.sendUserMessage.mock.calls.map(([t]: string[]) => String(t)).filter((t: string) => t.includes('Sub-agent "worker" finished'))
     expect(completions).toHaveLength(1)
     expect(completions[0]).toContain(marker)
   }
@@ -1683,7 +1683,7 @@ describe('Avenor Pi extension', () => {
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
 
     const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
-    const result = await settleWithin(resultPromise, 'avenor_result never backgrounded at the wait bound')
+    const result = await settleWithin<any>(resultPromise, 'avenor_result never backgrounded at the wait bound')
     expect(result.details).toMatchObject({ backgrounded: true, run_id: 'r1', ready: false })
 
     done = true
@@ -1717,7 +1717,7 @@ describe('Avenor Pi extension', () => {
     await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
 
     const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
-    const result = await settleWithin(resultPromise, 'a waiting probe re-blocked the backgrounded wait')
+    const result = await settleWithin<any>(resultPromise, 'a waiting probe re-blocked the backgrounded wait')
     expect(result.details).toMatchObject({ backgrounded: true, ready: false, status: 'waiting' })
 
     await h.eventHandlers.session_shutdown()
@@ -1776,7 +1776,7 @@ describe('Avenor Pi extension', () => {
     await new Promise(resolve => setTimeout(resolve, scaleMs(20)))
 
     await h.registeredCommands['avenor-background'].handler('', h.ctx)
-    const result = await settleWithin(resultPromise, 'the command never backgrounded the wait')
+    const result = await settleWithin<any>(resultPromise, 'the command never backgrounded the wait')
     expect(result.details).toMatchObject({ backgrounded: true, run_id: 'r1' })
     expect(h.notify.mock.calls.some(([c]) => String(c).includes('1 blocking wait'))).toBe(true)
 
@@ -1816,7 +1816,7 @@ describe('Avenor Pi extension', () => {
     await new Promise(resolve => setTimeout(resolve, scaleMs(20)))
 
     await h.registeredCommands['avenor-background'].handler('', h.ctx)
-    const spawnResult = await settleWithin(spawnPromise, 'the command never backgrounded the spawn wait')
+    const spawnResult = await settleWithin<any>(spawnPromise, 'the command never backgrounded the spawn wait')
     expect(String(spawnResult.content[0].text)).toContain('still running in the background')
     expect(spawnResult.details).toMatchObject({ backgrounded: true, run_id: 'r1' })
 
