@@ -138,6 +138,7 @@ sessions_get() { # sessions_get <broker_url> <run_id> <token>
 }
 
 mint_msg_id() { # a versioned id: av1.<deadline-ms base36>.<16-byte hex>
+  # Format owner: internal/messaging/msgid.go (NewMsgID); change both together.
   python3 - <<'PY'
 import secrets, time
 deadline = int((time.time() + 600) * 1000)
