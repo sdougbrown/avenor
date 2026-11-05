@@ -80,6 +80,10 @@ func publishManifests(stateHome string, content manifestContent) (manifestPaths,
 		return true
 	}
 	if complete() {
+		now := time.Now()
+		if err := os.Chtimes(dest, now, now); err != nil {
+			return manifestPaths{}, err
+		}
 		if err := pruneManifests(root, dest); err != nil {
 			return manifestPaths{}, err
 		}
@@ -108,6 +112,10 @@ func publishManifests(stateHome string, content manifestContent) (manifestPaths,
 	if err := os.Rename(tmp, dest); err != nil {
 		if !complete() {
 			return manifestPaths{}, fmt.Errorf("publish poo manifests: %w", err)
+		}
+		now := time.Now()
+		if err := os.Chtimes(dest, now, now); err != nil {
+			return manifestPaths{}, err
 		}
 	}
 	if err := pruneManifests(root, dest); err != nil {

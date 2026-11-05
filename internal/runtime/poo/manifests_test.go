@@ -122,6 +122,12 @@ func TestPublishManifestsPrunesOldDigests(t *testing.T) {
 			t.Fatalf("kept digest %s: %v", dir, err)
 		}
 	}
+	if _, err := publishManifests(root, manifestContent{[]byte("another"), []byte("registry")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(current.feeds)); err != nil {
+		t.Fatalf("reused digest pruned: %v", err)
+	}
 }
 
 func TestPublishManifestsConcurrent(t *testing.T) {
