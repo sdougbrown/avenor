@@ -588,8 +588,8 @@ describe('sub-agent broker mode (integration)', () => {
   })
 
   it('delivers a late reply to a timed-out ask as an ordinary inbound message', async () => {
-    // The wait ended but the ask's edge stayed open, so the late answer rides
-    // the poll as a plain peer message: no reply instruction, no error result.
+    // A timeout leaves the edge open. Its late answer arrives as a plain peer
+    // message, without a reply instruction or error result.
     // Keep the reply unavailable until the ask has returned its timeout.
     const wait = Promise.withResolvers<Response>()
     const lateReply = {
