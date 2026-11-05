@@ -1692,6 +1692,37 @@ describe('Avenor Pi extension', () => {
     await h.eventHandlers.session_shutdown()
   })
 
+  it('gives the turn back when the backgrounded probe shows a pending permission', async () => {
+    const SOCK = '/tmp/background-waiting.sock'
+    const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
+      if (!args.runId) return { runs: [], count: 0 }
+      return {
+        run_id: 'r1',
+        label: 'worker',
+        status: 'waiting',
+        runtime_id: 'rt1',
+        pending_permission: { id: 'perm-1', description: 'approve the deploy', options: [{ option_id: 'allow_once', name: 'Allow', description: 'allow once' }] },
+      }
+    })
+
+    const h = await createMultiSupervisorHarness({
+      backgroundAfterMs: scaleMs(25),
+      statusTool,
+      spawnTool: mock(async () => ({ run_id: 'r1', label: 'worker', supervisor_id: SOCK, runtime_id: 'rt1' })),
+      // A redelivery on this resultTool would block forever: if the probe's
+      // waiting stop triggered one, the turn would never come back.
+      resultTool: hangUntilAborted(),
+    })
+
+    await h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: false }, undefined, undefined, h.ctx)
+
+    const resultPromise = h.registeredTools.avenor_result.execute('t2', { run_id: 'r1', supervisor_id: SOCK }, undefined, undefined, h.ctx)
+    const result = await settleWithin(resultPromise, 'a waiting probe re-blocked the backgrounded wait')
+    expect(result.details).toMatchObject({ backgrounded: true, ready: false, status: 'waiting' })
+
+    await h.eventHandlers.session_shutdown()
+  })
+
   it('respects an explicit timeout instead of backgrounding at the wait bound', async () => {
     const SOCK = '/tmp/timeout-bound.sock'
     const statusTool = mock(async (args: { runId?: string; supervisorId?: string } = {}) => {
@@ -3936,14 +3967,20 @@ describe('Avenor Pi extension', () => {
     expect(result.details).toMatchObject({
       run_id: 'ra',
       status: 'done',
-      ready: true,
+      // The fallback has no output in hand, so it must not claim ready:
+      // claiming it would drop the run's tracking and suppress delivery.
+      ready: false,
       interrupted_by: { run_id: 'rb', label: 'beta', status: 'done' },
     })
     expect(result.details).not.toHaveProperty('output')
 
-    // The delivered terminal fallback consumed the run: no auto-delivery.
+    // The run stays tracked with delivery armed: the completion arrives.
+    let resolveCompletion!: () => void
+    const completionSent = new Promise<void>(resolve => { resolveCompletion = resolve })
+    h.sendUserMessage.mockImplementation(() => resolveCompletion())
+    await completionSent
     const completions = h.sendUserMessage.mock.calls.map(([t]) => String(t)).filter(t => t.includes('Sub-agent "alpha" finished'))
-    expect(completions).toHaveLength(0)
+    expect(completions).toHaveLength(1)
 
     await h.eventHandlers.session_shutdown()
   })

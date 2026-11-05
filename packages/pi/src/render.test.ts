@@ -126,7 +126,7 @@ describe('Avenor Pi renderers', () => {
       'Result: worker — running',
       'Run: run-3',
       'The wait was backgrounded; the run keeps going and its completion is delivered automatically.',
-      'Guidance: Call avenor_result with run_id "run-3".',
+      'Guidance: The final result is delivered automatically; end your turn instead of re-polling.',
       'Final output: unavailable.',
     ].join('\n'))
   })

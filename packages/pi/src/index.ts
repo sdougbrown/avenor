@@ -482,7 +482,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function describeStoppingPoint(stop: StoppingPoint): string {
       if (stop.status === 'waiting') return 'reached a permission request'
       if (stop.status === 'asking') return 'asked a question for you'
-      if (stop.status === 'backgrounded') return 'was moved to the background'
       return `reached ${stop.status}`
     }
 
@@ -599,6 +598,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       params: { run_id: string; supervisor_id?: string; wait?: boolean; timeout?: string; signal?: AbortSignal },
       stop: StoppingPoint,
       tracked: TrackedRun | undefined,
+      /** A pending permission is a stopping point for a sibling interrupt,
+       * redelivered inline. A backgrounded wait must give the turn back even
+       * when the probe shows the run waiting, so it passes false. */
+      options: { redeliverWaiting?: boolean } = {},
     ): Promise<InterruptedResult> {
       const runId = params.run_id
       const supervisorId = params.supervisor_id ?? tracked?.supervisorId
@@ -609,7 +612,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       } catch {
         // Status unavailable; report the interruption without run state.
       }
-      const stoppedItself = current !== undefined && (isTerminalStatus(current.status) || current.status === 'waiting')
+      const stoppedItself = current !== undefined
+        && (isTerminalStatus(current.status) || (options.redeliverWaiting !== false && current.status === 'waiting'))
       if (stoppedItself) {
         try {
           // Fresh signal: the wait's own controller is already aborted. The
@@ -624,7 +628,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         run_id: current?.run_id ?? runId,
         label: current?.label ?? runId,
         status: current?.status ?? 'running',
-        ready: current !== undefined && isTerminalStatus(current.status),
+        // Never claim ready without the output in hand: the caller would
+        // drop the run's tracking and suppress the delivery that still owns
+        // the result.
+        ready: false,
         ...(current?.pending_permission && { pending_permission: current.pending_permission }),
         interrupted_by: { run_id: stop.runId, label: stop.label, status: stop.status },
       }
@@ -638,7 +645,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       tracked: TrackedRun | undefined,
     ): Promise<BackgroundedResult> {
       const stop: StoppingPoint = { runId: tracked?.runId ?? params.run_id, status: 'backgrounded' }
-      const { interrupted_by, ...result } = await resultAfterInterrupt(params, stop, tracked)
+      const { interrupted_by, ...result } = await resultAfterInterrupt(params, stop, tracked, { redeliverWaiting: false })
       void interrupted_by
       return { ...result, backgrounded: true, note: BACKGROUND_NOTE }
     }
@@ -2692,7 +2699,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               // tracking; a tracked run is released by the finally below, and
               // the poll loop delivers its completion either way.
               const armSupervisor = params.supervisor_id ?? tracked?.supervisorId
-              if (result.run_id && !trackedRuns.has(trackedRunKey(armSupervisor, result.run_id))) {
+              // A tracked run is released by the finally below and delivers
+              // through the poll loop on its own; arming a second entry for
+              // it would emit the completion twice.
+              if (!tracked && result.run_id && !trackedRuns.has(trackedRunKey(armSupervisor, result.run_id))) {
                 upsertTrackedRun({ runId: result.run_id, supervisorId: armSupervisor, label: result.label }, undefined, false)
                 startPolling()
               }

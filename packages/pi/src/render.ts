@@ -296,7 +296,9 @@ function resultLines(details: unknown, args: ResultArgs, expanded: boolean): str
       ? ['The wait was backgrounded; the run keeps going and its completion is delivered automatically.']
       : []),
     ...(pending ? [`Permission: ${selected(pending, 'description')}`] : []),
-    guidance(state, pending, runId),
+    result.backgrounded === true
+      ? 'Guidance: The final result is delivered automatically; end your turn instead of re-polling.'
+      : guidance(state, pending, runId),
     ...(result.output_truncated === true
       ? [stringValue(result.output_event_path)
         ? `Warning: final output may be truncated; retry avenor_result or read the durable event path "${scalar(result.output_event_path)}".`
