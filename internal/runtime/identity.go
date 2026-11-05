@@ -196,10 +196,10 @@ func LaunchEnv(environ []string, p *LaunchProvenance) []string {
 
 // ScrubIdentityEnv returns environ without the names a child must not inherit
 // (ScrubbedEnvNames): launch identity, the test-only switches, the parent-link
-// URL and credential, the broker's advertised address, and the avenor peer
-// credentials and poo provisioning paths. Matching is on the exact key, so duplicates and bare-key entries
-// are removed too, while near-miss names and every other variable keep their
-// order.
+// URL and credential, the broker's advertised address, the avenor peer
+// credentials and poo provisioning paths. Matching is on the exact key, so
+// duplicates and bare-key entries are removed too, while near-miss names and
+// every other variable keep their order.
 func ScrubIdentityEnv(environ []string) []string {
 	return scrubEnv(environ, func(key string) bool {
 		_, drop := identityEnvKeys[key]
