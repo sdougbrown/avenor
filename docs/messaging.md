@@ -72,13 +72,14 @@ forward their asks to the parent.
 ## Child CLI messages
 
 A child with broker credentials can use `avenor message --action tell`,
-`ask` or `reply` to route messages as its own run. The command uses the same
+`ask`, `reply` or `withdraw` to route messages as its own run. The command uses the same
 router as other messaging surfaces; see [avenor message](cli.md#avenor-message).
 
 A reply to an ask needs the claim record the feed wrote. Use `--asks-dir` if
-the feed uses a non-default directory. A second reply is `edge-absent`. Without
-a record, the broker resolves a reply to a tell or refuses the reply. A
-`timed-out` ask exits 0 and remains open to a later reply.
+the feed uses a non-default directory. A second reply, or a reply to an ask
+without a record, reports `edge-absent`. The broker resolves a reply to a tell
+without a claim record. A `timed-out` ask exits 0 and remains open to a later
+reply; use `--action withdraw --message-id MESSAGE_ID` to close it.
 
 ## Transport contract
 

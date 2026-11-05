@@ -347,12 +347,14 @@ Send broker messages as the current child run, not as the supervisor:
 avenor message --action tell --target supervisor --message "Status update"
 avenor message --action ask --target supervisor --message "Question?" --timeout-ms 30000
 avenor message --action reply --reply-to MESSAGE_ID --message "Answer"
+avenor message --action withdraw --message-id MESSAGE_ID
 ```
 
 `--target` accepts a broker run ID or label. An ask reply needs the claim
 record written by the feed; `--asks-dir` selects its directory when the feed
-uses a non-default location. A second reply to the same ask is `edge-absent`.
-Without a record, the broker resolves a reply to a tell or refuses the reply.
+uses a non-default location. A second reply to the same ask, or a reply to an
+ask with no record, reports `edge-absent`. The broker resolves a reply to a tell
+without a claim record. Use `withdraw` with `--message-id` to close an open ask.
 
 Each command uses `AVENOR_BROKER_URL`, `AVENOR_BROKER_TOKEN` and
 `AVENOR_RUN_ID`, or the respective `--broker-url`, `--token` and `--run-id`
