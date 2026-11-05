@@ -958,9 +958,8 @@ if (tellReplyBody.reply_to !== tellReplyID || tellReplyRow.from_run_id !== tellR
 }
 
 console.log('=== 11d2. a tell whose id is only on the broker envelope still names it ===')
-// The native incident: a Pi host tell queues its correlation id on the
-// envelope only, so the frame must name that id or the model has nothing to
-// reply to. The probe writes the payload itself, without an id.
+// A host tell can carry its ID only on the envelope. The frame must expose
+// that ID so the model can name it in a reply.
 const envelopeOnlyRunId = freshRunId('claude-envelopeid')
 const envelopeOnlyCopy = await layerCopy({ base: '2.1.311' }, {
   AVENOR_BROKER_URL: BROKER,

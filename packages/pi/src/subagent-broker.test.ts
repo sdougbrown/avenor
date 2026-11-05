@@ -142,8 +142,8 @@ describe('formatInboundAskBody', () => {
   })
 
   it('shows the recovered message id in a tell header, and no reply line', () => {
-    // A tell opens no edge, so the header is the only place the model can find
-    // the id a reply names; without it a recovered envelope id is invisible.
+    // Tells have no reply instruction. Their headers must expose the recovered
+    // ID for the model to reply by ID.
     const tell = parseControlMessage({
       type: 'agent_message', id: 'av1.m.envelope', from_run_id: 'peer-1',
       payload: { from_run_id: 'peer-1', message: 'fyi' },
