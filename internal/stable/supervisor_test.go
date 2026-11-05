@@ -33,12 +33,29 @@ import (
 
 func TestProviderMessagingRetryOutcome(t *testing.T) {
 	sup := newTestSupervisor(t, Config{})
-	child := &childRuntime{messagingOn: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := sup.control.SubscribeEvents(ctx)
+	child := &childRuntime{id: "rt_retry", messagingOn: true}
 	off := false
 	child.session = runtime.Session{SessionID: "retry", MessagingOn: &off, MessagingWarning: "fallback"}
 	sup.recordMessagingOutcome(child, child.session)
 	if child.messagingOn || child.session.MessagingWarning != "" {
 		t.Fatalf("retry outcome not consumed: %+v", child.session)
+	}
+	sup.recordMessagingOutcome(child, child.session)
+	select {
+	case ev := <-stream:
+		if ev.Event != "avenor.error" || ev.Fields["source"] != "warning" || ev.Fields["message"] != "poo messaging unavailable: fallback" {
+			t.Fatalf("warning event = %+v", ev)
+		}
+	default:
+		t.Fatal("missing warning event")
+	}
+	select {
+	case ev := <-stream:
+		t.Fatalf("duplicate event = %+v", ev)
+	default:
 	}
 }
 
