@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 const testCodexSession = "01a1-test-session"
@@ -169,5 +172,80 @@ func TestReadCodexPeerRecordRefusesRemotePlaintext(t *testing.T) {
 	}
 	if _, err := readCodexPeerRecord(writeCodexPeerRecord(t, "http://127.0.0.1:8080", "rt", "tok")); err != nil {
 		t.Fatalf("a loopback plaintext broker URL was refused: %v", err)
+	}
+}
+
+func TestCodexReplyClaimsThePollersAskRecord(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	codexToken, _, err := b.EnsureRun("rt_codex", "codex-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	askerToken, _, err := b.EnsureRun("rt_asker", "asker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	asker, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "rt_asker", Token: askerToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = asker.Close() })
+	pre, err := asker.Preflight(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := messaging.NewMsgID(time.Now(), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := asker.Send(t.Context(), messaging.SendRequest{From: messaging.Identity{RunID: "rt_asker"}, To: messaging.Identity{RunID: "rt_codex"}, MessageID: id, Generation: pre.Generation, Body: `{"message":"question","role":"agent"}`}); err != nil {
+		t.Fatal(err)
+	}
+
+	file := writeCodexPeerRecord(t, "http://"+b.Addr(), "rt_codex", codexToken)
+	asks := filepath.Join(filepath.Dir(file), "asks")
+	if err := os.MkdirAll(asks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The record shape the poller's rememberAsk writes.
+	if err := os.WriteFile(filepath.Join(asks, id+".json"), []byte(`{"message_id":"`+id+`","asker_run_id":"rt_asker"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type waitResult struct {
+		result messaging.WaitResult
+		err    error
+	}
+	waiting := make(chan waitResult, 1)
+	go func() {
+		result, err := asker.Wait(t.Context(), messaging.WaitRequest{Sender: messaging.Identity{RunID: "rt_asker"}, MessageID: id, Generation: pre.Generation, Timeout: 5 * time.Second})
+		waiting <- waitResult{result, err}
+	}()
+
+	raw := json.RawMessage(`{"action":"reply","reply_to":"` + id + `","message":"codex answer"}`)
+	server := &Server{}
+	surface, err := server.messageSurfaceFor(t.Context(), raw, file, true)
+	if err != nil {
+		t.Fatalf("messageSurfaceFor: %v", err)
+	}
+	defer surface.cleanup()
+	rt, err := router.NewRouter(surface.provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := rt.Execute(t.Context(), raw)
+	if err != nil || result.Outcome != messaging.OutcomeReplied {
+		t.Fatalf("reply = %+v, %v; want replied", result, err)
+	}
+	waited := <-waiting
+	if waited.err != nil || waited.result.Outcome != messaging.OutcomeReplied || !strings.Contains(string(waited.result.Reply.Payload), "codex answer") {
+		t.Fatalf("asker wait = %+v", waited)
+	}
+	if _, err := os.Stat(filepath.Join(asks, id+".claimed")); err != nil {
+		t.Fatalf("the poller's record was not claimed: %v", err)
 	}
 }
