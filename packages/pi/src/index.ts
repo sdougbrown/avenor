@@ -118,9 +118,9 @@ const POLL_INTERVAL_MS = 3_000
 // accepted prompt may never come back through message_end. Re-arm delivery
 // after this long instead of leaving the run skipped with its notice unread.
 const IDLE_SEND_TIMEOUT_MS = 10_000
-// How long a blocking wait (avenor_result without an explicit timeout) may
-// hold the turn before it stops blocking and goes to the background; the run
-// keeps going and the completion is delivered by polling.
+// How long an unbounded wait holds the turn before it stops blocking and
+// goes to the background; the run keeps going and the completion is
+// delivered by polling.
 const BACKGROUND_AFTER_MS = 120_000
 // An unconfirmable send is retried at most this many times before the notice is
 // left for settlement and the failure is recorded.
@@ -414,7 +414,7 @@ export interface ExtensionOptions {
   /** How long an unconfirmed idle completion send waits before re-arming;
    * injectable so tests can exercise the timeout without fixed sleeps. */
   idleSendTimeoutMs?: number
-  /** How long a blocking wait may hold the turn before it backgrounds;
+  /** How long a blocking wait holds the turn before it backgrounds;
    * injectable so tests can exercise the boundary without fixed sleeps. */
   backgroundAfterMs?: number
   /** Overrides broker-credential autodetection for sub-agent broker mode (tests). */
@@ -493,7 +493,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
     }
 
-    /** Interrupt only the waits bound to one run: a wait that backgrounds
+    /** Interrupt only the waits bound to one run. A wait that backgrounds
      * itself (or is backgrounded by command) must not wake siblings waiting
      * on other runs, unlike a run's own stopping point. */
     function interruptWaitsForRun(runKey: string, stop: StoppingPoint): void {
@@ -590,7 +590,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * the wait bound. When the awaited run itself has since reached a stopping
      * point, deliver its real state instead of an interruption notice. The
      * probe and redelivery use the caller's original run reference, matching
-     * the non-interrupted path: a label may resolve canonically to a newer run
+     * the non-interrupted path: a label can resolve canonically to a newer run
      * than the one this call first bound to, and the reconciliation below
      * handles that divergence the same way. A caller that omitted
      * supervisor_id still probes through the bound run's supervisor. */
@@ -628,8 +628,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         run_id: current?.run_id ?? runId,
         label: current?.label ?? runId,
         status: current?.status ?? 'running',
-        // Never claim ready without the output in hand: the caller would
-        // drop the run's tracking and suppress the delivery that still owns
+        // Never claim ready without the output in hand: the caller drops
+        // the run's tracking and suppresses the delivery that still owns
         // the result.
         ready: false,
         ...(current?.pending_permission && { pending_permission: current.pending_permission }),
@@ -2459,9 +2459,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const stop = blockingWait.stopped
           if (stop && !stop.synthetic) {
             if (stop.status === 'backgrounded') {
-              // The wait gave the turn back by command: the run keeps going
-              // and the poll loop delivers the completion, exactly like a
-              // wait=false spawn.
+              // The command gave the turn back; the run keeps going. The
+              // poll loop delivers the completion, the same delivery a
+              // wait=false spawn gets.
               const tracked = getTrackedRunById(result.run_id, supervisorId)
               if (tracked) tracked.blocking = false
               return {
@@ -2668,10 +2668,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const blocking = params.wait ?? true
         const waitRunKey = trackedRunKey(tracked?.supervisorId ?? params.supervisor_id, tracked?.runId ?? params.run_id)
         const blockingWait = blocking ? createInterruptibleWait(waitRunKey, signal) : undefined
-        // An unbounded wait gives the turn back after this long: the timer
-        // backgrounds this wait only (not siblings on other runs), and the run
-        // keeps going while polling delivers the completion. An explicit
-        // timeout is the caller's own bound and is respected in full.
+        // The timer gives an unbounded wait back to the model after this
+        // long. It backgrounds this wait only (not siblings on other runs);
+        // polling delivers the completion while the run keeps going. An
+        // explicit timeout is the caller's own bound and is respected in
+        // full.
         const backgroundTimer = blocking && params.timeout === undefined && backgroundAfterMs > 0
           ? setTimeout(
               () => interruptWaitsForRun(waitRunKey, { runId: tracked?.runId ?? params.run_id, status: 'backgrounded' }),
@@ -2696,12 +2697,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             if (stop.status === 'backgrounded') {
               result = await resultAfterBackground(params, tracked)
               // Arm automatic delivery for a run this session was not
-              // tracking; a tracked run is released by the finally below, and
-              // the poll loop delivers its completion either way.
+              // tracking. A tracked run is released by the finally below; the
+              // poll loop delivers its completion either way.
               const armSupervisor = params.supervisor_id ?? tracked?.supervisorId
               // A tracked run is released by the finally below and delivers
-              // through the poll loop on its own; arming a second entry for
-              // it would emit the completion twice.
+              // on its own; a second armed entry emits the completion twice.
               if (!tracked && result.run_id && !trackedRuns.has(trackedRunKey(armSupervisor, result.run_id))) {
                 upsertTrackedRun({ runId: result.run_id, supervisorId: armSupervisor, label: result.label }, undefined, false)
                 startPolling()
@@ -3158,7 +3158,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         }
         for (const wait of waits) {
           pendingWaits.delete(wait)
-          // A backgrounded stop is consumed only by the waiter itself, so the
+          // A backgrounded stop is consumed only by the waiter itself. The
           // run id parsed from the wait key is enough; each tool reports its
           // own run from its own call context.
           const runId = wait.runKey.slice(wait.runKey.indexOf('\u0000') + 1)
