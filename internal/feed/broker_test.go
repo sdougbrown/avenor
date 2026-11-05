@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
@@ -178,6 +179,43 @@ func TestAskRecordFailureDoesNotLoseDelivery(t *testing.T) {
 	}
 	if !strings.Contains(line.Text, "private text") || !strings.HasSuffix(line.Text, `This message is an ask from "sender", but it cannot be answered here.`) || strings.Contains(line.Text, "avenor_reply") || !strings.Contains(logs.String(), "ask-id") || strings.Contains(logs.String(), "private text") {
 		t.Fatalf("output=%q log=%q", out.String(), logs.String())
+	}
+}
+
+// TestBrokerDefaultsAskDirectory records asks when no directory is supplied.
+func TestBrokerDefaultsAskDirectory(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	var polls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		if polls.Add(1) == 1 {
+			fmt.Fprint(w, `[{"id":"ask","from_run_id":"sender","payload":{"id":"ask","message":"question","expects_reply":true}}]`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: out, RequestTimeout: time.Second})
+	select {
+	case <-out.wrote:
+	case <-time.After(3 * time.Second):
+		cancel()
+		awaitExit(t, done)
+		t.Fatal("missing message")
+	}
+	cancel()
+	awaitExit(t, done)
+	dir, err := askclaim.DefaultDir(filepath.Join(root, "avenor"), s.URL, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ask.json")); err != nil {
+		t.Fatalf("default ask record: %v; output: %s", err, out.String())
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/childmessaging"
 	"github.com/sdougbrown/avenor/internal/durablefile"
@@ -74,6 +75,13 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 	if err != nil {
 		fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 		return 1
+	}
+	if b.AsksDir == "" {
+		b.AsksDir, err = askclaim.DefaultDir(appdir.StateHome(), b.BrokerURL, b.RunID)
+		if err != nil {
+			fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
+			return 1
+		}
 	}
 	if err := os.MkdirAll(b.LockDir, 0700); err != nil {
 		fmt.Fprintln(b.Log, "feed broker: cannot create lock directory:", err)

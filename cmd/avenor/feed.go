@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"os/signal"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/appdir"
-	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/feed"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/cli-contract"
@@ -42,17 +40,8 @@ func handleFeedBroker(ctx context.Context, inv clicontract.Invocation, stderr io
 		return nil, usageErrorf("avenor feed broker: broker URL, run id, and token are required")
 	}
 	lockDir := orDefault(inv.Flags["lock-dir"], filepath.Join(appdir.StateHome(), "feed-locks"))
-	asksDir := inv.Flags["asks-dir"]
-	if asksDir == "" {
-		var err error
-		asksDir, err = askclaim.DefaultDir(appdir.StateHome(), brokerURL, runID)
-		if err != nil {
-			fmt.Fprintln(stderr, "feed broker: invalid broker URL")
-			return exitCode(1), nil
-		}
-	}
 	signal.Ignore(syscall.SIGPIPE)
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return exitCode((feed.Broker{RunID: runID, Token: token, BrokerURL: brokerURL, Limit: inv.Ints["limit"], RequestTimeout: inv.Durations["request-timeout"], LockDir: lockDir, AsksDir: asksDir, Out: os.Stdout, Log: stderr}).Run(ctx)), nil
+	return exitCode((feed.Broker{RunID: runID, Token: token, BrokerURL: brokerURL, Limit: inv.Ints["limit"], RequestTimeout: inv.Durations["request-timeout"], LockDir: lockDir, AsksDir: inv.Flags["asks-dir"], Out: os.Stdout, Log: stderr}).Run(ctx)), nil
 }
