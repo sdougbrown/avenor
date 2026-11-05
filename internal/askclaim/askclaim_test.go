@@ -108,6 +108,21 @@ func TestDefaultDirNormalizesBrokerIdentity(t *testing.T) {
 	if a != b || a == c || a == d {
 		t.Fatalf("identity collision: %q %q", a, b)
 	}
+	ipv6Default, err := DefaultDir(root, "http://[::1]:80/", "rt_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipv6Bare, err := DefaultDir(root, "http://[::1]", "rt_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ipv6Other, err := DefaultDir(root, "http://[::1]:81", "rt_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ipv6Default != ipv6Bare || ipv6Other == ipv6Bare {
+		t.Fatalf("IPv6 identity: default=%q bare=%q other=%q", ipv6Default, ipv6Bare, ipv6Other)
+	}
 }
 
 // TestDefaultDirRejectsInvalidBroker rejects the same URLs as BrokerKey.
