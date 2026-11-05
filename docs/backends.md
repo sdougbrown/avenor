@@ -164,6 +164,16 @@ A poo roster entry is the only place `command`, `args` and `settings` are accept
 
 `command` is used as given and recorded as an absolute path; a relative `command` resolves against Avenor's working directory, not the roster file's directory. Without `command` Avenor runs `poo` from `PATH`. `args` defaults to `["serve"]`. The launch argv is `<bin> <args...> --settings <path>`, with `--settings` only when the entry names a settings file. The resolved binary, args and settings path are part of the session's ownership record, so a resume that resolves differently is rejected before a provider exists. A backend that does not own these fields rejects them. A poo entry cannot carry `thinking`; the shared thinking policy refuses it like any backend without thinking support.
 
+### Messaging
+
+Poo messaging requires poo v0.2.0 or later. The `messaging` spawn option enables the inbox feed, the `avenor_message` CLI entry and the child's broker credentials together. It defaults on for a delegation spawn and off for a workflow node, loop or team phase, and permission-decider run. An explicit value overrides the default, except that loop and team phases reject `true`.
+
+Avenor checks for `call_cli` in the session's tools and waits up to 10 seconds for the `feed:avenor-inbox` job to report `running`. A listed job or a feed-started event alone does not prove the command is running or that the broker accepted it. If messaging cannot be enabled, a default-on spawn is relaunched once with messaging off and a warning; an explicit `messaging: true` fails instead. A read-only profile cannot offer `call_cli` and follows the same policy. A resume keeps the effective choice; a session created with messaging on may not resume through `avenor run --resume`, where the default is off, because its recorded tools no longer match.
+
+At launch Avenor publishes rendered manifests under `<state home>/poo/manifests/<digest>/`. It prunes sibling digest directories older than seven days, never the directory being published. Each launch, including resume, publishes its own manifests again.
+
+The broker token is in the child's environment, so model-issued `bash` commands can read it. It grants messaging as that child run, not supervisor authority. Claude children instead get a one-shot attach credential. Adding the token to `tools.env.scrub` also hides it from the feed, which then fails at start.
+
 A poo run is a **blocking prompt** over a run that starts in the background. `Prompt` sends `run/prompt`, then waits on `run/inspect{wait: {until: "settled"}}` and re-asks when a wait runs out. A prompt that arrives while a run is active is sent as `run/message{mode: "steer"}` for that run instead of starting a second one, and a `busy` refusal from `run/prompt` falls back the same way. While the session is alive, `Cancel` sends `run/cancel` with the run id the prompt started or the session reports. Incoming events are routed by the notification's own `session_id`; events that arrive before the `session/create` response are buffered until the caller subscribes, so nothing is dropped.
 
 poo's settle reason is classified into avenor's closed stop-reason set, and the exit code follows from the avenor reason:
