@@ -111,7 +111,7 @@ already uses for its peers:
   run. A provisioned launch's is a one-shot attach credential (below); a
   hand-exported shell has none, so it self-registers instead.
 - `AVENOR_SESSION_NAME` — optional display name, posted to the broker's
-  `/session_name` by a session that self-registers; the posted name is what
+  `/rename` by a session that self-registers; the posted name is what
   `avenor:<label>` resolution and peer lists see. It falls back to
   `AVENOR_LABEL`, the launch identity every avenor launch exports, so a
   hand-exported shell can keep using either spelling. A provisioned run posts
@@ -130,8 +130,8 @@ turns on the credential:
   credential is minted in process by the broker that provisions the launch; no
   route mints one, and `/register` answers only the run credential. The
   layer trades that credential at `POST /attach` for the run's own, and then
-  behaves as the run — no `/register` call, and no `/session_name` write, so
-  the label the supervisor gave the run survives. The child appears in peer
+  behaves as the run — no `/register` call, and no name write, so the label
+  the supervisor gave the run survives. The child appears in peer
   lists as the same run `avenor control list` shows, under the label it was
   spawned with, and its broker record belongs to the supervisor, which retires
   it when the run ends.

@@ -115,7 +115,7 @@ the child's `claude` shows `AVENOR_BROKER_URL`, `AVENOR_RUN_ID=rt_1`,
    the attach answered) lists
    one record per label — `rt_1`/`child-a` — with no `claude-<hex>`
    self-registration beside it. The child writes nothing about its own
-   identity: no `/register`, and no `/session_name` either, so `child-a` stays
+   identity: no `/register`, and no name write either, so `child-a` stays
    the record's own label and a later authorized rename through `/rename` is
    what moves the name peers see. Starting a second `claude` from the child's
    own shell (its inherited environment) is refused: one more `POST /attach`,
@@ -141,7 +141,7 @@ manual keystroke; the panes are interactive sessions, not `-p` runs.
 `feature-map acceptance` = all four drives above with both transcripts
 captured, plus `claude plugin validate` exit 0 and the offline suites: pure
 modules under
-`node --test marketplace/plugins/avenor/test/addresses.test.mjs marketplace/plugins/avenor/test/wire.test.mjs`
+`node --test marketplace/plugins/avenor/test/addresses.test.mjs marketplace/plugins/avenor/test/wire.test.mjs marketplace/plugins/avenor/test/register-attach.test.mjs`
 (address ladder incl. empty refs and cross-row run-id wins, wire helpers, the
 mirrored ask and reply sentences, the escaping a peer-controlled fact cannot
 slip through — backslash, bidi, astral format characters — and the failure
@@ -173,18 +173,19 @@ slow pass. The PR 1 run's captured evidence (transcripts, validation report,
 review grounding drives for turn axes and reload behavior) lives in the
 branch's `.cache/runs/evidence/` (uncommitted by repo policy).
 
-The identity drive covers the identities a session can be handed: a launch
-carrying broker URL, run id and a credential together selects the provisioned
-shape, whose only entry is `POST /attach` — no `/register`, no `/session_name`
-write (asserted by request path, with the launch label set as a supervisor
-spawn sets it), no run minted, and a refused credential disables the layer with
-the broker's reason instead of leaving a second reader on the queue; a run id
-without a credential self-registers and posts its name; a bare session mints its
-own run and names it; and `/register` answers the run credential with no attach
-grant. The drive's provisioned case carries a credential the broker never minted
-on purpose: a launch grant is minted in process, by the broker that provisions
-the launch, so a broker-only script cannot hold a spendable one. The handshake
-itself — grant spent once, the run's own credential returned, a nested session
+The identity drive covers the identities a session can be handed. A launch
+carrying broker URL, run id and a credential selects the provisioned shape. The
+drive checks that a refused attach disables the layer without registering or
+polling. A run id
+without a credential self-registers and names itself through `/rename` — the
+route a later peers rename writes, so the name stays replaceable, proven by the
+drive renaming the run and reading the new name back from `GET /sessions`; a
+bare session mints its own run and names it the same way; and `/register`
+answers the run credential with no attach grant. The drive's provisioned case
+carries a credential the broker never minted on purpose: a launch grant is
+minted in process, by the broker that provisions the launch, so a broker-only
+script cannot hold a spendable one. `test/register-attach.test.mjs` simulates a
+successful attach and checks that the hook writes no name. The handshake itself — grant spent once, the run's own credential returned, a nested session
 refused `409 attach-consumed`, the label surviving an authorized rename — is
 proven by the spawn drive below and by Go (`internal/runtime/broker/attach_test.go`,
 `internal/runtime/claude/peer_test.go`).

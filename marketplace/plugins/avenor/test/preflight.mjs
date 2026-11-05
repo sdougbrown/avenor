@@ -1,7 +1,7 @@
 // Offline preflight for the avenor peer-layer hooks (issue #391 PR 1).
 // Loads the real register.js with a stub engine-call object whose http noun
 // speaks to the REAL broker this script started, then drives:
-//   1. session.start -> gate, /register, /session_name
+//   1. session.start -> gate, /register, /rename
 //   2. a probe peer sends a bare tell -> idle delivery via prompt.submit
 //   3. the probe sends an ask -> pendingReplies correlation
 //   4. the session.send hook replies -> probe's /wait_reply unblocks

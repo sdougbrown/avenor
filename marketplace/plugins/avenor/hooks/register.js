@@ -34,8 +34,8 @@
 //
 // - Identity: a run id and an attach credential in the environment are a
 //   provisioned identity — a spawned child joins the broker as the run its
-//   launcher already holds, with neither a `/register` call nor a
-//   `/session_name` write. The credential is a one-shot grant: the layer trades
+//   launcher already holds, with neither a `/register` call nor a name write.
+//   The credential is a one-shot grant: the layer trades
 //   it at `POST /attach` for the run's own credential, so a run has one inbound
 //   consumer and a second session holding the same environment (a nested
 //   session spawned from a provisioned one's shell) is refused with the
@@ -235,19 +235,15 @@ async function selfRegister(d) {
     disableLayer("registering with the avenor broker " + brokerURL + " failed: " + errorText(err))
     return false
   }
-  // A provisioned run posts no name. The supervisor registered it under the
-  // label its peers already address, and /session_name writes a harness name,
-  // which the broker resolves ahead of that label — the write would shadow the
-  // record's own name for good, including a later authorized rename. A
-  // self-registered run is displayed by its run id, so a name handed in is the
-  // only way it gets a good one.
+  // A provisioned run keeps its supervisor-assigned label. A self-registered
+  // run uses /rename so its environment name does not shadow later renames.
   if (!provisioned) {
     const name = await envSessionName(d)
     if (name !== "") {
       try {
-        await brokerPost(d, "/session_name", { name: name })
+        await brokerPost(d, "/rename", { name: name })
       } catch (err) {
-        await logLayer(d, "session_name failed: " + errorText(err))
+        await logLayer(d, "rename failed: " + errorText(err))
       }
     }
   }
