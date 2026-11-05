@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/backendlaunch"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
 	avruntime "github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/poo/wire/protocol"
@@ -100,6 +103,7 @@ type fakeEndpoint struct {
 	turns    []scriptedTurn
 	index    int
 	requests []map[string]any
+	respond  func(map[string]any) (scriptedTurn, bool)
 }
 
 func newFakeEndpoint(t *testing.T, turns ...scriptedTurn) *fakeEndpoint {
@@ -118,6 +122,11 @@ func (e *fakeEndpoint) serve(w http.ResponseWriter, r *http.Request) {
 	e.mu.Lock()
 	e.requests = append(e.requests, decoded)
 	turn := e.nextLocked()
+	if e.respond != nil {
+		if response, ok := e.respond(decoded); ok {
+			turn = response
+		}
+	}
 	e.mu.Unlock()
 
 	if turn.Delay > 0 {
@@ -360,6 +369,119 @@ func TestMessagingWakeRealPoo(t *testing.T) {
 		t.Fatalf("resume: %v", err)
 	}
 	awaitPrompt(t, startPrompt(provider, session.SessionID, "follow-up"))
+}
+
+func TestMessagingAskRealPoo(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("POO_FEEDS_PATH", "")
+	t.Setenv("POO_CLI_REGISTRY_PATH", "")
+	avenor := filepath.Join(t.TempDir(), "avenor")
+	if out, err := exec.Command("go", "build", "-o", avenor, "../../../cmd/avenor").CombinedOutput(); err != nil {
+		t.Fatalf("build avenor: %v\n%s", err, out)
+	}
+	old := avenorExecutable
+	avenorExecutable = func() (string, error) { return avenor, nil }
+	t.Cleanup(func() { avenorExecutable = old })
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	childToken, _, err := b.EnsureRun("child", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentToken, _, err := b.EnsureRun("supervisor", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "supervisor", Token: parentToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+	pre, err := tr.Preflight(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "done"})
+	var replies int
+	idPattern := regexp.MustCompile(`"reply_to": "([^"]+)"`)
+	endpoint.respond = func(body map[string]any) (scriptedTurn, bool) {
+		if replies >= 2 {
+			return scriptedTurn{}, false
+		}
+		messages, _ := body["messages"].([]any)
+		for _, raw := range messages {
+			m, _ := raw.(map[string]any)
+			text, _ := m["content"].(string)
+			if m["role"] != "user" || !strings.Contains(text, `<feed name="avenor-inbox"`) {
+				continue
+			}
+			match := idPattern.FindStringSubmatch(text)
+			if len(match) != 2 {
+				continue
+			}
+			replies++
+			return scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_cli", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "reply", "reply_to": match[1], "message": "answer"}}}}}, true
+		}
+		return scriptedTurn{}, false
+	}
+	fixture := newPooFixtureWith(t, endpoint, map[string]any{"permission": map[string]any{"unmatched": "allow"}})
+	opts := fixture.startOptions(t)
+	opts.MessagingOn, opts.Broker, opts.RuntimeID, opts.BrokerToken = true, b, "child", childToken
+	provider, session, log, _ := startProvider(t, opts)
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "initial"))
+	log.waitForCount(t, "session.end", 1, 10*time.Second)
+	id, err := messaging.NewMsgID(time.Now(), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"id": id, "message": "question", "expects_reply": true})
+	if _, err := tr.Send(t.Context(), messaging.SendRequest{From: messaging.Identity{RunID: "supervisor"}, To: messaging.Identity{RunID: "child"}, MessageID: id, Generation: pre.Generation, Body: string(payload)}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := tr.Wait(t.Context(), messaging.WaitRequest{Sender: messaging.Identity{RunID: "supervisor"}, MessageID: id, Generation: pre.Generation, Timeout: 30 * time.Second})
+	if err != nil || result.Outcome != messaging.OutcomeReplied || !strings.Contains(string(result.Reply.Payload), "answer") {
+		t.Fatalf("wait: %+v %v", result, err)
+	}
+	log.waitForCount(t, "session.end", 2, 30*time.Second)
+	if !endpoint.sawToolText("edge-absent") {
+		t.Fatalf("second reply result missing: %#v", endpoint.toolTexts())
+	}
+}
+
+func TestMessagingOffRealPoo(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("POO_FEEDS_PATH", "")
+	t.Setenv("POO_CLI_REGISTRY_PATH", "")
+	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "done"})
+	fixture := newPooFixture(t, endpoint)
+	provider, session, _, _ := startProvider(t, fixture.startOptions(t))
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "initial"))
+	raw, rpcErr, err := provider.client.call(t.Context(), protocol.MethodSessionGet, protocol.GetParams{SessionID: session.SessionID})
+	if err != nil || rpcErr != nil {
+		t.Fatalf("session/get: %v %v", err, rpcErr)
+	}
+	var result protocol.GetResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range result.Jobs {
+		if job.JobID == "feed:avenor-inbox" {
+			t.Fatalf("unexpected inbox: %+v", result.Jobs)
+		}
+	}
+	if strings.Contains(result.Prompt.Text, "avenor_message") {
+		t.Fatalf("unexpected registry entry: %s", result.Prompt.Text)
+	}
+	requests, err := json.Marshal(endpoint.requestBodies())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(requests, []byte("avenor_message")) {
+		t.Fatalf("model saw messaging entry: %s", requests)
+	}
 }
 
 func TestMessagingOutcomeRealPoo(t *testing.T) {
