@@ -237,7 +237,7 @@ This server registers tool names **without** the `avenor_` prefix: `spawn`, `sta
 
 Starts a new run.
 
-A supervisor resume preserves the run's messaging choice. `avenor run --resume` has no supervisor choice and treats messaging as off; a poo session created with messaging on may fail to resume when its recorded tools are unavailable.
+The supervisor `resume` operation preserves the run's messaging choice. A raw `spawn` with `session_id` uses the caller's `messaging` choice or its default instead. `avenor run --resume` has no supervisor choice and treats messaging as off; a poo session created with messaging on may fail to resume when its recorded tools are unavailable.
 
 **Required:**
 - `repo_dir` — working directory for the run
