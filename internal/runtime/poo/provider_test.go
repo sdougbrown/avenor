@@ -318,10 +318,14 @@ func (f pooFixture) startOptions(t *testing.T) avruntime.StartOptions {
 	}
 }
 
-func TestMessagingWakeRealPoo(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("POO_FEEDS_PATH", "")
-	t.Setenv("POO_CLI_REGISTRY_PATH", "")
+func setupRealPooMessaging(t *testing.T, stateHome, feedsPath, registryPath, runID string) (*broker.Broker, string) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	t.Setenv("POO_FEEDS_PATH", feedsPath)
+	t.Setenv("POO_CLI_REGISTRY_PATH", registryPath)
+	if runID == "" {
+		return nil, ""
+	}
 	avenor := filepath.Join(t.TempDir(), "avenor")
 	cmd := exec.Command("go", "build", "-o", avenor, "../../../cmd/avenor")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -335,10 +339,15 @@ func TestMessagingWakeRealPoo(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = b.Stop() })
-	token, _, err := b.EnsureRun("child", "")
-	if err != nil {
-		t.Fatal(err)
+	token, ok, err := b.EnsureRun(runID, "")
+	if err != nil || !ok {
+		t.Fatalf("EnsureRun: %v %v", ok, err)
 	}
+	return b, token
+}
+
+func TestMessagingWakeRealPoo(t *testing.T) {
+	b, token := setupRealPooMessaging(t, t.TempDir(), "", "", "child")
 	if _, _, err := b.EnsureRun("supervisor", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -372,25 +381,7 @@ func TestMessagingWakeRealPoo(t *testing.T) {
 }
 
 func TestMessagingAskRealPoo(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("POO_FEEDS_PATH", "")
-	t.Setenv("POO_CLI_REGISTRY_PATH", "")
-	avenor := filepath.Join(t.TempDir(), "avenor")
-	if out, err := exec.Command("go", "build", "-o", avenor, "../../../cmd/avenor").CombinedOutput(); err != nil {
-		t.Fatalf("build avenor: %v\n%s", err, out)
-	}
-	old := avenorExecutable
-	avenorExecutable = func() (string, error) { return avenor, nil }
-	t.Cleanup(func() { avenorExecutable = old })
-	b := broker.New("")
-	if err := b.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = b.Stop() })
-	childToken, _, err := b.EnsureRun("child", "")
-	if err != nil {
-		t.Fatal(err)
-	}
+	b, childToken := setupRealPooMessaging(t, t.TempDir(), "", "", "child")
 	parentToken, _, err := b.EnsureRun("supervisor", "")
 	if err != nil {
 		t.Fatal(err)
@@ -456,12 +447,12 @@ func TestMessagingAskRealPoo(t *testing.T) {
 }
 
 func TestMessagingOffRealPoo(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("POO_FEEDS_PATH", "")
-	t.Setenv("POO_CLI_REGISTRY_PATH", "")
+	setupRealPooMessaging(t, t.TempDir(), "", "", "")
 	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "done"})
 	fixture := newPooFixture(t, endpoint)
-	provider, session, _, _ := startProvider(t, fixture.startOptions(t))
+	opts := fixture.startOptions(t)
+	opts.MessagingOn = false
+	provider, session, _, _ := startProvider(t, opts)
 	awaitPrompt(t, startPrompt(provider, session.SessionID, "initial"))
 	raw, rpcErr, err := provider.client.call(t.Context(), protocol.MethodSessionGet, protocol.GetParams{SessionID: session.SessionID})
 	if err != nil || rpcErr != nil {
@@ -489,26 +480,7 @@ func TestMessagingOffRealPoo(t *testing.T) {
 }
 
 func TestMessagingOutcomeRealPoo(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("POO_FEEDS_PATH", "")
-	t.Setenv("POO_CLI_REGISTRY_PATH", "")
-	avenor := filepath.Join(t.TempDir(), "avenor")
-	cmd := exec.Command("go", "build", "-o", avenor, "../../../cmd/avenor")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build avenor: %v\n%s", err, out)
-	}
-	old := avenorExecutable
-	avenorExecutable = func() (string, error) { return avenor, nil }
-	t.Cleanup(func() { avenorExecutable = old })
-	b := broker.New(broker.MakeToken())
-	if err := b.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = b.Stop() })
-	token, ok, err := b.EnsureRun("rt_child", "")
-	if err != nil || !ok {
-		t.Fatalf("EnsureRun: %v %v", ok, err)
-	}
+	b, token := setupRealPooMessaging(t, t.TempDir(), "", "", "rt_child")
 	for _, tc := range []struct {
 		profile string
 		want    bool
