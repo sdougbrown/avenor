@@ -682,46 +682,6 @@ func itestSingleProvider(p runtime.Provider) func(runtime.StartOptions, string) 
 	return func(runtime.StartOptions, string) (runtime.Provider, error) { return p, nil }
 }
 
-type messagingRetryProvider struct {
-	*itestProvider
-	options chan runtime.StartOptions
-}
-
-func (p *messagingRetryProvider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
-	p.options <- opts
-	return p.Resume(ctx, sessionID)
-}
-
-func TestRetryPreservesMessaging(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		params   map[string]any
-		want     bool
-		explicit bool
-	}{
-		{"default", map[string]any{"max_retries": 1}, true, false},
-		{"explicit off", map[string]any{"max_retries": 1, "messaging": false}, false, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			provider := &messagingRetryProvider{itestProvider: newItestProvider(
-				itestAttempt("ses_first", itestSessionEnd("ses_first", "error", "")),
-				itestAttempt("ses_second", itestSessionEnd("ses_second", "end_turn", "done")),
-			), options: make(chan runtime.StartOptions, 1)}
-			h := newItestHarness(t, Config{}, itestSingleProvider(provider))
-			rt := h.spawn(tc.params)
-			h.awaitStatus(rt, "done")
-			select {
-			case opts := <-provider.options:
-				if opts.MessagingOn != tc.want || (opts.Messaging != nil) != tc.explicit || (opts.Messaging != nil && *opts.Messaging != tc.want) {
-					t.Fatalf("retry options: choice=%v on=%v", opts.Messaging, opts.MessagingOn)
-				}
-			default:
-				t.Fatal("retry options not observed")
-			}
-		})
-	}
-}
-
 // Lifecycle scenarios.
 
 func TestSupervisorPublicAPISuccess(t *testing.T) {

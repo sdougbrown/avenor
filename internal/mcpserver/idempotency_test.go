@@ -511,9 +511,6 @@ func TestSpawnKeySpaceIsolatedFromResume(t *testing.T) {
 	}
 }
 
-// The MCP spawn boundary translates the tri-state persist_sessions argument
-// into the spawn parameter verbatim, in both directions and with the omitted
-// state absent.
 func TestSpawnArgsMessagingTranslation(t *testing.T) {
 	on, off := true, false
 	sup := newFakeIdempotentSupervisor()
@@ -535,6 +532,9 @@ func TestSpawnArgsMessagingTranslation(t *testing.T) {
 	}
 }
 
+// The MCP spawn boundary translates the tri-state persist_sessions argument
+// into the spawn parameter verbatim, in both directions and with the omitted
+// state absent.
 func TestSpawnArgsPersistSessionsTranslation(t *testing.T) {
 	on := true
 	off := false

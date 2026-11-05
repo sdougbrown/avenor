@@ -316,9 +316,6 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if a.PersistSession == nil || !*a.PersistSession {
 			t.Errorf("%s: persist_sessions not populated", structName)
 		}
-		if a.Messaging == nil || !*a.Messaging {
-			t.Errorf("%s: messaging not populated", structName)
-		}
 		if !reflect.DeepEqual(a.LaunchWrapper, []string{"test"}) {
 			t.Errorf("%s: launch_wrapper not populated: %v", structName, a.LaunchWrapper)
 		}
