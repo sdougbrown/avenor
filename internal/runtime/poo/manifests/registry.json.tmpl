@@ -9,6 +9,7 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          {{/* resume is owner-only; control_reply has no supported surface. */}}
           "action": {"type": "string", "enum": ["tell", "ask", "reply", "withdraw"]},
           "target": {"type": "string"},
           "message": {"type": "string"},

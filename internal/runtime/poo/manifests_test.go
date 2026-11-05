@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +79,77 @@ func TestMessagingManifests(t *testing.T) {
 	for _, args := range []map[string]any{{}, {"action": "bad"}, {"action": "ask", "timeout_ms": -1}, {"action": "ask", "timeout_ms": 600001}, {"action": "ask", "timeout_ms": 1.5}, {"action": "tell", "extra": "x"}} {
 		if _, err := catalog.Plan("avenor_message", args); err == nil {
 			t.Errorf("accepted %v", args)
+		}
+	}
+}
+
+func TestMessageManifestContract(t *testing.T) {
+	content, err := renderManifests(t.TempDir(), "http://example.com:80", "run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registry struct {
+		Tools map[string]struct {
+			InputSchema struct {
+				Properties map[string]struct {
+					Type string   `json:"type"`
+					Enum []string `json:"enum"`
+				} `json:"properties"`
+				Required []string `json:"required"`
+			} `json:"inputSchema"`
+			Bindings []struct {
+				Property string `json:"property"`
+			} `json:"bindings"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(content.registry, &registry); err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := registry.Tools["avenor_message"]
+	if !ok {
+		t.Fatal("avenor_message is missing")
+	}
+	properties := tool.InputSchema.Properties
+	bindings := make(map[string]bool)
+	for _, binding := range tool.Bindings {
+		bindings[binding.Property] = true
+		if _, ok := properties[binding.Property]; !ok {
+			t.Errorf("binding %q has no schema property", binding.Property)
+		}
+	}
+	for name := range properties {
+		if !bindings[name] {
+			t.Errorf("schema property %q has no binding", name)
+		}
+	}
+	// The router enforces per-action requiredness; this flat schema only
+	// requires action and must make each permitted property reachable.
+	if !slices.Contains(tool.InputSchema.Required, "action") {
+		t.Error("action is not required")
+	}
+	actions := properties["action"].Enum
+	if len(actions) == 0 {
+		t.Fatal("action enum is empty")
+	}
+	contract := messaging.ApplicabilityTable()
+	for _, action := range actions {
+		entry, ok := contract[action]
+		if !ok {
+			t.Errorf("action %q is absent from messaging contract", action)
+			continue
+		}
+		for _, name := range entry.Permitted {
+			property, ok := properties[name]
+			if !ok {
+				t.Errorf("action %q permits %q, missing from schema", action, name)
+				continue
+			}
+			if property.Type != entry.Types[name] {
+				t.Errorf("action %q property %q has type %q, want %q", action, name, property.Type, entry.Types[name])
+			}
+			if !bindings[name] {
+				t.Errorf("action %q property %q has no binding", action, name)
+			}
 		}
 	}
 }
