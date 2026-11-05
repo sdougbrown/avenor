@@ -129,9 +129,6 @@ func checkMessaging(ctx context.Context, opts runtime.StartOptions, info protoco
 	if opts.Broker == nil || opts.RuntimeID == "" {
 		return &messagingFailure{reason: "broker identity was not provisioned"}
 	}
-	if _, ok := opts.Broker.LastPolled(opts.RuntimeID); !ok {
-		return fmt.Errorf("broker has no run record for %s", opts.RuntimeID)
-	}
 	found := false
 	for _, tool := range info.Tools {
 		if tool.Name == "call_cli" {
