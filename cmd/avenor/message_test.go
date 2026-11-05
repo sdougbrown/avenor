@@ -197,15 +197,18 @@ func TestMessageRejectsInvalidBrokerURL(t *testing.T) {
 }
 
 func TestMessageUsage(t *testing.T) {
-	for _, missing := range []string{"", "AVENOR_BROKER_URL", "AVENOR_BROKER_TOKEN", "AVENOR_RUN_ID"} {
+	for _, missing := range []string{"", "--action=", "AVENOR_BROKER_URL", "AVENOR_BROKER_TOKEN", "AVENOR_RUN_ID"} {
 		t.Run(missing, func(t *testing.T) {
 			for _, k := range []string{"AVENOR_BROKER_URL", "AVENOR_BROKER_TOKEN", "AVENOR_RUN_ID"} {
 				t.Setenv(k, "valid")
 			}
 			args := []string{"message", "--action=tell", "--target=x", "--message=x"}
-			if missing == "" {
+			switch missing {
+			case "":
 				args = []string{"message"}
-			} else {
+			case "--action=":
+				args = []string{"message", "--action=", "--target=x", "--message=x"}
+			default:
 				t.Setenv(missing, "")
 			}
 			var out, stderr bytes.Buffer

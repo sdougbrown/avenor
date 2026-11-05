@@ -61,6 +61,8 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 	if err != nil {
 		return nil, err
 	}
+	// The command is the reply path of the broker feed, so it routes as the feed
+	// surface.
 	provider, err := childmessaging.NewMessageProvider(messaging.SurfaceFeed, childmessaging.Options{RunID: runID, Token: token, BrokerURL: url})
 	if err != nil {
 		return nil, fmt.Errorf("avenor message: %w", err)
