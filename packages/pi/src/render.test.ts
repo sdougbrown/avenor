@@ -129,6 +129,16 @@ describe('Avenor Pi renderers', () => {
       'Guidance: The final result is delivered automatically; end your turn instead of re-polling.',
       'Final output: unavailable.',
     ].join('\n'))
+
+    const backgroundedPermission = { ...backgrounded, status: 'waiting', pending_permission: { description: 'allow write' } }
+    expect(text(renderResultResult(result(backgroundedPermission), expanded, theme, { run_id: 'call-run' }))).toBe([
+      'Result: worker — waiting',
+      'Run: run-3',
+      'The wait was backgrounded; the run keeps going and its completion is delivered automatically.',
+      'Permission: allow write',
+      'Guidance: Permission input is required, but no options are available; call avenor_inspect with run_id "run-3".',
+      'Final output: unavailable.',
+    ].join('\n'))
   })
 
   it('renders permission, follow-up, events, inspect, and shutdown without serializing details', () => {

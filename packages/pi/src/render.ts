@@ -296,7 +296,7 @@ function resultLines(details: unknown, args: ResultArgs, expanded: boolean): str
       ? ['The wait was backgrounded; the run keeps going and its completion is delivered automatically.']
       : []),
     ...(pending ? [`Permission: ${selected(pending, 'description')}`] : []),
-    result.backgrounded === true
+    result.backgrounded === true && !pending
       ? 'Guidance: The final result is delivered automatically; end your turn instead of re-polling.'
       : guidance(state, pending, runId),
     ...(result.output_truncated === true

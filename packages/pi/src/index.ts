@@ -485,23 +485,25 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return `reached ${stop.status}`
     }
 
-    function interruptPendingWaits(stop: StoppingPoint, excludeRunKey?: string): void {
+    /** Snapshot-copy, delete before interrupt: one loop owns the registry
+     * invariant, so a re-entrancy or ordering change lands in one place. */
+    function interruptWaits(matches: (wait: PendingWait) => boolean, stop: StoppingPoint): void {
       for (const wait of [...pendingWaits]) {
-        if (wait.runKey === excludeRunKey) continue
+        if (!matches(wait)) continue
         pendingWaits.delete(wait)
         wait.interrupt(stop)
       }
+    }
+
+    function interruptPendingWaits(stop: StoppingPoint, excludeRunKey?: string): void {
+      interruptWaits(wait => wait.runKey !== excludeRunKey, stop)
     }
 
     /** Interrupt only the waits bound to one run. A wait that backgrounds
      * itself (or is backgrounded by command) must not wake siblings waiting
      * on other runs, unlike a run's own stopping point. */
     function interruptWaitsForRun(runKey: string, stop: StoppingPoint): void {
-      for (const wait of [...pendingWaits]) {
-        if (wait.runKey !== runKey) continue
-        pendingWaits.delete(wait)
-        wait.interrupt(stop)
-      }
+      interruptWaits(wait => wait.runKey === runKey, stop)
     }
 
     function registerPendingWait(runKey: string, interrupt: PendingWait['interrupt']): PendingWait {
@@ -647,7 +649,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const stop: StoppingPoint = { runId: tracked?.runId ?? params.run_id, status: 'backgrounded' }
       const { interrupted_by, ...result } = await resultAfterInterrupt(params, stop, tracked, { redeliverWaiting: false })
       void interrupted_by
-      return { ...result, backgrounded: true, note: BACKGROUND_NOTE }
+      return {
+        ...result,
+        backgrounded: true,
+        note: result.pending_permission
+          ? 'The wait was moved to the background; the run is waiting for a permission, which you can answer with avenor_answer_permission.'
+          : BACKGROUND_NOTE,
+      }
     }
 
     // Sub-agent broker mode: when the avenor pi provider launches a pi
@@ -2659,6 +2667,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const previousBlocking = tracked?.blocking
         if (tracked) tracked.blocking = true
         let completed = false
+        // A backgrounded exit hands delivery to the poll loop, so the claim
+        // ends on exit instead of being restored to its entry state.
+        let clearClaimOnExit = false
         let resultRun = tracked
 
         // Key on the resolved run (getTrackedRun may have matched by label or
@@ -2696,6 +2707,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             if (!stop || stop.synthetic) throw err
             if (stop.status === 'backgrounded') {
               result = await resultAfterBackground(params, tracked)
+              clearClaimOnExit = true
               // Arm automatic delivery for a run this session was not
               // tracking. A tracked run is released by the finally below; the
               // poll loop delivers its completion either way.
@@ -2760,7 +2772,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
               // release the blocking flag so polling may deliver it later.
               tracked.blocking = previousBlocking ?? false
             }
-          } else if (resultRun && result.status === 'waiting') {
+          } else if (!clearClaimOnExit && resultRun && result.status === 'waiting') {
             resultRun.permissionNotified = true
           }
           return {
@@ -2771,9 +2783,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           blockingWait?.dispose()
           // An incomplete call releases only the run it claimed at entry: the
           // reconciled run may be owned by another in-flight result call, and
-          // its claim must survive this call's exit.
+          // its claim must survive this call's exit. A backgrounded exit is
+          // the exception — the claim ends unconditionally, or the last of
+          // two concurrent backgrounded calls would restore a claim nobody
+          // holds and park the completion notice forever.
           if (!completed && tracked && trackedRuns.get(trackedRunKey(tracked.supervisorId, tracked.runId)) === tracked) {
-            tracked.blocking = previousBlocking ?? false
+            tracked.blocking = clearClaimOnExit ? false : (previousBlocking ?? false)
           }
         }
       },
