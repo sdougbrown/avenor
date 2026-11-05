@@ -31,6 +31,17 @@ import (
 	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
+func TestProviderMessagingRetryOutcome(t *testing.T) {
+	sup := newTestSupervisor(t, Config{})
+	child := &childRuntime{messagingOn: true}
+	off := false
+	child.session = runtime.Session{SessionID: "retry", MessagingOn: &off, MessagingWarning: "fallback"}
+	sup.recordMessagingOutcome(child, child.session)
+	if child.messagingOn || child.session.MessagingWarning != "" {
+		t.Fatalf("retry outcome not consumed: %+v", child.session)
+	}
+}
+
 func TestProviderMessagingOutcome(t *testing.T) {
 	sup := newTestSupervisor(t, Config{})
 	child := &childRuntime{messagingOn: true}
