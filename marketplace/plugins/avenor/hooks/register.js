@@ -5,7 +5,9 @@
 // - Outbound: a `session.send` hook intercepts SendMessage addressed to
 //   `avenor:<run id or label>`, resolves it against the broker's `GET
 //   /sessions`, delivers through `POST /send`, and answers
-//   `{ isDelivered: true }` only after the broker queues the message. A send
+//   `{ isDelivered: true }` only after the broker queues the message. A tell
+//   pins the generation that listing advertised, because its minted id is
+//   versioned and the broker refuses a versioned send that names none. A send
 //   whose text answers a queued inbound ask from the same peer rides that
 //   ask's reply edge (`reply_to`), so the asker's own wait unblocks.
 // - Inbound: a long-poll subscription on `POST /poll-control` (agent rows
@@ -18,11 +20,14 @@
 //   carries an `ask` action; a `tool.call` hook on `mcp__avenor__message`
 //   serves that action through this session's broker credentials (an
 //   expects_reply send blocking on `/wait_reply` in the hook, the same shape
-//   the avenor surfaces' ask action takes, retracting the edge when that wait
-//   fails, as the pi and core ask paths do). It also answers a peer ask this
-//   session itself received — those asks live in this module's correlation
-//   table, not in an edge store the MCP server could claim — and passes every
-//   other action through to the MCP server. The hook, not `$.tool.register`:
+//   the avenor surfaces' ask action takes, leaving the ask open for a later
+//   answer when that wait fails, as the pi and core ask paths do). It also
+//   answers an inbound peer message this session received — an ask or a tell,
+//   addressed by its message id; those correlations live in this module's
+//   table, not in an edge store the MCP server could claim, and a tell's
+//   answer names no target because the broker resolves the recorded return
+//   route. Every other action passes through to the MCP server. The hook, not
+//   `$.tool.register`:
 //   the plugin also ships an MCP server named "avenor", and a registered tool
 //   under `mcp__avenor__*` would be refused as a replacement for it. A failed
 //   ask renders the shared ask sentences (wire.js mirrors
@@ -75,7 +80,7 @@ const layer = { ...OFF }
 let broker = null
 let busyTurns = 0
 const pendingReplies = new Map()
-const MAX_PENDING_ASKS = 128
+const MAX_REMEMBERED_MESSAGES = 128
 
 export async function register(on) {
   await on("session.send", async (d, e) => deliverIfAvenor(d, e))
@@ -131,6 +136,10 @@ async function deliverOutbound(d, ref, text) {
   // edge pending, so the model's retry still rides it.
   const askId = peekReply(target.runId)
   const hasReply = askId !== null
+  // A tell pins the generation the resolution read: its id is versioned, and a
+  // versioned send names the generation it was admitted under, so an unpinned
+  // tell is refused outright. A reply names no generation — its edge's
+  // generation is the broker's to resolve, not this send's to assert.
   const body = hasReply
     ? buildAgentMessage({
         fromRunId: broker.runID,
@@ -146,6 +155,7 @@ async function deliverOutbound(d, ref, text) {
         messageId: mintMessageID(await d.clock.now()),
         message: text,
         role: "agent",
+        generation: target.generation,
       })
   let response
   try {
@@ -506,16 +516,19 @@ async function runAsk(d, target, ref, message, rawTimeout) {
 }
 
 /**
- * Answer a peer ask this session received. The correlation table, not the
- * broker's edge store, is where those asks live, so the hook sends the reply
- * itself along the same reply-edge send `session.send` uses. A `reply_to` the
- * table does not hold passes through to the MCP server, whose own refusal is
- * then the honest answer.
+ * Answer an inbound peer message this session received, addressed by its message
+ * id. An ask names the edge's owner so the broker finds that edge; a tell or an
+ * answer names no target, and the broker resolves the recorded return route, so
+ * answering never needs a fresh listing that may hide the peer. The correlation
+ * table, not the broker's edge store, is where those messages live, so the hook
+ * sends the reply itself along the same reply-edge send `session.send` uses. A
+ * `reply_to` the table does not hold passes through to the MCP server, whose own
+ * refusal is then the honest answer.
  */
 async function serveReply(d, e) {
   const replyTo = typeof e.reply_to === "string" ? e.reply_to : ""
-  const peer = peerOwingAsk(replyTo)
-  if (peer === "") {
+  const answer = pendingReplies.get(replyTo)
+  if (answer === undefined) {
     return undefined
   }
   const message = typeof e.message === "string" ? e.message : ""
@@ -527,7 +540,7 @@ async function serveReply(d, e) {
   try {
     const response = await brokerPost(d, "/send", buildAgentMessage({
       fromRunId: broker.runID,
-      toRunId: peer,
+      toRunId: answer.expectsReply ? answer.peer : "",
       messageId: replyTo + ".reply",
       message: message,
       role: "agent",
@@ -762,21 +775,25 @@ function undelivered(reason) {
 }
 
 /**
- * The inbound asks this session can still answer, keyed by the ask's message id
- * and holding the peer that asked. Only real asks (expects_reply) correlate — a
- * peer's courtesy reply is a message, not an edge, and remembering it would
- * point the next send at a dead edge. The table is bounded because a session
- * can receive asks it never answers: the oldest edge is forgotten first.
+ * The inbound messages this session can still answer, keyed by the message's id
+ * and holding the peer it came from and whether it opened an edge. Only an ask
+ * lets a plain send ride its edge; a tell is still remembered so the reply
+ * action can answer it by id without resolving the peer. The table is bounded
+ * because a session can receive messages it never answers: the oldest entry is
+ * forgotten first.
  */
 function rememberReply(ask) {
-  if (ask.expectsReply === true && ask.messageId !== "") {
-    pendingReplies.set(ask.messageId, ask.fromRunId)
-    forgetOldestAsk()
+  if (ask.messageId !== "") {
+    pendingReplies.set(ask.messageId, {
+      peer: ask.fromRunId,
+      expectsReply: ask.expectsReply === true,
+    })
+    forgetOldestMessage()
   }
 }
 
-function forgetOldestAsk() {
-  if (pendingReplies.size > MAX_PENDING_ASKS) {
+function forgetOldestMessage() {
+  if (pendingReplies.size > MAX_REMEMBERED_MESSAGES) {
     const oldest = pendingReplies.keys().next()
     if (oldest.done !== true) {
       pendingReplies.delete(oldest.value)
@@ -787,16 +804,10 @@ function forgetOldestAsk() {
 /** The newest ask a peer is still owed, so a plain send to it rides that edge. */
 function peekReply(runId) {
   let askId = null
-  for (const [pendingId, peer] of pendingReplies) {
-    askId = peer === runId ? pendingId : askId
+  for (const [pendingId, entry] of pendingReplies) {
+    askId = entry.peer === runId && entry.expectsReply ? pendingId : askId
   }
   return askId
-}
-
-/** The peer an ask this session received belongs to, or "" when it holds none. */
-function peerOwingAsk(askId) {
-  const peer = pendingReplies.get(askId)
-  return typeof peer === "string" ? peer : ""
 }
 
 function dropReply(askId) {

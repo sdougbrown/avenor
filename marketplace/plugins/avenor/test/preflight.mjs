@@ -25,8 +25,10 @@
 // failed /poll-control pauses the loop without killing it, 11a a broker-less
 // session stays off with one reason line, 11b a
 // partial listing refuses every ref, 11c one ask reads one listing, 11d a
-// stale self-minted name is reminted then registered, 11e a failed wait
-// retracts its ask.
+// stale self-minted name is reminted then registered, 11e a failed wait keeps
+// its ask open for a late answer, 11f the reply action answers an inbound tell
+// by message id without reading a listing that hides the peer, 11g a tell
+// pinned to a replaced generation is still refused.
 //
 // Every wait is a deadline-bounded poll, not a fixed sleep.
 //
@@ -600,7 +602,7 @@ if (typeof timedOutAsk.message_id !== 'string' || timedOutAsk.message_id === '')
   console.log('FAIL: the timed-out ask carries no message id to withdraw with', timedOutAsk)
   process.exit(1)
 }
-if (!timedOutAsk.text.includes('withdraw it with avenor_message action="withdraw" message_id="' + timedOutAsk.message_id + '"')) {
+if (!timedOutAsk.text.includes('the ask stays open for a later answer, and avenor_message action="withdraw" message_id="' + timedOutAsk.message_id + '"')) {
   console.log('FAIL: the timed-out ask does not render the shared withdraw guidance', timedOutAsk)
   process.exit(1)
 }
@@ -608,6 +610,22 @@ if (timedOutAsk.reply !== undefined) {
   console.log('FAIL: a timed-out ask carried a reply', timedOutAsk)
   process.exit(1)
 }
+// #533 keeps a timed-out ask open so a late answer can still land, and an open
+// edge from the probe refuses the probe's own ask back as a mutual ask. The
+// probe is this ask's target, so it answers now: the late answer lands as an
+// ordinary inbound message and the edge is consumed before the next ask.
+const lateTimeoutAnswer = await probeSendTo('claude-parent', {
+  id: timedOutAsk.message_id + '.reply',
+  message: 'the late answer to the timed-out ask',
+  replyTo: timedOutAsk.message_id,
+})
+console.log(JSON.stringify({ check: 'late answer admitted', status: lateTimeoutAnswer.status, body: lateTimeoutAnswer.text }))
+if (!lateTimeoutAnswer.ok) {
+  console.log('FAIL: the late answer to the timed-out ask was refused', lateTimeoutAnswer)
+  process.exit(1)
+}
+await until('the late answer to arrive as an inbound message',
+  () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('the late answer to the timed-out ask')))
 
 console.log('=== 7. unknown avenor ref (before any gate) ===')
 const miss = await callHook('session.send').hook(d, { to: 'avenor:nope', text: 'z', origin: { kind: 'model' } })
@@ -890,6 +908,81 @@ if (listingsRead !== 1) {
 }
 await drainProbe()
 
+console.log('=== 11f. the reply action answers an inbound tell by message id, with no listing ===')
+// A tell opens no ask edge, so its answer can only name the id it answers: the
+// broker resolves the recorded return route. The listing here hides the peer,
+// which is what a fresh directory read of a hidden peer looks like; the reply
+// must land anyway, without the hook reading it.
+let tellReplyListings = 0
+const tellReplyRunId = freshRunId('claude-tellreply')
+const tellReplyCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: tellReplyRunId,
+}, listingStub({
+  sessions: [],
+  generation: 'gen-hidden',
+  messaging_protocol: 1,
+}, () => { tellReplyListings += 1 }))
+const tellReplyID = mintAskID()
+const tellReplySend = await probeSendTo(tellReplyRunId, {
+  id: tellReplyID, message: 'answer this tell by its message id', generation: listing.generation,
+})
+console.log(JSON.stringify({ check: 'tell for reply-by-id admitted', status: tellReplySend.status }))
+if (!tellReplySend.ok) {
+  console.log('FAIL: the probe could not send the tell for the reply-by-id step', tellReplySend)
+  process.exit(1)
+}
+await until('the tell to reach the reply-by-id session',
+  () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('answer this tell by its message id')))
+const tellReplyResult = JSON.parse((await tellReplyCopy.hooks['tool.call{"tool":"mcp__avenor__message"}'](tellReplyCopy.d, {
+  tool: 'mcp__avenor__message', action: 'reply', reply_to: tellReplyID, message: 'answered by message id',
+})).result)
+console.log(JSON.stringify({ check: 'reply-by-id result', listingsRead: tellReplyListings, tellReplyResult }))
+if (tellReplyResult.action !== 'reply' || tellReplyResult.outcome !== 'replied' ||
+    tellReplyResult.message_id !== tellReplyID) {
+  console.log('FAIL: the reply action did not answer the inbound tell', tellReplyResult)
+  process.exit(1)
+}
+if (tellReplyListings !== 0) {
+  console.log('FAIL: the reply-by-id path read the peer listing ' + tellReplyListings + ' times')
+  process.exit(1)
+}
+const tellReplyRow = await until('the probe to receive the reply-by-id answer', async () => {
+  const rows = await probePoll()
+  return rows.find((m) => m && m.type === 'agent_message' &&
+    JSON.stringify(m).includes('answered by message id')) ?? null
+})
+const tellReplyBody = typeof tellReplyRow.payload === 'string' ? JSON.parse(tellReplyRow.payload) : tellReplyRow.payload
+console.log(JSON.stringify({ check: 'probe received reply-by-id answer', replyTo: tellReplyBody.reply_to, from: tellReplyRow.from_run_id }))
+if (tellReplyBody.reply_to !== tellReplyID || tellReplyRow.from_run_id !== tellReplyRunId) {
+  console.log('FAIL: the reply-by-id answer did not carry the tell route', tellReplyRow)
+  process.exit(1)
+}
+
+console.log('=== 11g. a replaced generation still refuses the tell ===')
+// Pinning the generation must not weaken the fence: a listing whose generation
+// the broker has since replaced makes the tell name a generation the store does
+// not hold, and the send is refused rather than retargeted to the replacement.
+const replacedListing = await probeSessions()
+const staleRunId = freshRunId('claude-stale')
+const staleCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: staleRunId,
+}, listingStub({
+  sessions: replacedListing.sessions,
+  generation: 'gen-replaced',
+  messaging_protocol: 1,
+}, () => {}))
+const staleSend = await staleCopy.hooks['session.send'](staleCopy.d, {
+  to: `avenor:${probe.runId}`, text: 'a tell against a replaced generation', origin: { kind: 'model' },
+})
+console.log(JSON.stringify({ check: 'stale generation refused', staleSend }))
+if (!staleSend || staleSend.isDelivered !== false ||
+    !String(staleSend.reason).includes('generation-mismatch')) {
+  console.log('FAIL: a tell pinned to a replaced generation was not refused', staleSend)
+  process.exit(1)
+}
+
 console.log('=== 11d. a stale self-minted name is reminted once, then registered ===')
 // A self-minted `claude-<hex>` can collide with a record the broker still holds
 // from an earlier session, which this session cannot authenticate against. One
@@ -936,16 +1029,17 @@ if (!remintRow || refusedRow) {
   process.exit(1)
 }
 
-console.log('=== 11e. a failed wait retracts its ask, leaving no edge to answer ===')
+console.log('=== 11e. a failed wait keeps its ask open, so a late answer still lands ===')
 // A wait that fails for a reason the broker did not classify — a cut connection
-// rather than its own 504 — leaves the ask's edge live. The hook retracts it, as
-// the pi and core ask paths do, so a reply arriving afterwards finds no edge
-// instead of landing where no waiter will read it.
+// rather than its own 504 — reports possibly-pending and leaves the ask's edge
+// live (#533: a timed-out or abandoned ask stays open for a later answer; the
+// hook does not retract it, matching the pi and core ask paths). A reply
+// arriving afterwards therefore completes the edge instead of being refused.
 let waitCutOnce = false
-const retractRunId = freshRunId('claude-retract')
-const retractCopy = await layerCopy({ base: '2.1.311' }, {
+const lateAskRunId = freshRunId('claude-lateask')
+const lateAskCopy = await layerCopy({ base: '2.1.311' }, {
   AVENOR_BROKER_URL: BROKER,
-  AVENOR_RUN_ID: retractRunId,
+  AVENOR_RUN_ID: lateAskRunId,
 }, async (url, init = {}) => {
   if (url.endsWith('/wait_reply') && !waitCutOnce) {
     waitCutOnce = true
@@ -955,7 +1049,7 @@ const retractCopy = await layerCopy({ base: '2.1.311' }, {
   const text = await res.text()
   return { status: res.status, ok: res.ok, headers: {}, text }
 })
-const cutAsk = JSON.parse((await askHookCall(retractCopy, {
+const cutAsk = JSON.parse((await askHookCall(lateAskCopy, {
   target: `avenor:${probe.runId}`, message: 'the wait gets cut', timeout_ms: 5000,
 })).result)
 console.log(JSON.stringify({ check: 'a cut wait reports its failure', cutAsk }))
@@ -964,15 +1058,15 @@ if (cutAsk.outcome !== 'possibly-pending' || cutAsk.reply !== undefined) {
   process.exit(1)
 }
 await drainProbe()
-const retractedReply = await probeSendTo(retractRunId, {
+const lateAnswer = await probeSendTo(lateAskRunId, {
   id: cutAsk.message_id + '.reply',
-  message: 'a late answer to a retracted ask',
+  message: 'a late answer to the abandoned ask',
   replyTo: cutAsk.message_id,
 })
-const retractedBody = JSON.parse(retractedReply.text)
-console.log(JSON.stringify({ check: 'a reply after the retraction finds no edge', retractedBody }))
-if (retractedBody.outcome !== 'edge-absent') {
-  console.log('FAIL: a failed wait left its ask edge live', retractedBody)
+const lateAnswerBody = JSON.parse(lateAnswer.text)
+console.log(JSON.stringify({ check: 'a late answer still completes the abandoned edge', lateAnswerBody }))
+if (lateAnswerBody.outcome !== 'replied') {
+  console.log('FAIL: a failed wait closed its ask edge', lateAnswerBody)
   process.exit(1)
 }
 
