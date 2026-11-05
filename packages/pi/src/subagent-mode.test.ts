@@ -587,6 +587,49 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 
+  it('delivers a late reply to a timed-out ask as an ordinary inbound message', async () => {
+    // The wait ended but the ask's edge stayed open, so the late answer rides
+    // the poll as a plain peer message: no reply instruction, no error result.
+    const fetchStub = stubBrokerFetch([
+      [],
+      [
+        {
+          type: 'agent_message',
+          from_run_id: 'supervisor',
+          payload: {
+            id: 'ask-late.reply',
+            from: 'supervisor',
+            from_run_id: 'supervisor',
+            message: 'LATE-PONG',
+            role: 'agent',
+            reply_to: 'ask-late',
+          },
+        },
+      ],
+    ], 0, 0, 0, {
+      '/wait_reply': () => Response.json({ outcome: 'timed-out' }),
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub })
+      const result = await harness.registeredTools.avenor_message.execute('t1', {
+        action: 'ask',
+        target: 'supervisor',
+        message: 'anyone there?',
+      })
+      expect(result.details.outcome).toBe('timed-out')
+      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
+      const [body, options] = harness.sendUserMessage.mock.calls[0] as [string, { deliverAs: string }]
+      expect(body).toContain('Message from peer')
+      expect(body).toContain('LATE-PONG')
+      expect(body).not.toContain('reply_to')
+      expect(options.deliverAs).toBe('steer')
+    } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
   it('keeps a child ask open when the tool call aborts', async () => {
     const fetchStub = stubBrokerFetch([], 0, 0, 0, {
       '/sessions': supervisorSessions,
