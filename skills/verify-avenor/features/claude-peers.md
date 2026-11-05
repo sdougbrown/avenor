@@ -6,9 +6,10 @@ is delivered through the broker (and answered `{isDelivered:true}` by the
 `session.send` hook), inbound asks are long-polled off `POST /poll-control`
 and submitted as prompts when the session is idle, and the avenor message
 tool's `ask` action is served against the session's own broker credentials,
-blocking on `/wait_reply` and retracting the edge when that wait fails, while
-its `reply` action answers an ask the session itself received. Trust comes
-from the broker's authenticated run identity, never from message text.
+blocking on `/wait_reply` and leaving the ask open for a later answer when that
+wait fails, while its `reply` action answers an inbound peer message by message
+id, without resolving the peer. Trust comes from the broker's authenticated run
+identity, never from message text.
 
 ## How a user reaches it
 
@@ -62,17 +63,20 @@ broker URL in their environment; the supervisor is the harness's own
    "av1...","text":"pong","reply":"pong"}` once the peer answers — the reply
    edge consumed, nothing left pending. Leave it unanswered and the result is
    `{"action":"ask","outcome":"timed-out","message_id":"av1...","text":"no
-   reply to \"av1...\" from \"<peer>\" before the timeout; withdraw it with
-   avenor_message action=\"withdraw\" message_id=\"av1...\""}` — the sentence
-   every surface renders, not raw HTTP text.
-4. In the session that received an ask, answer it with the message tool's
-   `reply` action (`{action: "reply", reply_to: "<message id from the
+   reply to \"av1...\" from \"<peer>\" before the timeout; the ask stays open
+   for a later answer, and avenor_message action=\"withdraw\"
+   message_id=\"av1...\" drops it"}` — the sentence every surface renders, not
+   raw HTTP text; a late answer still lands as an ordinary message.
+4. In the session that received an ask or a tell, answer it with the message
+   tool's `reply` action (`{action: "reply", reply_to: "<message id from the
    frame>", message: "…"}`). Proof: the tool result is the router's reply
    shape `{"action":"reply","outcome":"replied","message_id":"av1...",
    "text":"reply to \"av1...\" delivered"}` and the asker's `ask` unblocks;
    answering the same id again passes through to the MCP server instead, whose
    `edge-absent` result is the honest answer for an ask the hook no longer
-   holds.
+   holds. A tell opens no edge, so its reply names no target — the broker
+   resolves the recorded return route — and answering never reads the peer
+   listing, so a peer hidden from a fresh directory read is answerable.
 
 The session transcript JSONL under `~/.claude/projects/<cwd slug>/` is the
 verbatim record (the tmux pane renderer can lag behind a completed turn; read
@@ -151,7 +155,10 @@ passing an unknown `reply_to` through, busy-path append, an unpaired
 `turn.complete` clamping at zero with the next live turn still appending, two
 outstanding asks from one peer (a plain send riding the newest, the `reply`
 action still reaching the older by id), the ask tool's reply
-and timed-out shapes, a cut `/wait_reply` retracting its edge, a refused
+and timed-out shapes, a cut `/wait_reply` keeping its edge open for a late
+answer, an inbound tell answered by message id with no listing, a tell pinned
+to a replaced generation still refused, an open ask surviving a flood of more
+than 128 inbound tells, a refused
 `prompt.submit` falling back to a row while the rest of the batch still lands,
 a `/poll-control` failure pausing the loop without killing it, ask-input
 refusals that never reach the peer, a partial listing refusing resolution,
