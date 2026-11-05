@@ -1,12 +1,10 @@
 package runtime
 
-import "fmt"
-
 // MessagingUnavailableError reports that an explicit messaging request cannot be met.
 type MessagingUnavailableError struct{ Reason string }
 
 func (e *MessagingUnavailableError) Error() string {
-	return fmt.Sprintf("poo messaging requires poo v0.2.0 or later: %s", e.Reason)
+	return e.Reason
 }
 
 const MessagingUnavailableStopReason = "messaging_unavailable"

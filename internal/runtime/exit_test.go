@@ -2,6 +2,13 @@ package runtime
 
 import "testing"
 
+func TestMessagingUnavailableErrorUsesReason(t *testing.T) {
+	err := &MessagingUnavailableError{Reason: "another backend cannot message"}
+	if got := err.Error(); got != "another backend cannot message" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
 func TestIsRetryableFailure(t *testing.T) {
 	if !IsRetryableFailure(1, "") {
 		t.Fatal("generic exit code 1 should be retryable")

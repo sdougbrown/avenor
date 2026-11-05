@@ -85,7 +85,7 @@ func TestEarlyManifestFailureReportsOnlyFieldLine(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 	_, err := p.Start(context.Background(), avruntime.StartOptions{})
 	var unavailable *avruntime.MessagingUnavailableError
-	if !errors.As(err, &unavailable) || !strings.Contains(err.Error(), "feeds.paths") || strings.Contains(err.Error(), "trace-") {
+	if !errors.As(err, &unavailable) || err.Error() != "poo messaging requires poo v0.2.0 or later: feeds.paths: invalid" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

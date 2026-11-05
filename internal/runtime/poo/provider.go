@@ -306,7 +306,7 @@ func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, b
 			return nil, protocol.SessionInfo{}, opts, err
 		}
 		if opts.Messaging != nil && *opts.Messaging {
-			return nil, protocol.SessionInfo{}, opts, &runtime.MessagingUnavailableError{Reason: failure.reason}
+			return nil, protocol.SessionInfo{}, opts, &runtime.MessagingUnavailableError{Reason: "poo messaging requires poo v0.2.0 or later: " + failure.reason}
 		}
 		*warning = failure.reason
 		log.Printf("warning: poo messaging unavailable: %s", failure.reason)
