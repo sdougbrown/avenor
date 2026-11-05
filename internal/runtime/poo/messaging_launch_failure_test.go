@@ -75,18 +75,26 @@ func TestMessagingLaunchFailures(t *testing.T) {
 
 func TestEarlyManifestFailureReportsOnlyFieldLine(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	opts, _ := fallbackFixture(t, "")
-	on := true
-	opts.Messaging = &on
-	if err := os.WriteFile(opts.Launch.Command, []byte("#!/bin/sh\necho trace-before >&2\necho 'feeds.paths: invalid' >&2\necho trace-after >&2\nexit 1\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	p := NewWithOptions(opts)
-	t.Cleanup(func() { _ = p.Close() })
-	_, err := p.Start(context.Background(), avruntime.StartOptions{})
-	var unavailable *avruntime.MessagingUnavailableError
-	if !errors.As(err, &unavailable) || err.Error() != "poo messaging requires poo v0.2.0 or later: feeds.paths: invalid" {
-		t.Fatalf("unexpected error: %v", err)
+	for _, tc := range []struct{ name, line, want string }{
+		{"field line", "feeds.paths: invalid", "feeds.paths: invalid"},
+		{"unicode at limit", "feeds.paths: " + strings.Repeat("x", 386) + "éafter", "feeds.paths: " + strings.Repeat("x", 386) + "é"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, _ := fallbackFixture(t, "")
+			on := true
+			opts.Messaging = &on
+			script := "#!/bin/sh\necho trace-before >&2\necho '" + tc.line + "' >&2\necho trace-after >&2\nexit 1\n"
+			if err := os.WriteFile(opts.Launch.Command, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			p := NewWithOptions(opts)
+			t.Cleanup(func() { _ = p.Close() })
+			_, err := p.Start(context.Background(), avruntime.StartOptions{})
+			var unavailable *avruntime.MessagingUnavailableError
+			if !errors.As(err, &unavailable) || err.Error() != "poo messaging requires poo v0.2.0 or later: "+tc.want {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 

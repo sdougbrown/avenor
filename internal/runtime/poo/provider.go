@@ -335,8 +335,8 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 			for _, line := range strings.Split(cause, "\n") {
 				if manifestRefusal(line) {
 					line = strings.TrimSpace(line)
-					if len(line) > 400 {
-						line = line[:400]
+					if runes := []rune(line); len(runes) > 400 {
+						line = string(runes[:400])
 					}
 					return nil, &messagingFailure{reason: line}
 				}
