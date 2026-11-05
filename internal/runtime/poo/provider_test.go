@@ -309,6 +309,59 @@ func (f pooFixture) startOptions(t *testing.T) avruntime.StartOptions {
 	}
 }
 
+func TestMessagingWakeRealPoo(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("POO_FEEDS_PATH", "")
+	t.Setenv("POO_CLI_REGISTRY_PATH", "")
+	avenor := filepath.Join(t.TempDir(), "avenor")
+	cmd := exec.Command("go", "build", "-o", avenor, "../../../cmd/avenor")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build avenor: %v\n%s", err, out)
+	}
+	old := avenorExecutable
+	avenorExecutable = func() (string, error) { return avenor, nil }
+	t.Cleanup(func() { avenorExecutable = old })
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	token, _, err := b.EnsureRun("child", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := b.EnsureRun("supervisor", ""); err != nil {
+		t.Fatal(err)
+	}
+	endpoint := newFakeEndpoint(t, scriptedTurn{Text: "done"})
+	fixture := newPooFixture(t, endpoint)
+	opts := fixture.startOptions(t)
+	opts.MessagingOn, opts.Broker, opts.RuntimeID, opts.BrokerToken = true, b, "child", token
+	provider, session, log, _ := startProvider(t, opts)
+	if session.MessagingOn == nil || !*session.MessagingOn {
+		t.Fatal("messaging did not take")
+	}
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "initial"))
+	log.waitForCount(t, "session.end", 1, 10*time.Second)
+	if err := b.SendTo("supervisor", "child", "agent_message", json.RawMessage(`{"id":"wake-id","message":"wake-marker","expects_reply":false}`), "wake-id"); err != nil {
+		t.Fatal(err)
+	}
+	log.waitForCount(t, "session.end", 2, 30*time.Second)
+	found := false
+	for _, text := range endpoint.promptTexts() {
+		if strings.Contains(text, `<feed name="avenor-inbox"`) && strings.Contains(text, "wake-marker") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("wake input missing: %#v", endpoint.promptTexts())
+	}
+	if _, err := provider.Resume(context.Background(), session.SessionID); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	awaitPrompt(t, startPrompt(provider, session.SessionID, "follow-up"))
+}
+
 func TestMessagingOutcomeRealPoo(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("POO_FEEDS_PATH", "")
