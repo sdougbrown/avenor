@@ -261,6 +261,12 @@ type messagingFailure struct{ reason string }
 
 func (e *messagingFailure) Error() string { return e.reason }
 
+// manifestRefusal checks text because poo v0.2.0's wire ErrorData has only
+// Code and Detail, with the field name in the detail; stderr has no code.
+func manifestRefusal(text string) bool {
+	return strings.Contains(text, "feeds.paths") || strings.Contains(text, "cli_registry.paths")
+}
+
 // openSession applies the same fallback to creation and cross-process resume.
 func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, baseline time.Time, warning *string, open func(*client) (protocol.SessionInfo, error)) (*client, protocol.SessionInfo, runtime.StartOptions, error) {
 	for {
@@ -279,7 +285,7 @@ func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, b
 		var info protocol.SessionInfo
 		if err == nil {
 			info, err = open(c)
-			if err != nil && (strings.Contains(err.Error(), "feeds.paths") || strings.Contains(err.Error(), "cli_registry.paths")) {
+			if err != nil && manifestRefusal(err.Error()) {
 				err = &messagingFailure{reason: err.Error()}
 			}
 			if err == nil && opts.MessagingOn {
@@ -327,7 +333,7 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 		cause := c.exitCause()
 		if opts.MessagingOn && exited && ctx.Err() == nil {
 			for _, line := range strings.Split(cause, "\n") {
-				if strings.Contains(line, "feeds.paths") || strings.Contains(line, "cli_registry.paths") {
+				if manifestRefusal(line) {
 					line = strings.TrimSpace(line)
 					if len(line) > 400 {
 						line = line[:400]

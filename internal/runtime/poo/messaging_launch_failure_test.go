@@ -12,6 +12,21 @@ import (
 	avruntime "github.com/sdougbrown/avenor/internal/runtime"
 )
 
+func TestManifestRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"feeds.paths: invalid", true},
+		{"cli_registry.paths: invalid", true},
+		{"other setting: invalid", false},
+	} {
+		if got := manifestRefusal(tc.text); got != tc.want {
+			t.Errorf("manifestRefusal(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
 func TestMessagingLaunchFailures(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	for _, scenario := range []struct{ name, action string }{
