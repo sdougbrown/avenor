@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "feeds": {
+    "avenor-inbox": {
+      "description": "Receive Avenor messages",
+      "command": [{{json .Executable}}, "feed", "broker", {{json .LockFlag}}, {{json .AsksFlag}}],
+      "env": {"AVENOR_BROKER_URL": "env:AVENOR_BROKER_URL", "AVENOR_RUN_ID": "env:AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN": "env:AVENOR_BROKER_TOKEN"},
+      "on_idle": "wake",
+      "restart": true
+    }
+  }
+}
