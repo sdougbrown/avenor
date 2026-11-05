@@ -24,6 +24,7 @@ var manifestTemplates embed.FS
 
 var avenorExecutable = os.Executable
 var manifestMaxAge = 7 * 24 * time.Hour
+var manifestChtimes = os.Chtimes
 
 type manifestPaths struct{ feeds, registry string }
 type manifestContent struct{ feed, registry []byte }
@@ -82,11 +83,12 @@ func publishManifests(stateHome string, content manifestContent) (manifestPaths,
 	}
 	if complete() {
 		now := time.Now()
-		if err := os.Chtimes(dest, now, now); err != nil {
+		if err := manifestChtimes(dest, now, now); err == nil {
+			pruneManifests(root, dest)
+			return paths, nil
+		} else if !os.IsNotExist(err) {
 			return manifestPaths{}, err
 		}
-		pruneManifests(root, dest)
-		return paths, nil
 	}
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return manifestPaths{}, err
@@ -113,7 +115,10 @@ func publishManifests(stateHome string, content manifestContent) (manifestPaths,
 			return manifestPaths{}, fmt.Errorf("publish poo manifests: %w", err)
 		}
 		now := time.Now()
-		if err := os.Chtimes(dest, now, now); err != nil {
+		if err := manifestChtimes(dest, now, now); err != nil {
+			if os.IsNotExist(err) {
+				return publishManifests(stateHome, content)
+			}
 			return manifestPaths{}, err
 		}
 	}

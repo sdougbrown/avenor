@@ -122,6 +122,32 @@ func TestPublishManifestsPrunesOldDigests(t *testing.T) {
 	}
 }
 
+func TestPublishManifestsRepublishesAfterPruneRace(t *testing.T) {
+	root := t.TempDir()
+	content := manifestContent{[]byte("feed"), []byte("registry")}
+	paths, err := publishManifests(root, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := manifestChtimes
+	manifestChtimes = func(path string, atime, mtime time.Time) error {
+		manifestChtimes = original
+		if err := os.RemoveAll(path); err != nil {
+			t.Fatal(err)
+		}
+		return original(path, atime, mtime)
+	}
+	t.Cleanup(func() { manifestChtimes = original })
+	got, err := publishManifests(root, content)
+	if err != nil || got != paths {
+		t.Fatalf("republish: %v %v", got, err)
+	}
+	data, err := os.ReadFile(filepath.Join(got.feeds, "avenor.json"))
+	if err != nil || string(data) != "feed" {
+		t.Fatalf("republished feed: %q %v", data, err)
+	}
+}
+
 func TestPublishManifestsIgnoresPruneFailure(t *testing.T) {
 	root := t.TempDir()
 	content := manifestContent{[]byte("feed"), []byte("registry")}
