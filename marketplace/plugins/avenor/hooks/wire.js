@@ -148,7 +148,9 @@ export function parseControlMessage(msg) {
 export function frameInboundAsk(ask) {
   const sender = ask.sender !== "" ? ask.sender : ask.fromRunId
   let frame = "**📨 Message from avenor peer `" + sender + "`** (broker run `" + ask.fromRunId + "`"
-  frame += ask.messageId === "" ? "" : ", message id `" + ask.messageId + "`"
+  // The id is peer-controlled: the header escapes it the way a quoted fact is
+  // escaped, while the parsed id keeps the bytes a reply correlates against.
+  frame += ask.messageId === "" ? "" : ", message id `" + escapeNonPrintable(ask.messageId) + "`"
   frame += ")\n\n"
   frame += ask.message
   if (ask.expectsReply === true) {

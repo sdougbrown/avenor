@@ -148,6 +148,24 @@ test('frameInboundAsk: the sender is broker-stamped, the reply target is the run
   assert.doesNotMatch(bare, /message id/)
 })
 
+test('frameInboundAsk: the header id is escaped, the correlation id stays raw', () => {
+  // The id is peer-controlled. The header escapes control, bidi and zero-width
+  // characters so the frame cannot carry an override into tool text, and a
+  // backslash renders as the escape it is; the parsed id keeps the bytes a
+  // reply correlates against.
+  const hostile = 'av1.x\\y\u202Ez\u0000w\u200Bv'
+  const tell = parseControlMessage({
+    type: 'agent_message', id: hostile, from_run_id: 'peer', sender: 'Probe',
+    payload: { from_run_id: 'peer', message: 'fyi' },
+  })
+  assert.equal(tell.messageId, hostile)
+  const text = frameInboundAsk(tell)
+  assert.doesNotMatch(text, /[\u0000\u200b\u202a-\u202e]/)
+  assert.match(text, /message id `av1\.x\\\\y\\u202ez\\u0000w\\u200bv`/)
+  // An ordinary av1 id is left alone.
+  assert.match(frameInboundAsk({ ...tell, messageId: 'av1.m.envelope' }), /message id `av1\.m\.envelope`/)
+})
+
 test('parseControlMessage: sender fallbacks keep the peer addressable', () => {
   // A row whose payload names only `from` (no from_run_id) still resolves its
   // sender; a row with no server-stamped sender and no `from` falls back to the
