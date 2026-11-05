@@ -135,11 +135,21 @@ func checkMessaging(ctx context.Context, c *client, info protocol.SessionInfo) (
 	}
 	ctx, cancel := context.WithTimeout(ctx, messagingPollLimit)
 	defer cancel()
+	var lastStatus string
+	// poo lists a feed's job before its command starts, so only a running
+	// job shows the feed came up. A restarting or held job may still recover
+	// within the wait.
+	notSeen := func(err error) string {
+		if last := lastStatus; last != "" {
+			return fmt.Sprintf("feed:avenor-inbox is %s, not running: %v", last, err)
+		}
+		return fmt.Sprintf("feed:avenor-inbox not seen: %v", err)
+	}
 	for {
 		raw, rpcErr, err := c.call(ctx, protocol.MethodSessionGet, protocol.GetParams{SessionID: info.SessionID})
 		if err != nil {
 			if ctx.Err() != nil {
-				return false, fmt.Sprintf("feed:avenor-inbox not seen: %v", ctx.Err())
+				return false, notSeen(ctx.Err())
 			}
 			return false, fmt.Sprintf("session/get: %v", err)
 		}
@@ -152,14 +162,17 @@ func checkMessaging(ctx context.Context, c *client, info protocol.SessionInfo) (
 		}
 		for _, job := range result.Jobs {
 			if job.JobID == "feed:avenor-inbox" {
-				return true, ""
+				if job.Status == "running" {
+					return true, ""
+				}
+				lastStatus = job.Status
 			}
 		}
 		timer := time.NewTimer(messagingPollInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return false, fmt.Sprintf("feed:avenor-inbox not seen: %v", ctx.Err())
+			return false, notSeen(ctx.Err())
 		case <-timer.C:
 		}
 	}

@@ -390,7 +390,15 @@ func TestMessagingReadinessWait(t *testing.T) {
 	for _, tc := range []struct {
 		mode string
 		want bool
-	}{{"messaging-late", true}, {"messaging-never", false}} {
+		// reason is what a failed check names.
+		reason string
+	}{
+		{"messaging-late", true, ""},
+		{"messaging-never", false, "not seen"},
+		// A feed whose command keeps failing is listed, but never running.
+		{"messaging-restarting", false, "restarting"},
+		{"messaging-recovers", true, ""},
+	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			t.Setenv(helperEnv, tc.mode)
 			c, err := startClient(context.Background(), avruntime.StartOptions{Launch: backendlaunch.Spec{Command: os.Args[0]}}, nil)
@@ -403,7 +411,7 @@ func TestMessagingReadinessWait(t *testing.T) {
 			if ok != tc.want {
 				t.Fatalf("got %v, reason %q", ok, reason)
 			}
-			if !ok && (!strings.Contains(reason, "feed:avenor-inbox") || time.Since(started) < messagingPollLimit) {
+			if !ok && (!strings.Contains(reason, "feed:avenor-inbox") || !strings.Contains(reason, tc.reason) || time.Since(started) < messagingPollLimit) {
 				t.Fatalf("reason %q, elapsed %v", reason, time.Since(started))
 			}
 		})
@@ -1925,11 +1933,16 @@ func runHelperServer(mode string) int {
 		}
 		switch request.Method {
 		case protocol.MethodSessionGet:
-			if mode == "messaging-late" || mode == "messaging-never" {
+			if mode == "messaging-late" || mode == "messaging-never" || mode == "messaging-restarting" || mode == "messaging-recovers" {
 				getCount++
 				result := protocol.GetResult{}
-				if mode == "messaging-late" && getCount >= 3 {
-					result.Jobs = []protocol.JobInfo{{JobID: "feed:avenor-inbox"}}
+				switch {
+				case mode == "messaging-late" && getCount >= 3:
+					result.Jobs = []protocol.JobInfo{{JobID: "feed:avenor-inbox", Status: "running"}}
+				case mode == "messaging-restarting", mode == "messaging-recovers" && getCount < 3:
+					result.Jobs = []protocol.JobInfo{{JobID: "feed:avenor-inbox", Status: "restarting"}}
+				case mode == "messaging-recovers":
+					result.Jobs = []protocol.JobInfo{{JobID: "feed:avenor-inbox", Status: "running"}}
 				}
 				write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
 				continue
