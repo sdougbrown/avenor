@@ -73,6 +73,9 @@ func NewWithOptions(opts runtime.StartOptions) *Provider {
 
 var _ runtime.Provider = (*Provider)(nil)
 
+// WakesUnprompted reports that an inbox message can start a run while idle.
+func (p *Provider) WakesUnprompted() bool { return true }
+
 // RecoveredDenialIsCompletion reports that poo hands a denied call back to the
 // model as a tool result and the run continues, so an end_turn after one is a
 // completion rather than a tool_denied failure.

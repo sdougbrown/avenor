@@ -23,6 +23,11 @@ type Provider interface {
 	Capabilities(ctx context.Context) (Capabilities, error)
 }
 
+// UnpromptedRuns identifies providers that can start runs without a prompt.
+type UnpromptedRuns interface {
+	WakesUnprompted() bool
+}
+
 // WarmMessageAdmission is the optional guard for providers that inject broker
 // messages at turn boundaries. A warm resume must not overtake queued or
 // in-flight messages for the session.

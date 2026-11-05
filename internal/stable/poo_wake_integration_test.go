@@ -1,7 +1,6 @@
 package stable
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,10 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/sdougbrown/avenor/client"
-	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
 
@@ -114,18 +111,7 @@ func testPooInboxWake(t *testing.T, ask bool) {
 	if !strings.Contains(string(before), "DONE") {
 		t.Fatalf("sentinel: %s", before)
 	}
-	var wakeEvents <-chan events.Event
-	if !ask {
-		child.mu.Lock()
-		provider := child.provider
-		child.mu.Unlock()
-		ctx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
-		wakeEvents, err = provider.Events(ctx, statusBefore.(map[string]any)["session_id"].(string))
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	// Observe the durable stream; another provider subscription would duplicate the watcher.
 	if err := sup.broker.SendTo("supervisor", spawned.RuntimeID, "agent_message", json.RawMessage(`{"id":"wake-id","message":"wake","expects_reply":false}`), "wake-id"); err != nil {
 		t.Fatal(err)
 	}
@@ -136,11 +122,8 @@ func testPooInboxWake(t *testing.T, ask bool) {
 			data, _ := os.ReadFile(sessionLog)
 			return strings.Contains(string(data), `"record":"permission.asked"`)
 		})
-		if err := sup.RuntimePrompt(spawned.RuntimeID, "continue", ""); err != nil {
-			t.Fatal(err)
-		}
 		var requestID string
-		waitFor(t, "permission request replay", func() bool {
+		waitFor(t, "idle permission request", func() bool {
 			data, _ := os.ReadFile(eventPath)
 			for _, line := range strings.Split(string(data), "\n") {
 				var event map[string]any
@@ -153,31 +136,24 @@ func testPooInboxWake(t *testing.T, ask bool) {
 		if err := sup.RuntimeAnswerPermission(spawned.RuntimeID, requestID, "allow", ""); err != nil {
 			t.Fatal(err)
 		}
-		waitForStableChild(t, child, func(active, completed bool, phase, label string) bool {
-			return !active && phase == "done" && calls.Load() >= 3
+		waitFor(t, "wake tool result and settlement", func() bool {
+			data, _ := os.ReadFile(sessionLog)
+			return calls.Load() >= 3 && strings.Contains(string(data), "wake\\n") && strings.Count(string(data), `"record":"run.settled"`) >= 2
 		})
+		data, err := os.ReadFile(eventPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count := strings.Count(string(data), `"event":"permission.request"`); count != 1 {
+			t.Fatalf("got %d permission requests, want one: %s", count, data)
+		}
 		return
 	}
 	waitFor(t, "wake settlement", func() bool {
 		data, _ := os.ReadFile(sessionLog)
-		return calls.Load() >= 2 && strings.Count(string(data), `"record":"run.settled"`) >= 2
+		eventData, _ := os.ReadFile(eventPath)
+		return calls.Load() >= 2 && strings.Count(string(data), `"record":"run.settled"`) >= 2 && strings.Count(string(eventData), `"event":"session.end"`) >= 2
 	})
-	timer := time.NewTimer(10 * time.Second)
-	defer timer.Stop()
-settlement:
-	for {
-		select {
-		case ev, ok := <-wakeEvents:
-			if !ok {
-				t.Fatal("wake event stream closed")
-			}
-			if ev.Event == "session.end" {
-				break settlement
-			}
-		case <-timer.C:
-			t.Fatal("wake settlement did not reach provider")
-		}
-	}
 	after, err := os.ReadFile(sentinel)
 	if err != nil {
 		t.Fatal(err)

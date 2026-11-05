@@ -473,6 +473,9 @@ type childRuntime struct {
 	// Every path that takes more than one of these locks takes them in that
 	// order; admitWarmResume references this comment instead of restating it.
 	turnMu sync.Mutex
+	// idleWatchCancel and idleWatchDone are owned by the direct run goroutine.
+	idleWatchCancel context.CancelFunc
+	idleWatchDone   <-chan struct{}
 	// lc is the closed lifecycle state owned by the pure machine
 	// (runtime_lifecycle.go) and committed field by field by the adapter
 	// (runtime_lifecycle_apply.go). Read it through the field-specific
@@ -2461,6 +2464,7 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			}
 		}
 		s.recordWorkflowTermination(child, panicked, ctx)
+		s.stopIdleWatcher(child)
 		providerLifecycle := s.beginChildShutdown(child)
 		s.finishUnstartedWarmResume(child)
 		s.closeChildEventWriter(child)
@@ -3907,6 +3911,7 @@ func (s *Supervisor) statusIdentity(child *childRuntime, sessionID string) effec
 }
 
 func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, resumeID, promptText string, launchAttempt int) childAttemptResult {
+	s.stopIdleWatcher(child)
 	deadline, _ := ctx.Deadline()
 	child.mu.Lock()
 	// The adapter owns attemptPreparing: it clears the phase presentation.
@@ -3999,6 +4004,18 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 		s.emitChildError(child, fmt.Sprintf("subscribe events: %v", err), "error")
 		return childAttemptResult{exitCode: 1, sessionID: session.SessionID}
 	}
+	if capability, ok := attemptProvider.(runtime.UnpromptedRuns); ok && capability.WakesUnprompted() {
+		defer func() {
+			cancelEvents()
+			writer := s.fanoutWriterLocked(child)
+			// Poo closes the channel after unsubscribing on cancellation; its
+			// publisher never blocks on a full subscriber buffer.
+			for ev := range eventCh {
+				s.writeIdleEvent(child, writer, ev)
+			}
+			s.startIdleWatcher(child, attemptProvider, session.SessionID, writer)
+		}()
+	}
 
 	preAdoptionID := session.SessionID
 	promptSessionID := session.SessionID
@@ -4052,6 +4069,60 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 	})
 	exitCode := result.ExitCode
 	return childAttemptResult{exitCode: exitCode, sessionID: session.SessionID, stopReason: result.StopReason, retryAfter: result.RetryAfter}
+}
+
+// startIdleWatcher preserves at most one subscriber per child: its caller has
+// joined the attempt subscription, and the next attempt joins this watcher.
+// A gap can lose ordinary events as before; poo holds permission events for replay.
+// Cancellation alone is insufficient: Events unsubscribes asynchronously.
+func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Provider, sessionID string, writer *runtimeFanoutWriter) {
+	if child.lifecycleCtx.Err() != nil {
+		return
+	}
+	// A closing child cannot answer an idle request, so do not subscribe.
+	if _, admitted := s.beginChildProviderTurn(child, s.ensureChildProviderLifecycle(child)); !admitted {
+		return
+	}
+	ctx, cancel := context.WithCancel(child.lifecycleCtx)
+	eventCh, err := provider.Events(ctx, sessionID)
+	if err != nil {
+		cancel()
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s idle event subscription: %v\n", child.id, err)
+		return
+	}
+	done := make(chan struct{})
+	child.idleWatchCancel, child.idleWatchDone = cancel, done
+	go func() {
+		defer close(done)
+		for ev := range eventCh {
+			s.writeIdleEvent(child, writer, ev)
+		}
+	}()
+}
+
+func (s *Supervisor) writeIdleEvent(child *childRuntime, writer *runtimeFanoutWriter, ev events.Event) {
+	if ev.Event == "permission.request" {
+		requestID, _ := ev.Fields["request_id"].(string)
+		options, _ := ev.Fields["options"].([]any)
+		if requestID != "" && s.control != nil {
+			// Prepare must precede publication so the request is answerable.
+			// It releases control locks before Write takes writeMu then controlMu.
+			// A pre-publication direct answer can race this write; its response
+			// also passes through the canonical writer.
+			s.control.PreparePermissionClaim(child.id, requestID, control.PermissionResolverNoResolver, options)
+		}
+	}
+	if err := writer.Write(ev); err != nil {
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s idle event write: %v\n", child.id, err)
+	}
+}
+
+func (s *Supervisor) stopIdleWatcher(child *childRuntime) {
+	if child.idleWatchCancel != nil {
+		child.idleWatchCancel()
+		<-child.idleWatchDone
+		child.idleWatchCancel, child.idleWatchDone = nil, nil
+	}
 }
 
 func (s *Supervisor) attemptSession(ctx context.Context, child *childRuntime, resumeID string, launchAttempt int) (runtime.Session, error) {
