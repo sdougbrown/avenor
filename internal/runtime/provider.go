@@ -241,11 +241,9 @@ func MergeStartOptions(base, override StartOptions) StartOptions {
 	if override.PersistSessions != nil {
 		merged.PersistSessions = override.PersistSessions
 	}
-	if override.Messaging != nil {
+	if override.Messaging != nil || override.MessagingOn {
 		merged.Messaging = override.Messaging
 		merged.MessagingOn = override.MessagingOn
-	} else if override.MessagingOn {
-		merged.MessagingOn = true
 	}
 	if override.ClaudeMCPWait != 0 {
 		merged.ClaudeMCPWait = override.ClaudeMCPWait

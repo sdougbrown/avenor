@@ -36,6 +36,28 @@ func TestValidateLaunchWrapperRejectsNULByte(t *testing.T) {
 	}
 }
 
+func TestMergeStartOptionsMessaging(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		name           string
+		base, override StartOptions
+		want           *bool
+		wantOn         bool
+	}{
+		{"empty keeps base", StartOptions{Messaging: &on, MessagingOn: true}, StartOptions{}, &on, true},
+		{"explicit off", StartOptions{Messaging: &on, MessagingOn: true}, StartOptions{Messaging: &off}, &off, false},
+		{"explicit on", StartOptions{Messaging: &off}, StartOptions{Messaging: &on, MessagingOn: true}, &on, true},
+		{"resolved on clears choice", StartOptions{Messaging: &off}, StartOptions{MessagingOn: true}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MergeStartOptions(tc.base, tc.override)
+			if got.Messaging != tc.want || got.MessagingOn != tc.wantOn {
+				t.Fatalf("messaging = %v, on = %v; want %v, %v", got.Messaging, got.MessagingOn, tc.want, tc.wantOn)
+			}
+		})
+	}
+}
+
 func TestMergeStartOptionsOverridesLaunchWrapper(t *testing.T) {
 	base := StartOptions{LaunchWrapper: []string{"base"}}
 	merged := MergeStartOptions(base, StartOptions{LaunchWrapper: []string{"nice", "-n", "5"}})
