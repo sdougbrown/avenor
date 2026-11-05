@@ -779,8 +779,9 @@ function undelivered(reason) {
  * and holding the peer it came from and whether it opened an edge. Only an ask
  * lets a plain send ride its edge; a tell is still remembered so the reply
  * action can answer it by id without resolving the peer. The table is bounded
- * because a session can receive messages it never answers: the oldest entry is
- * forgotten first.
+ * because a session can receive messages it never answers: an entry that opened
+ * no edge is forgotten first, so a flood of tells cannot forget a live ask, and
+ * asks go oldest first only when every entry is an ask.
  */
 function rememberReply(ask) {
   if (ask.messageId !== "") {
@@ -793,12 +794,17 @@ function rememberReply(ask) {
 }
 
 function forgetOldestMessage() {
-  if (pendingReplies.size > MAX_REMEMBERED_MESSAGES) {
-    const oldest = pendingReplies.keys().next()
-    if (oldest.done !== true) {
-      pendingReplies.delete(oldest.value)
+  if (pendingReplies.size <= MAX_REMEMBERED_MESSAGES) {
+    return
+  }
+  let victim = pendingReplies.keys().next().value
+  for (const [pendingId, entry] of pendingReplies) {
+    if (entry.expectsReply !== true) {
+      victim = pendingId
+      break
     }
   }
+  pendingReplies.delete(victim)
 }
 
 /** The newest ask a peer is still owed, so a plain send to it rides that edge. */

@@ -28,7 +28,8 @@
 // stale self-minted name is reminted then registered, 11e a failed wait keeps
 // its ask open for a late answer, 11f the reply action answers an inbound tell
 // by message id without reading a listing that hides the peer, 11g a tell
-// pinned to a replaced generation is still refused.
+// pinned to a replaced generation is still refused, 11h a flood of inbound
+// tells cannot forget an open ask (the next send still rides its edge).
 //
 // Every wait is a deadline-bounded poll, not a fixed sleep.
 //
@@ -982,6 +983,64 @@ if (!staleSend || staleSend.isDelivered !== false ||
   console.log('FAIL: a tell pinned to a replaced generation was not refused', staleSend)
   process.exit(1)
 }
+
+console.log('=== 11h. an open ask survives a flood of inbound tells ===')
+// The reply correlation is what lets a plain send ride an ask's edge. A flood
+// of unrelated tells must not forget that ask when the bounded table overflows:
+// a tell opened no edge, so it is the one to forget. Otherwise the send becomes
+// a new tell and the asker's wait never resolves.
+const floodRunId = freshRunId('claude-flood')
+const floodCopy = await layerCopy({ base: '2.1.311' }, {
+  AVENOR_BROKER_URL: BROKER,
+  AVENOR_RUN_ID: floodRunId,
+})
+const floodAsk = mintAskID()
+const floodAskSend = await probeSendTo(floodRunId, {
+  id: floodAsk, message: 'the ask that must survive the flood', expectsReply: true, generation: listing.generation,
+})
+if (!floodAskSend.ok) {
+  console.log('FAIL: the ask for the flood step was refused', floodAskSend)
+  process.exit(1)
+}
+let floodWait = null
+probeWait(floodAsk, listing.generation, 15000).then((r) => {
+  floodWait = r
+  return r
+}).catch((err) => waitRejected('the flood ask', err))
+await until('the ask to reach the flood session',
+  () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('the ask that must survive the flood')))
+const FLOOD_TELLS = 130
+for (let i = 0; i < FLOOD_TELLS; i += 1) {
+  const floodTell = await probeSendTo(floodRunId, { id: 'flood-tell-' + i, message: 'chatter ' + i })
+  if (!floodTell.ok) {
+    console.log('FAIL: flood tell ' + i + ' was refused', floodTell)
+    process.exit(1)
+  }
+}
+await until('the last flood tell to be delivered',
+  () => events.some((e) => e.kind === 'prompt.submit' && e.line.includes('chatter ' + (FLOOD_TELLS - 1))))
+await drainProbe()
+const afterFloodSend = await floodCopy.hooks['session.send'](floodCopy.d, {
+  to: `avenor:${probe.runId}`, text: 'the answer after the flood', origin: { kind: 'model' },
+})
+console.log(JSON.stringify({ check: 'send after the flood', afterFloodSend }))
+if (!afterFloodSend || afterFloodSend.isDelivered !== true) {
+  console.log('FAIL: the send after the flood was not delivered', afterFloodSend)
+  process.exit(1)
+}
+// A reply that completes a live edge comes back through the asker's wait, not
+// as a queued row, so the wait body is where the proper reply is observed. On
+// the regression the send became a new tell: it still claims delivered, and the
+// wait expires with no reply.
+const floodWaitShape = await until('the flood ask to unblock', () => floodWait)
+console.log(JSON.stringify({ check: 'the flood ask unblocked with the answer', status: floodWaitShape.status }))
+const floodWaitBody = floodWaitShape.body || ''
+if (!floodWaitShape.ok || !floodWaitBody.includes('the answer after the flood') ||
+    !floodWaitBody.includes('"outcome":"replied"')) {
+  console.log('FAIL: a flood of tells forgot the open ask, so its wait never got the reply', floodWaitShape)
+  process.exit(1)
+}
+await drainProbe()
 
 console.log('=== 11d. a stale self-minted name is reminted once, then registered ===')
 // A self-minted `claude-<hex>` can collide with a record the broker still holds
