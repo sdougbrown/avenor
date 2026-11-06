@@ -441,3 +441,243 @@ func TestWriteFailureReportsAllUndeliveredIDs(t *testing.T) {
 		t.Fatalf("exit %d logs %q", code, logs.String())
 	}
 }
+
+// TestAskClaimPruneRoot covers where pruning happens. The supervised poo path
+// always passes --asks-dir, and it passes the default directory, so a prune
+// keyed on an empty flag would never run where the per-run directories
+// accumulate.
+func TestAskClaimPruneRoot(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "avenor")
+	brokerURL := "http://127.0.0.1:9"
+	defaultDir, err := askclaim.DefaultDir(stateHome, brokerURL, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot := askclaim.DefaultRoot(stateHome)
+	for _, tc := range []struct {
+		name     string
+		asksDir  string
+		wantPrun bool
+	}{
+		{name: "no flag prunes the default root", wantPrun: true},
+		{name: "the default directory passed explicitly still prunes", asksDir: defaultDir, wantPrun: true},
+		{name: "a caller's own directory is left alone", asksDir: filepath.Join(t.TempDir(), "asks"), wantPrun: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, prune := askClaimPruneRoot(tc.asksDir, stateHome, brokerURL, "r")
+			if prune != tc.wantPrun {
+				t.Fatalf("prune = %v, want %v", prune, tc.wantPrun)
+			}
+			if prune && root != wantRoot {
+				t.Fatalf("root = %q, want %q", root, wantRoot)
+			}
+		})
+	}
+}
+
+// TestExplicitDefaultAskDirectoryPrunes is the production shape: poo's manifest
+// passes --asks-dir pointing at the default directory, so a feed started that
+// way must prune the records an earlier run left behind.
+func TestExplicitDefaultAskDirectoryPrunes(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	stateHome := filepath.Join(root, "avenor")
+	asksDir, err := askclaim.DefaultDir(stateHome, s.URL, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An earlier run's answered ask, older than the bound.
+	stale := filepath.Join(asksDir, "earlier.claimed")
+	if err := os.MkdirAll(asksDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte(`{"message_id":"earlier","asker_run_id":"s"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// An earlier run's directory is as old as its records; the directory's own
+	// age is what the prune gates on, so a feed starting now cannot lose a
+	// directory another feed is filling.
+	aged := time.Now().Add(-2 * askclaim.AskClaimMaxAge)
+	for _, path := range []string{stale, asksDir} {
+		if err := os.Chtimes(path, aged, aged); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), AsksDir: asksDir, Out: out, RequestTimeout: time.Second})
+	defer func() { cancel(); awaitExit(t, done) }()
+	waitForPrune(t, stale)
+}
+
+// waitForPrune waits for the feed's start-up prune, which runs before the first
+// poll, so the record disappears without any message being delivered.
+func waitForPrune(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s survived the start-up prune", path)
+}
+
+// TestPruneFailureDoesNotStopTheFeed pins the non-fatal half of the start-up
+// prune. A state home whose feed-asks path is a regular file makes the prune
+// fail, and the feed must still deliver: the same contract the manifest prune
+// already has.
+func TestPruneFailureDoesNotStopTheFeed(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	if err := os.MkdirAll(filepath.Join(root, "avenor"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "avenor", "feed-asks"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var polls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		if polls.Add(1) == 1 {
+			fmt.Fprint(w, `[{"id":"m1","from_run_id":"sender","payload":{"id":"m1","message":"still here","expects_reply":false}}]`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: out, RequestTimeout: time.Second})
+	select {
+	case <-out.wrote:
+	case <-time.After(3 * time.Second):
+		cancel()
+		awaitExit(t, done)
+		t.Fatalf("a failed prune stopped delivery; output: %s", out.String())
+	}
+	cancel()
+	awaitExit(t, done)
+}
+
+// TestRunningFeedPrunesNewRecords is what start-up pruning cannot cover: the
+// feed outlives the retention window, so records written after it started must
+// still be swept while it runs. The first delivery proves the feed is past its
+// start-up prune, which otherwise races this test's own write.
+func TestRunningFeedPrunesNewRecords(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	oldInterval := askClaimPruneInterval
+	askClaimPruneInterval = 20 * time.Millisecond
+	t.Cleanup(func() { askClaimPruneInterval = oldInterval })
+
+	var polls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		if polls.Add(1) == 1 {
+			fmt.Fprint(w, `[{"id":"m1","from_run_id":"sender","payload":{"id":"m1","message":"running","expects_reply":false}}]`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: out, RequestTimeout: time.Second})
+	defer func() { cancel(); awaitExit(t, done) }()
+	select {
+	case <-out.wrote:
+	case <-time.After(3 * time.Second):
+		t.Fatal("feed did not deliver, so it never reached its poll loop")
+	}
+
+	// Written after the start-up prune has certainly run.
+	asksDir, err := askclaim.DefaultDir(filepath.Join(root, "avenor"), s.URL, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(asksDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	late := filepath.Join(asksDir, "late.json")
+	if err := os.WriteFile(late, []byte(`{"message_id":"late","asker_run_id":"s"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	aged := time.Now().Add(-2 * askclaim.AskClaimMaxAge)
+	if err := os.Chtimes(late, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	waitForPrune(t, late)
+}
+
+// TestStartAskClaimPrunerStops proves the pruner's stop function waits for the
+// goroutine. A pruner that outlived the feed would keep pruning after the
+// consumer lock was released, which is the exclusivity the lock exists for.
+func TestStartAskClaimPrunerStops(t *testing.T) {
+	oldInterval := askClaimPruneInterval
+	askClaimPruneInterval = time.Hour // no tick during the test
+	t.Cleanup(func() { askClaimPruneInterval = oldInterval })
+
+	b := &Broker{RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", Log: io.Discard}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := b.startAskClaimPruner(ctx, &pruneReporter{out: io.Discard})
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not return, so the pruner goroutine did not exit")
+	}
+}
+
+// TestPruneFailureIsReportedOncePerRoot is the log half of the non-fatal
+// contract: an unwritable root fails identically every hour, so the diagnostic
+// must land once, and land again only after a pass that succeeds.
+func TestPruneFailureIsReportedOncePerRoot(t *testing.T) {
+	var log strings.Builder
+	b := &Broker{RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", Log: &log}
+	// The default root is what pruneAskClaims targets, so the unwritable shape
+	// has to sit exactly there.
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	root := askclaim.DefaultRoot(filepath.Join(stateHome, "avenor"))
+	if err := os.MkdirAll(filepath.Dir(root), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reporter := &pruneReporter{out: &log}
+	b.pruneAskClaims(reporter)
+	first := strings.Count(log.String(), "prune ask claim records")
+	b.pruneAskClaims(reporter)
+	if second := strings.Count(log.String(), "prune ask claim records"); second != first {
+		t.Fatalf("the same failure was reported again: %d then %d", first, second)
+	}
+	if first == 0 {
+		t.Fatal("the first failure was not reported")
+	}
+	// A root that prunes cleanly forgets the suppression.
+	reporter.forget(root)
+	b.pruneAskClaims(reporter)
+	if third := strings.Count(log.String(), "prune ask claim records"); third != first+1 {
+		t.Fatalf("a later failure was suppressed: %d then %d", first, third)
+	}
+}

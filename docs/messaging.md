@@ -91,6 +91,19 @@ without a record, reports `edge-absent`. The broker resolves a reply to a tell
 without a claim record. A `timed-out` ask exits 0 and remains open to a later
 reply; use `--action withdraw --message-id MESSAGE_ID` to close it.
 
+Each run gets its own directory under `feed-asks`. The default root is pruned
+when a feed starts: records older than thirty days go, and a run directory left
+empty goes with them. That window is a tradeoff rather than a wait bound. A
+timed-out ask stays answerable until it is withdrawn, so a reply to one older
+than the window reports `edge-absent` instead of landing. Losing an answered
+ask's record changes nothing visible, because a second reply reports
+`edge-absent` either way. Each record answers for its own age, so a run
+directory a feed keeps writing to still has its expired records swept. The
+directory itself is removed only when it is empty and untouched inside the
+window. A feed creating its first record therefore cannot lose the directory to
+a sibling's prune. Only the default root is pruned; a directory named by
+`--asks-dir` is the caller's to clean.
+
 ## Transport contract
 
 ```go

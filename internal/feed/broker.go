@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/appdir"
@@ -81,6 +82,8 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 		return 1
 	}
+	reporter := &pruneReporter{out: b.Log}
+	b.pruneAskClaims(reporter)
 	if b.AsksDir == "" {
 		b.AsksDir, err = askclaim.DefaultDir(appdir.StateHome(), b.BrokerURL, b.RunID)
 		if err != nil {
@@ -102,6 +105,12 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		return 0
 	}
 	defer unlock()
+	// Prune for as long as this feed holds its lock, not for as long as ctx
+	// lives: run returns on parent loss and terminal errors while ctx is still
+	// open, and a pruner outliving the lock would contradict the exclusivity
+	// the lock is taken for.
+	stopPruner := b.startAskClaimPruner(ctx, reporter)
+	defer stopPruner()
 	alive := func() bool { return parentPID() == parent }
 	wait := func(d time.Duration) bool {
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -253,4 +262,108 @@ func terminal(err error) bool {
 		return status.Status >= 400 && status.Status < 500
 	}
 	return errors.Is(err, localhttp.ErrUnsupportedLocalProtocol) || errors.Is(err, messaging.ErrAuthRejected) || errors.Is(err, messaging.ErrInvalidRequest)
+}
+
+// askClaimPruneInterval paces the prune a running feed performs. A feed lives
+// as long as its supervisor parent, so start-up pruning alone would leave every
+// record written since then in place. The interval is a variable so a test can
+// shorten it.
+var askClaimPruneInterval = time.Hour
+
+// pruneAskClaims removes expired records from the default root. It is
+// housekeeping: a failure is reported and the feed keeps running, which is why
+// neither caller branches on the error.
+func (b *Broker) pruneAskClaims(reporter *pruneReporter) {
+	root, prune := askClaimPruneRoot(b.AsksDir, appdir.StateHome(), b.BrokerURL, b.RunID)
+	if !prune {
+		return
+	}
+	if err := askclaim.PruneRoot(root, askclaim.AskClaimMaxAge); err != nil {
+		reporter.report(root, err)
+		return
+	}
+	reporter.forget(root)
+}
+
+// pruneReporter reports prune failures once per root and message. The prune
+// runs hourly for the life of a feed, and an unwritable root fails identically
+// on every pass; repeating it would bury everything else in the log.
+//
+// It is a pointer-owned type rather than fields on Broker: Broker is passed by
+// value, and a mutex inside it makes every copy a copylocks finding and every
+// future method a cross-copy race.
+type pruneReporter struct {
+	mu     sync.Mutex
+	logged map[string]string
+	out    io.Writer
+}
+
+func (r *pruneReporter) report(root string, err error) {
+	message := err.Error()
+	r.mu.Lock()
+	if r.logged == nil {
+		r.logged = make(map[string]string)
+	}
+	if r.logged[root] == message {
+		r.mu.Unlock()
+		return
+	}
+	r.logged[root] = message
+	r.mu.Unlock()
+	fmt.Fprintln(r.out, "feed broker: prune ask claim records:", err)
+}
+
+// forget clears the suppression for a root that pruned cleanly, so a later
+// failure is reported again.
+func (r *pruneReporter) forget(root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.logged, root)
+}
+
+// startAskClaimPruner prunes on each tick and returns a stop function that
+// waits for the goroutine to exit. Waiting matters for an embedder whose ctx
+// outlives the feed.
+//
+// Feeds for different runs hold different locks (the key is the (broker, run)
+// pair) and prune the same root concurrently. That is benign because every step
+// of PruneRoot is best-effort and idempotent; it is not an invariant to lean on.
+func (b *Broker) startAskClaimPruner(ctx context.Context, reporter *pruneReporter) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(askClaimPruneInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				b.pruneAskClaims(reporter)
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+// askClaimPruneRoot reports the directory to prune, if any. The supervised poo
+// path always passes --asks-dir, and it passes the default one, so keying on
+// an empty flag would prune exactly the deployments that do not accumulate.
+func askClaimPruneRoot(asksDir, stateHome, brokerURL, runID string) (string, bool) {
+	defaultDir, err := askclaim.DefaultDir(stateHome, brokerURL, runID)
+	if err != nil {
+		return "", false
+	}
+	if asksDir != "" && asksDir != defaultDir {
+		// A caller's own directory is the caller's to clean: pruning it would
+		// mean deleting files under a path whose layout we merely assume.
+		return "", false
+	}
+	return askclaim.DefaultRoot(stateHome), true
 }

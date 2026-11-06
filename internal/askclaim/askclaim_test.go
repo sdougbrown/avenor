@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestRecord checks the persisted ask and its permissions.
@@ -149,5 +150,113 @@ func TestAClaimedAskIsNotRecordedAgain(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "av1.ask.json")); !os.IsNotExist(err) {
 		t.Fatalf("claimed ask was recorded again: %v", err)
+	}
+}
+
+// TestPruneRootRemovesExpiredRecords proves the housekeeping a feed does on
+// start over the state matrix that matters: a run directory whose records all
+// expired goes, a directory holding a pending ask keeps the ask and itself
+// while its expired sibling goes, a directory a feed is writing to right now is
+// left alone, and anything that is not a claim record survives.
+func TestPruneRootRemovesExpiredRecords(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * AskClaimMaxAge)
+	write := func(dir, name string, mod time.Time) {
+		t.Helper()
+		path := filepath.Join(root, dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"message_id":"m","asker_run_id":"r"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Ageing a directory means writing the files first, because writing updates
+	// the directory's own mtime.
+	ageDir := func(dir string, mod time.Time) {
+		t.Helper()
+		if err := os.Chtimes(filepath.Join(root, dir), mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// broker-a: everything expired, so the directory goes.
+	write("broker-a", "answered.claimed", old)
+	write("broker-a", "unanswered.json", old)
+	ageDir("broker-a", old)
+	// broker-b: a live ask and an unrelated file, both kept.
+	write("broker-b", "live.json", time.Now())
+	write("broker-b", "notes.txt", old)
+	ageDir("broker-b", old)
+	// broker-c: only an unrelated file, so the directory survives the sweep.
+	write("broker-c", "keep.txt", old)
+	ageDir("broker-c", old)
+	// broker-d: an expired record beside a pending one.
+	write("broker-d", "expired.claimed", old)
+	write("broker-d", "pending.json", time.Now())
+	ageDir("broker-d", old)
+	// broker-e: an old record in a directory a feed touched just now. The
+	// record goes, because each record answers for its own age, but the
+	// directory stays: Record creates it before it opens the file, so removing a
+	// directory touched since the cutoff would fail a record for a live ask.
+	write("broker-e", "stale.json", old)
+	ageDir("broker-e", time.Now())
+	// broker-f: dotted message ids, the shape this package really writes.
+	write("broker-f", "av1.ask.json", old)
+	write("broker-f", "av1.ask.claimed", time.Now())
+	ageDir("broker-f", old)
+
+	if err := PruneRoot(root, AskClaimMaxAge); err != nil {
+		t.Fatalf("PruneRoot: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "broker-a")); !os.IsNotExist(err) {
+		t.Error("broker-a survived with only expired records")
+	}
+	for _, kept := range []string{
+		"broker-b/live.json",
+		"broker-b/notes.txt",
+		"broker-c/keep.txt",
+		"broker-d/pending.json",
+		"broker-f/av1.ask.claimed",
+	} {
+		if _, err := os.Stat(filepath.Join(root, kept)); err != nil {
+			t.Errorf("%s was removed: %v", kept, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "broker-d/expired.claimed")); !os.IsNotExist(err) {
+		t.Error("the expired record beside a pending one survived")
+	}
+	// The young directory keeps its place but loses its expired record; the
+	// dotted pair loses only the expired half.
+	if _, err := os.Stat(filepath.Join(root, "broker-e")); err != nil {
+		t.Errorf("a directory a feed is writing to was removed: %v", err)
+	}
+	for _, gone := range []string{"broker-e/stale.json", "broker-f/av1.ask.json"} {
+		if _, err := os.Stat(filepath.Join(root, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s survived", gone)
+		}
+	}
+}
+
+// TestPruneRootMissingRoot proves a first run, whose root does not exist yet,
+// is not an error.
+func TestPruneRootMissingRoot(t *testing.T) {
+	if err := PruneRoot(filepath.Join(t.TempDir(), "absent"), AskClaimMaxAge); err != nil {
+		t.Fatalf("PruneRoot on a missing root: %v", err)
+	}
+}
+
+// TestPruneRootReportsAFileRoot proves an error surfaces rather than being
+// swallowed: a caller that treats the prune as housekeeping still learns it did
+// not happen, and a root that is a regular file is the shape that produces one.
+func TestPruneRootReportsAFileRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "feed-asks")
+	if err := os.WriteFile(root, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PruneRoot(root, AskClaimMaxAge); err == nil {
+		t.Fatal("PruneRoot on a file root returned no error")
 	}
 }

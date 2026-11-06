@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/childmessaging"
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -28,6 +29,25 @@ var ErrAskerMismatch = errors.New("ask claim: asker mismatch")
 // validID reports whether id can name a claim file.
 func validID(id string) bool { return id != "." && id != ".." && messageIDPattern.MatchString(id) }
 
+// A record has two forms, and every site that names one derives it here. A
+// suffix added to Record but not to ClaimAsk would be written and never claimed;
+// one added to those but not to recordSuffixes would never be pruned, so its
+// run directory would never empty out.
+const (
+	recordAnswerable = ".json"    // an open ask, answerable by a reply
+	recordClaimed    = ".claimed" // an answered ask, kept so a second reply is edge-absent
+)
+
+// recordSuffixes is every form a record takes, in the order the prune reads
+// them.
+var recordSuffixes = []string{recordAnswerable, recordClaimed}
+
+// recordPath is where one form of a record lives. Callers pass a suffix from
+// the vocabulary above.
+func recordPath(dir, messageID, suffix string) string {
+	return filepath.Join(dir, messageID+suffix)
+}
+
 // Record persists an inbound ask without replacing an existing record, and
 // records nothing for an ask that was already claimed.
 func Record(dir, messageID, askerRunID string) error {
@@ -37,8 +57,8 @@ func Record(dir, messageID, askerRunID string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, messageID+".json")
-	claimed := filepath.Join(dir, messageID+".claimed")
+	path := recordPath(dir, messageID, recordAnswerable)
+	claimed := recordPath(dir, messageID, recordClaimed)
 	check := func() (bool, error) {
 		found := false
 		for _, name := range []string{claimed, path} {
@@ -102,8 +122,8 @@ func (p *Provider) ClaimAsk(id string) (string, bool) {
 	if p.Dir == "" || !validID(id) {
 		return "", false
 	}
-	claimed := filepath.Join(p.Dir, id+".claimed")
-	source := filepath.Join(p.Dir, id+".json")
+	claimed := recordPath(p.Dir, id, recordClaimed)
+	source := recordPath(p.Dir, id, recordAnswerable)
 	if err := os.Link(source, claimed); err != nil {
 		return "", false
 	}
@@ -126,8 +146,8 @@ func (p *Provider) RestoreAsk(id, _ string) {
 	if p.Dir == "" || !validID(id) {
 		return
 	}
-	claimed := filepath.Join(p.Dir, id+".claimed")
-	_ = os.Rename(claimed, filepath.Join(p.Dir, id+".json"))
+	claimed := recordPath(p.Dir, id, recordClaimed)
+	_ = os.Rename(claimed, recordPath(p.Dir, id, recordAnswerable))
 }
 
 // BrokerKey hashes a normalized broker URL and run ID for local identity files.
@@ -165,5 +185,109 @@ func DefaultDir(stateHome, brokerURL, runID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(stateHome, "feed-asks", key), nil
+	return filepath.Join(DefaultRoot(stateHome), key), nil
+}
+
+// DefaultRoot is the directory holding one run's directory per (broker, run)
+// pair. A feed prunes it when the directory it serves is this root's child, so
+// the layout is stated once here rather than inferred from a path.
+func DefaultRoot(stateHome string) string {
+	return filepath.Join(stateHome, "feed-asks")
+}
+
+// AskClaimMaxAge is how long a claim record is kept. It is a retention window,
+// not a wait bound: MaxWait caps how long an asker waits, and an ask that has
+// timed out stays answerable until it is withdrawn, so a record can stay useful
+// long after the wait ended.
+//
+// The window is therefore a tradeoff, stated plainly: a reply to an ask
+// delivered more than this long ago reports edge-absent instead of landing.
+// Thirty days keeps that case to asks nobody has touched in a month, which is
+// what bounds the directory without making the promise empty. Removing a
+// .claimed record changes nothing observable, because a second reply to an
+// answered ask reports edge-absent either way.
+const AskClaimMaxAge = 30 * 24 * time.Hour
+
+// PruneRoot removes claim records older than maxAge from every run directory
+// under root, then removes a run directory left empty. Each supervisor-minted
+// run gets its own directory, so without this the state home accumulates one
+// directory per delegation and nothing ever removes them.
+//
+// Only files named like a claim record are considered, so an unrelated file in
+// a run directory is left alone. Callers treat a failure as housekeeping that
+// did not happen rather than a reason to stop.
+func PruneRoot(root string, maxAge time.Duration) error {
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-maxAge)
+	var firstErr error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		// Read the directory's age before pruning inside it: removing a file
+		// updates the directory's own mtime, so asking afterwards would always
+		// describe the directory as just touched.
+		info, infoErr := entry.Info()
+		// Each record answers for its own age, so a directory a feed keeps
+		// writing to still has its expired records swept.
+		if err := pruneRunDir(dir, cutoff); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		// The directory itself is another matter. Record creates it and then
+		// opens the file, so removing a directory touched since the cutoff would
+		// fail a record for a live ask. Directory age gates only the removal.
+		if infoErr != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		removeIfEmptyDir(dir)
+	}
+	return firstErr
+}
+
+// pruneRunDir removes the expired claim records in one run directory.
+func pruneRunDir(dir string, cutoff time.Time) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !isClaimRecordName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
+	return nil
+}
+
+// isClaimRecordName reports whether name is a claim record's file name: a
+// message id this package accepts, with the answered or unanswered suffix.
+func isClaimRecordName(name string) bool {
+	for _, suffix := range recordSuffixes {
+		if id, ok := strings.CutSuffix(name, suffix); ok {
+			return validID(id)
+		}
+	}
+	return false
+}
+
+// removeIfEmptyDir drops a run directory that no longer holds anything.
+func removeIfEmptyDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return
+	}
+	_ = os.Remove(dir)
 }
