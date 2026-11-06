@@ -97,9 +97,11 @@ empty goes with them. That window is a tradeoff rather than a wait bound. A
 timed-out ask stays answerable until it is withdrawn, so a reply to one older
 than the window reports `edge-absent` instead of landing. Losing an answered
 ask's record changes nothing visible, because a second reply reports
-`edge-absent` either way. A run directory touched inside the window is left
-alone entirely. A feed writing its first record therefore cannot lose the
-directory to a sibling's prune. Only the default root is pruned; a directory named by
+`edge-absent` either way. Each record answers for its own age, so a run
+directory a feed keeps writing to still has its expired records swept. The
+directory itself is removed only when it is empty and untouched inside the
+window. A feed creating its first record therefore cannot lose the directory to
+a sibling's prune. Only the default root is pruned; a directory named by
 `--asks-dir` is the caller's to clean.
 
 ## Transport contract

@@ -197,10 +197,16 @@ func TestPruneRootRemovesExpiredRecords(t *testing.T) {
 	write("broker-d", "expired.claimed", old)
 	write("broker-d", "pending.json", time.Now())
 	ageDir("broker-d", old)
-	// broker-e: an old record in a directory a feed touched just now, which is
-	// the window where Record has created the directory but not yet the file.
+	// broker-e: an old record in a directory a feed touched just now. The
+	// record goes, because each record answers for its own age, but the
+	// directory stays: Record creates it before it opens the file, so removing a
+	// directory touched since the cutoff would fail a record for a live ask.
 	write("broker-e", "stale.json", old)
 	ageDir("broker-e", time.Now())
+	// broker-f: dotted message ids, the shape this package really writes.
+	write("broker-f", "av1.ask.json", old)
+	write("broker-f", "av1.ask.claimed", time.Now())
+	ageDir("broker-f", old)
 
 	if err := PruneRoot(root, AskClaimMaxAge); err != nil {
 		t.Fatalf("PruneRoot: %v", err)
@@ -213,7 +219,7 @@ func TestPruneRootRemovesExpiredRecords(t *testing.T) {
 		"broker-b/notes.txt",
 		"broker-c/keep.txt",
 		"broker-d/pending.json",
-		"broker-e/stale.json",
+		"broker-f/av1.ask.claimed",
 	} {
 		if _, err := os.Stat(filepath.Join(root, kept)); err != nil {
 			t.Errorf("%s was removed: %v", kept, err)
@@ -221,6 +227,16 @@ func TestPruneRootRemovesExpiredRecords(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "broker-d/expired.claimed")); !os.IsNotExist(err) {
 		t.Error("the expired record beside a pending one survived")
+	}
+	// The young directory keeps its place but loses its expired record; the
+	// dotted pair loses only the expired half.
+	if _, err := os.Stat(filepath.Join(root, "broker-e")); err != nil {
+		t.Errorf("a directory a feed is writing to was removed: %v", err)
+	}
+	for _, gone := range []string{"broker-e/stale.json", "broker-f/av1.ask.json"} {
+		if _, err := os.Stat(filepath.Join(root, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s survived", gone)
+		}
 	}
 }
 
