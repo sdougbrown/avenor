@@ -442,3 +442,90 @@ func TestMessageStdin(t *testing.T) {
 		t.Fatalf("empty inline: %+v", msg)
 	}
 }
+
+// TestMessageConcurrentDuplicateReplies pins the claim store's promise at the
+// CLI boundary: two replies racing on the same delivered ask — one claim in
+// flight while the other arrives — land exactly one reply. The loser reports
+// edge-absent and exits 0, because the ask it names has no open edge left.
+func TestMessageConcurrentDuplicateReplies(t *testing.T) {
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+	child, _, err := b.EnsureRun("child", "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, _, err := b.EnsureRun("supervisor", "supervisor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AVENOR_BROKER_URL", "http://"+b.Addr())
+	t.Setenv("AVENOR_RUN_ID", "child")
+	t.Setenv("AVENOR_BROKER_TOKEN", child)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	tr, err := localhttp.New(b.Addr(), messaging.LocalCredentials{RunID: "supervisor", Token: parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+	pre, err := tr.Preflight(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := messaging.NewMsgID(time.Now(), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.Send(t.Context(), messaging.SendRequest{From: messaging.Identity{RunID: "supervisor"}, To: messaging.Identity{RunID: "child"}, MessageID: id, Generation: pre.Generation, Body: `{"message":"question","expects_reply":true}`}); err != nil {
+		t.Fatal(err)
+	}
+	stateHome := os.Getenv("XDG_STATE_HOME")
+	dir, err := askclaim.DefaultDir(filepath.Join(stateHome, "avenor"), "http://"+b.Addr(), "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := askclaim.Record(dir, id, "supervisor"); err != nil {
+		t.Fatal(err)
+	}
+
+	type outcome struct {
+		code    int
+		outcome string
+	}
+	done := make(chan outcome, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			var out, stderr bytes.Buffer
+			code := runDeclared([]string{"message", "--action=reply", "--reply-to=" + id, "--asks-dir=" + dir, "--message=answer"}, &out, &stderr)
+			var parsed struct {
+				Outcome string `json:"outcome"`
+			}
+			_ = json.Unmarshal(out.Bytes(), &parsed)
+			done <- outcome{code: code, outcome: parsed.Outcome}
+		}()
+	}
+	close(start)
+
+	replied, edgeAbsent := 0, 0
+	for i := 0; i < 2; i++ {
+		got := <-done
+		if got.code != 0 {
+			t.Fatalf("reply exited %d", got.code)
+		}
+		switch got.outcome {
+		case "replied":
+			replied++
+		case "edge-absent":
+			edgeAbsent++
+		default:
+			t.Fatalf("unexpected outcome %q", got.outcome)
+		}
+	}
+	if replied != 1 || edgeAbsent != 1 {
+		t.Fatalf("outcomes: %d replied, %d edge-absent; want exactly one of each", replied, edgeAbsent)
+	}
+}

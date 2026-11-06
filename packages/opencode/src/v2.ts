@@ -53,6 +53,12 @@ export function v2Host(ctx: V2Context): PluginHost {
       const message = context.find((entry) => entry.id === messageId)
       return message as { parts?: unknown[]; content?: unknown[] } | undefined
     },
+    getSessionTitle: async (sessionId) => {
+      const session = await ctx.session.get({ sessionID: sessionId }).catch(() => undefined) as
+        | { title?: unknown }
+        | undefined
+      return typeof session?.title === 'string' ? session.title : undefined
+    },
   }
 }
 
@@ -166,12 +172,35 @@ type V2Event = { type: string; data?: unknown }
  * cannot end the subscription: the next session event still has to re-prompt
  * monitors and publish turns.
  */
-export function createV2EventHandler(core: Pick<AvenorCore, 'onSessionIdle' | 'onStepEnded'>) {
+export function createV2EventHandler(
+  core: Pick<AvenorCore, 'onSessionIdle' | 'onSessionRenamed' | 'onMessageUpdated' | 'onStepEnded'>,
+) {
   return async (event: V2Event): Promise<void> => {
     try {
       if (event.type === 'session.idle') {
         const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID
         if (sessionID) await core.onSessionIdle(sessionID)
+        return
+      }
+      if (event.type === 'session.renamed') {
+        const data = event.data as { sessionID?: unknown; title?: unknown } | undefined
+        if (typeof data?.sessionID === 'string' && typeof data.title === 'string') {
+          await core.onSessionRenamed(data.sessionID, data.title)
+        }
+        return
+      }
+      if (event.type === 'session.updated') {
+        const info = (event.data as { info?: { id?: unknown; title?: unknown } } | undefined)?.info
+        if (typeof info?.id === 'string' && typeof info.title === 'string') {
+          await core.onSessionRenamed(info.id, info.title)
+        }
+        return
+      }
+      if (event.type === 'message.updated') {
+        const info = (event.data as { info?: unknown } | undefined)?.info
+        if (info !== null && typeof info === 'object') {
+          await core.onMessageUpdated(info as Record<string, unknown>)
+        }
         return
       }
       if (event.type === 'session.step.ended') {

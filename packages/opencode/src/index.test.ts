@@ -140,15 +140,18 @@ describe('setupAvenor', () => {
     expect(prompt.text).not.toContain('<channel ')
   })
 
-  test('step.ended for an unbound session does not read the session context', async () => {
-    const { ctx, contextCalls, events, drained } = makeV2Ctx()
+  test('a step.ended for an unbound session publishes nothing', async () => {
+    const { ctx, contextCalls, promptCalls, events, drained } = makeV2Ctx()
     events.push(
       { type: 'session.step.ended', data: { sessionID: 's1', assistantMessageID: 'm1' } },
       { type: 'session.idle', data: { sessionID: 's1' } },
     )
     await setupAvenor(ctx as never)
     await drained
-    expect(contextCalls).toEqual([])
+    // The settled message is read once, but with no bound conversation the
+    // turn publishes nowhere, and an idle alone never contacts the supervisor.
+    expect(contextCalls).toEqual([{ sessionID: 's1' }])
+    expect(promptCalls).toEqual([])
   })
 
   test('an event stream that throws does not break setup or cleanup', async () => {
@@ -175,6 +178,8 @@ describe('createV2EventHandler', () => {
   test('a throwing handler does not stop later events', async () => {
     const handled: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
       onSessionIdle: () => { handled.push('idle'); throw new Error('idle boom') },
       onStepEnded: () => { handled.push('step'); throw new Error('step boom') },
     })
@@ -187,6 +192,8 @@ describe('createV2EventHandler', () => {
   test('routes idle and step.ended onto the core handlers', async () => {
     const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
       onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
       onStepEnded: async (sessionID, messageID) => { calls.push(`step:${sessionID}:${messageID}`) },
     })
@@ -199,6 +206,8 @@ describe('createV2EventHandler', () => {
   test('drops incomplete events without calling the core handlers', async () => {
     const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
       onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
       onStepEnded: async (sessionID, messageID) => { calls.push(`step:${sessionID}:${messageID}`) },
     })

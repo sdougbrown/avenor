@@ -45,7 +45,8 @@ When a run is dispatched with `avenor_spawn`, the plugin:
 2. **Re-prompts on completion** — when a `wait=false` (fire-and-forget) run finishes, the plugin automatically injects a completion message into the orchestrating session so the LLM picks up without manual polling.
 3. **Routes permissions** — when a sub-agent running under the `opencode-http` backend requests a permission, the plugin injects a re-prompt into the orchestrating session. The LLM can call `avenor_answer_permission` to respond; the normal permission dialog is also shown as a fallback.
 4. **Formats results** — OpenCode returns concise, bounded prose in its shared `output` for `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_message`, `avenor_peers`, `avenor_events`, `avenor_inspect`, and `avenor_shutdown`. Structured metadata stays in host/session state.
-5. **Publishes its own finished turn** — a settled turn from the session that first ran a host messaging tool is recorded through `session_last_set`, so a peer's `avenor_peers` `action: "last"` can read it.
+5. **Publishes its own finished turn** — each conversation publishes its settled turns as its own bound run through the broker's peer last-message route, in per-conversation order, so a peer's `avenor_peers` `action: "last"` reads the conversation it names.
+6. **Receives messages** — a bound conversation runs one `avenor feed broker` consumer, authenticated as the conversation's own run, and each feed record arrives as a prompt marked as another session's words. The native title publishes as the run's harness name, so peers see the conversation's own name. See [messaging](../../docs/messaging.md#opencode-conversations).
 
 MCP clients render their own results.
 
@@ -150,6 +151,8 @@ Send a message to another run, withdraw a pending ask, resume a completed run, o
 | `control_reply` | `target`, optional `payload` | Deliver a control reply where the provider supports it |
 
 `target` is a run id, a peer label, or `"self"`. `timeout_ms` must be an integer no greater than the shared ask cap. This tool does not take `supervisor_id`; it is bound to the default supervisor.
+
+A conversation speaks as its own bound run, not the supervisor: `tell`, `ask`, `reply` and `withdraw` route as the conversation, `resume` stays owner-only, and `control_reply` has no supported surface here. A reply is answered through the feed's claim store — an ask this conversation's feed delivered is answerable, a second reply reports `edge-absent`.
 
 The tool's structured metadata is the shared contract object in snake_case (`action`, `outcome`, `text`, and `message_id`, `run_id`, `label`, `reply`, `sentinel_file`, `on_event` when the outcome carries them), the same fields the MCP hosts return.
 
