@@ -297,7 +297,12 @@ export function formatChannelBlocks(text: string): string {
  * plugin is shared.
  */
 export interface PluginHost {
-  /** Deliver a user prompt into a session without waiting on the reply. */
+  /**
+   * Deliver a user prompt into a session without waiting on the reply. An
+   * adapter lets a rejection propagate: the core's notifySession logs the
+   * failure and reports it, so swallowing it here would hide the outcome
+   * from the session that asked for it.
+   */
   promptAsync(sessionId: string, text: string): Promise<void>
   /** Read one settled message; resolve undefined when it cannot be read. */
   getMessage(
