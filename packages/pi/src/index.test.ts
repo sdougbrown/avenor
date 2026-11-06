@@ -603,12 +603,25 @@ describe('Avenor Pi extension', () => {
       await waitFor(() => polls >= pollsBefore + 2)
       expect(published).toHaveLength(2)
 
-      // Clearing the name in the harness clears the broker's copy, so the run
-      // stops shadowing whatever name the model set.
+      sessionName = 'renamed-idle'
+      await harness.eventHandlers.session_info_changed(
+        { type: 'session_info_changed', name: 'renamed-idle' }, harness.ctx)
+      await waitFor(() => published.length === 3)
+      expect(published[2]).toMatchObject({ name: 'renamed-idle' })
+
+      sessionName = undefined
+      await harness.eventHandlers.session_info_changed(
+        { type: 'session_info_changed', name: undefined }, harness.ctx)
+      await waitFor(() => published.length === 4)
+      expect(published[3]).toMatchObject({ name: '' })
+
+      sessionName = 'renamed-again'
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      await waitFor(() => published.length === 5)
       sessionName = undefined
       await harness.eventHandlers.before_agent_start({}, harness.ctx)
-      await waitFor(() => published.length === 3)
-      expect(published[2]).toMatchObject({ name: '' })
+      await waitFor(() => published.length === 6)
+      expect(published[5]).toMatchObject({ name: '' })
     } finally {
       globalThis.fetch = previousFetch
       await harness.eventHandlers.session_shutdown({}, {})
