@@ -217,6 +217,21 @@ describe('child broker ask', () => {
     expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
   })
 
+  it('reports edge-absent when a plain send failure meets a live broker whose cleanup 404s', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Promise.reject(new Error('connection reset')),
+      '/health': () => new Response('ok'),
+      '/cancel_message': () => new Response('no pending ask', { status: 404 }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.45')
+    expect(result).toEqual({ outcome: 'edge-absent', messageId: 'av1.m.45' })
+    expect(calls.some(call => call.url.endsWith('/health'))).toBe(true)
+    expect(calls.find(call => call.url.endsWith('/cancel_message'))?.body).toMatchObject({
+      cancel_message_id: 'av1.m.45',
+      generation: 'gen-1',
+    })
+  })
+
   it('keeps an ask possibly pending when the health probe also fails ambiguously', async () => {
     const { calls, fetchImpl } = stubFetch({
       '/send': () => Promise.reject(new Error('connection reset')),
