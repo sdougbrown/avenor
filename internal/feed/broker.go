@@ -103,9 +103,12 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		return 0
 	}
 	defer unlock()
-	// The consumer lock is ours, so this feed is the one that prunes; a second
-	// feed would have returned above.
-	go b.runAskClaimPruner(ctx)
+	// Prune for as long as this feed holds its lock, not for as long as ctx
+	// lives: run returns on parent loss and terminal errors while ctx is still
+	// open, and a pruner outliving the lock would contradict the exclusivity
+	// the lock is taken for.
+	stopPruner := b.startAskClaimPruner(ctx)
+	defer stopPruner()
 	alive := func() bool { return parentPID() == parent }
 	wait := func(d time.Duration) bool {
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -278,17 +281,34 @@ func (b *Broker) pruneAskClaims() {
 	}
 }
 
-// runAskClaimPruner prunes on each tick until the feed ends.
-func (b *Broker) runAskClaimPruner(ctx context.Context) {
-	ticker := time.NewTicker(askClaimPruneInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			b.pruneAskClaims()
+// startAskClaimPruner prunes on each tick and returns a stop function that
+// waits for the goroutine to exit. Waiting matters for an embedder whose ctx
+// outlives the feed.
+//
+// Feeds for different runs hold different locks (the key is the (broker, run)
+// pair) and prune the same root concurrently. That is benign because every step
+// of PruneRoot is best-effort and idempotent; it is not an invariant to lean on.
+func (b *Broker) startAskClaimPruner(ctx context.Context) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(askClaimPruneInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				b.pruneAskClaims()
+			}
 		}
+	}()
+	return func() {
+		close(stop)
+		<-done
 	}
 }
 

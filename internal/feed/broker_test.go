@@ -622,3 +622,27 @@ func TestRunningFeedPrunesNewRecords(t *testing.T) {
 	}
 	waitForPrune(t, late)
 }
+
+// TestStartAskClaimPrunerStops proves the pruner's stop function waits for the
+// goroutine. A pruner that outlived the feed would keep pruning after the
+// consumer lock was released, which is the exclusivity the lock exists for.
+func TestStartAskClaimPrunerStops(t *testing.T) {
+	oldInterval := askClaimPruneInterval
+	askClaimPruneInterval = time.Hour // no tick during the test
+	t.Cleanup(func() { askClaimPruneInterval = oldInterval })
+
+	b := &Broker{RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", Log: io.Discard}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := b.startAskClaimPruner(ctx)
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not return, so the pruner goroutine did not exit")
+	}
+}
