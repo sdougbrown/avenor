@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/backendlaunch"
@@ -53,6 +54,17 @@ func TestMessagingPeerEnv(t *testing.T) {
 				want = map[string]string{"AVENOR_BROKER_URL": b.URL(), "AVENOR_RUN_ID": "rt_child", "AVENOR_BROKER_TOKEN": token}
 			}
 			identitytest.AssertPeerEnv(t, observed, want)
+			// The declared credential list travels with the trio, so poo can
+			// keep the names for the feed and hide them from a tool's child.
+			declared := observed[runtime.EnvPooCredentialEnv]
+			if tc.on && tc.broker {
+				wantDeclared := strings.Join([]string{runtime.EnvBrokerURL, runtime.EnvBrokerRunID, runtime.EnvBrokerToken}, string(os.PathListSeparator))
+				if declared != wantDeclared {
+					t.Errorf("%s = %q, want %q", runtime.EnvPooCredentialEnv, declared, wantDeclared)
+				}
+			} else if declared != "__UNSET__" {
+				t.Errorf("%s = %q, want unset", runtime.EnvPooCredentialEnv, declared)
+			}
 			for _, key := range []string{runtime.EnvPooFeedsPath, runtime.EnvPooCLIRegistryPath} {
 				value := observed[key]
 				if tc.on && tc.broker {

@@ -62,10 +62,12 @@ func BrokerEnvNames() []string {
 	return append([]string(nil), brokerEnvNames...)
 }
 
-// Poo provisioning variables identify manifests created for a particular launch.
+// Poo provisioning variables identify manifests created for a particular launch,
+// and declare which names its model-invoked tools must not see.
 const (
 	EnvPooFeedsPath       = "POO_FEEDS_PATH"
 	EnvPooCLIRegistryPath = "POO_CLI_REGISTRY_PATH"
+	EnvPooCredentialEnv   = "POO_CREDENTIAL_ENV"
 )
 
 // scrubbedEnvNames excludes launch identity, the broker and test names, the
@@ -78,7 +80,7 @@ const (
 // provisioned instead of an inherited set.
 var scrubbedEnvNames = append(
 	append(append([]string(nil), identityEnvNames...), brokerEnvNames...),
-	append([]string{envRetiredPeerName, EnvPooFeedsPath, EnvPooCLIRegistryPath}, peerEnvNames...)...,
+	append([]string{envRetiredPeerName, EnvPooFeedsPath, EnvPooCLIRegistryPath, EnvPooCredentialEnv}, peerEnvNames...)...,
 )
 
 var identityEnvKeys = func() map[string]struct{} {
