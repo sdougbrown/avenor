@@ -176,10 +176,18 @@ func DefaultRoot(stateHome string) string {
 	return filepath.Join(stateHome, "feed-asks")
 }
 
-// AskClaimMaxAge bounds how long a claim record is kept. A caller can hold an
-// ask open no longer than the messaging wait cap, so a day leaves a wide margin
-// while keeping the directory from growing without bound.
-const AskClaimMaxAge = 24 * time.Hour
+// AskClaimMaxAge is how long a claim record is kept. It is a retention window,
+// not a wait bound: MaxWait caps how long an asker waits, and an ask that has
+// timed out stays answerable until it is withdrawn, so a record can stay useful
+// long after the wait ended.
+//
+// The window is therefore a tradeoff, stated plainly: a reply to an ask
+// delivered more than this long ago reports edge-absent instead of landing.
+// Thirty days keeps that case to asks nobody has touched in a month, which is
+// what bounds the directory without making the promise empty. Removing a
+// .claimed record changes nothing observable, because a second reply to an
+// answered ask reports edge-absent either way.
+const AskClaimMaxAge = 30 * 24 * time.Hour
 
 // PruneRoot removes claim records older than maxAge from every run directory
 // under root, then removes a run directory left empty. Each supervisor-minted

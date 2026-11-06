@@ -531,3 +531,42 @@ func waitForPrune(t *testing.T, path string) {
 	}
 	t.Fatalf("%s survived the start-up prune", path)
 }
+
+// TestPruneFailureDoesNotStopTheFeed pins the non-fatal half of the start-up
+// prune. A state home whose feed-asks path is a regular file makes the prune
+// fail, and the feed must still deliver: the same contract the manifest prune
+// already has.
+func TestPruneFailureDoesNotStopTheFeed(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	if err := os.MkdirAll(filepath.Join(root, "avenor"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "avenor", "feed-asks"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var polls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		if polls.Add(1) == 1 {
+			fmt.Fprint(w, `[{"id":"m1","from_run_id":"sender","payload":{"id":"m1","message":"still here","expects_reply":false}}]`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: out, RequestTimeout: time.Second})
+	select {
+	case <-out.wrote:
+	case <-time.After(3 * time.Second):
+		cancel()
+		awaitExit(t, done)
+		t.Fatalf("a failed prune stopped delivery; output: %s", out.String())
+	}
+	cancel()
+	awaitExit(t, done)
+}

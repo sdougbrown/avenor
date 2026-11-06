@@ -92,12 +92,15 @@ without a claim record. A `timed-out` ask exits 0 and remains open to a later
 reply; use `--action withdraw --message-id MESSAGE_ID` to close it.
 
 Each run gets its own directory under `feed-asks`. The default root is pruned
-when a feed starts: records older than a day go, and a run directory left empty
-goes with them. A day is generous because no caller can hold an ask open longer
-than the messaging wait cap. A run directory touched inside that day is left
+when a feed starts: records older than thirty days go, and a run directory left
+empty goes with them. That window is a tradeoff rather than a wait bound. A
+timed-out ask stays answerable until it is withdrawn, so a reply to one older
+than the window reports `edge-absent` instead of landing. Losing an answered
+ask's record changes nothing visible, because a second reply reports
+`edge-absent` either way. A run directory touched inside the window is left
 alone entirely. A feed writing its first record therefore cannot lose the
-directory to a sibling's prune. Only the default root is pruned; a directory
-named by `--asks-dir` is the caller's to clean.
+directory to a sibling's prune. Only the default root is pruned; a directory named by
+`--asks-dir` is the caller's to clean.
 
 ## Transport contract
 

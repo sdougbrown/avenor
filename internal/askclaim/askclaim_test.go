@@ -231,3 +231,16 @@ func TestPruneRootMissingRoot(t *testing.T) {
 		t.Fatalf("PruneRoot on a missing root: %v", err)
 	}
 }
+
+// TestPruneRootReportsAFileRoot proves an error surfaces rather than being
+// swallowed: a caller that treats the prune as housekeeping still learns it did
+// not happen, and a root that is a regular file is the shape that produces one.
+func TestPruneRootReportsAFileRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "feed-asks")
+	if err := os.WriteFile(root, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PruneRoot(root, AskClaimMaxAge); err == nil {
+		t.Fatal("PruneRoot on a file root returned no error")
+	}
+}
