@@ -109,41 +109,35 @@ func (s *Supervisor) mintBoundRun() (string, error) {
 	return runID, nil
 }
 
-// reclaimUnavailableBinds drops the minting-host bindings the broker itself
-// declares unavailable: the mapped record is gone, or its peer identity is
-// expired or retired. Reachable is safe to act on while a peer renews because
-// a lapsed lease or a tombstone refuses every renewal path — heartbeat, poll
-// and re-register — so a record that reads unavailable cannot come back to
-// life under this scan. Live bindings and the pi singleton are preserved. The
-// caller holds messageBindMu.
+// reclaimUnavailableBinds drops minting-host bindings whose runs the broker's
+// owned+reachable lookup reports unavailable: record gone, peer expired or
+// retired, or the id now holds a record this broker did not mint. Unavailable
+// records cannot revive under the scan: a lapsed lease or tombstone refuses
+// every renewal path, and an unowned record renews only its own credential.
+// Live bindings and the pi singleton are preserved. The caller holds
+// messageBindMu.
 func (s *Supervisor) reclaimUnavailableBinds() {
 	for key, runID := range s.messageBinds {
 		if key.host == "pi" {
 			continue
 		}
-		if s.broker.Reachable(runID) {
+		if _, ok := s.broker.OwnedReachableToken(runID); ok {
 			continue
 		}
 		delete(s.messageBinds, key)
 	}
 }
 
-// messageBindCredentials reports the messaging credentials of a bound run. The
-// broker owns the token; the bind state carries only the mapping. A run whose
-// peer identity has expired or retired is refused: re-answering would re-arm a
-// credential the broker already fences, and the caller decides whether the
-// stale binding is a refusal (pi) or a reclamation (minting hosts).
+// messageBindCredentials reports the messaging credentials of a bound run.
+// The token comes from the broker's non-minting owned+reachable read, so a
+// run whose record is gone, expired, retired, or unowned is refused. The
+// caller decides whether that unavailability is a refusal (pi) or a
+// reclamation (minting hosts).
 func (s *Supervisor) messageBindCredentials(runID string, created bool) (messaging.MessageBindResult, error) {
-	record := s.broker.GetRun(runID)
-	if record == nil {
-		return messaging.MessageBindResult{}, fmt.Errorf("bound run %s is no longer registered", runID)
+	token, ok := s.broker.OwnedReachableToken(runID)
+	if !ok {
+		return messaging.MessageBindResult{}, fmt.Errorf("bound run %s is unowned, expired or retired; the bind fails closed", runID)
 	}
-	if !s.broker.Reachable(runID) {
-		return messaging.MessageBindResult{}, fmt.Errorf("bound run %s is expired or retired; the bind fails closed", runID)
-	}
-	record.Mu.Lock()
-	token := record.Token
-	record.Mu.Unlock()
 	return messaging.MessageBindResult{
 		BrokerURL:  s.brokerURL(),
 		RunID:      runID,

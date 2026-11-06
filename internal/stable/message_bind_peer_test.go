@@ -140,3 +140,64 @@ func TestMessageBindRebindsVisiblyOnARetiredBind(t *testing.T) {
 		t.Fatal("the retired bind's stale credential must stay refused after the rebind")
 	}
 }
+
+// TestMessageBindReclaimsAfterReapWithoutAdoptingAnAttackerClaimedRecord pins
+// the substitution guard on the reclamation path: once the broker's tombstone
+// window has reaped a bound record, the open /register route can claim the
+// freed id under a token the claimant chose, and a rebind must treat that
+// unowned record as unavailable — reclaiming onto a fresh identity — instead
+// of answering the bind with the attacker's credential.
+func TestMessageBindReclaimsAfterReapWithoutAdoptingAnAttackerClaimedRecord(t *testing.T) {
+	t.Parallel()
+	sup, _ := newStage2Supervisor(t, 2)
+
+	res, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_swap"})
+	if err != nil {
+		t.Fatalf("message bind: %v", err)
+	}
+	retireBoundPeer(t, sup, res)
+	if !sup.broker.DeleteRunIfToken(res.RunID, res.RunToken) {
+		t.Fatal("the production retirement path must remove the retired bound record")
+	}
+
+	const attackerToken = "attacker-chosen-token"
+	claim, err := json.Marshal(map[string]any{"run_id": res.RunID, "token": attackerToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post("http://"+sup.broker.Addr()+"/register", "application/json", bytes.NewReader(claim))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the freed id's open registration = %d, want the attacker's claim accepted", resp.StatusCode)
+	}
+
+	rebound, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_swap"})
+	if err != nil {
+		t.Fatalf("rebind under an attacker-claimed id: %v", err)
+	}
+	if !rebound.Created || rebound.RunID == res.RunID {
+		t.Fatalf("rebind under an attacker-claimed id = %+v, want a fresh minted identity beside %s", rebound, res.RunID)
+	}
+	if rebound.RunToken == attackerToken || rebound.RunToken == res.RunToken {
+		t.Fatal("the rebind must never answer with the attacker's or the retired record's credential")
+	}
+	if stale := sup.broker.GetRun(res.RunID); stale == nil || stale.Token != attackerToken {
+		t.Fatal("the attacker's record must survive the rebind untouched, never adopted or rotated")
+	}
+	if err := sup.broker.PushControl(rebound.RunID, runtimebroker.ControlMessage{ID: "m2", Type: "agent_message", RunID: rebound.RunID}); err != nil {
+		t.Fatalf("queue for the rebound run: %v", err)
+	}
+	registerBoundPeer(t, sup, rebound)
+
+	repeat, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_swap"})
+	if err != nil {
+		t.Fatalf("repeated rebind: %v", err)
+	}
+	if repeat.Created || repeat.RunID != rebound.RunID || repeat.RunToken != rebound.RunToken {
+		t.Fatalf("repeated rebind = %+v, want %+v reused without minting", repeat, rebound)
+	}
+}
+
