@@ -46,7 +46,7 @@ When a run is dispatched with `avenor_spawn`, the plugin:
 3. **Routes permissions** — when a sub-agent running under the `opencode-http` backend requests a permission, the plugin injects a re-prompt into the orchestrating session. The LLM can call `avenor_answer_permission` to respond; the normal permission dialog is also shown as a fallback.
 4. **Formats results** — OpenCode returns concise, bounded prose in its shared `output` for `avenor_status`, `avenor_result`, `avenor_answer_permission`, `avenor_message`, `avenor_peers`, `avenor_events`, `avenor_inspect`, and `avenor_shutdown`. Structured metadata stays in host/session state.
 5. **Publishes its own finished turn** — each conversation publishes its settled turns as its own bound run through the broker's peer last-message route, in per-conversation order, so a peer's `avenor_peers` `action: "last"` reads the conversation it names.
-6. **Receives messages** — a bound conversation runs one `avenor feed broker` consumer, authenticated as the conversation's own run, and each feed record arrives as a prompt marked as another session's words. The native title publishes as the run's harness name, so peers see the conversation's own name. See [messaging](../../docs/messaging.md#opencode-conversations).
+6. **Receives messages** — a bound conversation runs one `avenor feed broker` consumer, authenticated as the conversation's own run, and each feed record arrives as a prompt marked as another session's words, one record at a time in arrival order. The native title publishes as the run's harness name, so peers see the conversation's own name. See [messaging](../../docs/messaging.md#opencode-conversations).
 
 MCP clients render their own results.
 
@@ -74,6 +74,11 @@ Dispatch an agent run in the current working directory.
 | `roster_entry` | no | Key within `roster_file` |
 | `wait` | no | Block until complete (default `true`) |
 | `supervisor_id` | no | Reuse an existing supervisor by socket path |
+
+The spawn's parent route is the conversation's own bound run, so it is passed
+only when the spawn is routed to the supervisor holding that run — the default
+singleton, or the same socket named explicitly. A spawn pointed at another
+supervisor still runs there, without a parent route.
 
 The working directory (`dir`) is injected automatically from your OpenCode session context — it is not a user-facing argument.
 
@@ -214,6 +219,10 @@ Shut down the avenor supervisor process and clean up temp files. Call this when 
 |---|---|---|
 | `supervisor_id` | no | Supervisor to shut down (defaults to the singleton) |
 | `force` | no | Force shutdown instead of graceful |
+
+A shutdown names one supervisor. Naming another one leaves this plugin's bound
+conversations, their feeds and their credentials alone; only a shutdown of the
+supervisor a conversation is bound to drops it.
 
 ## Typical workflows
 

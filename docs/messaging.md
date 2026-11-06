@@ -60,7 +60,9 @@ messaging tools and its one inbound consumer authenticate as that run and
 nothing else. A spawn the conversation starts names its own bound run as
 `parent_run_id`, so a child's messages ride the same inbox the conversation's
 feed consumes; a conversation whose bind cannot land advertises no parent route
-at all. The supervisor reclaims a bound run the broker reports dead and mints a
+at all, and neither does a spawn explicitly pointed at another supervisor —
+that broker holds no record of the bound run, so its child starts without one.
+The supervisor reclaims a bound run the broker reports dead and mints a
 replacement on the next bind.
 
 The pi extension supplies it too, as `supervisor`, for host-mode spawns that
@@ -95,7 +97,12 @@ conversation's own broker run:
   ends it with the host, and its ask records land in the same claim directory
   the reply path reads, so the feed and the reply share one claim store with no
   second copy.
-- **Delivery** — each feed record becomes a prompt into the conversation. The
+- **Delivery** — each feed record becomes a prompt into the conversation, one
+  record at a time in arrival order: the reader pauses the feed while a prompt
+  is open, so a slow turn never reorders the inbox and a replaced or failed
+  consumer delivers nothing further. A record a dying feed already wrote is
+  still read and delivered; only the process's own close releases the inbox,
+  so its replacement never starts into the dead consumer's lock. The
   plugin's frame marks the text as another session's words, never operator
   instructions, and maps the feed's `call_cli` answer instruction onto the
   native `avenor_message` tool: when a record's trailing note says to answer,

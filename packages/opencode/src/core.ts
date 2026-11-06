@@ -101,6 +101,25 @@ type FeedProcess = {
   child: ChildProcess
   runId: string
   brokerUrl: string
+  /**
+   * The consumer's inbox lock is released: its process closed, or it never
+   * started. A replacement may claim the inbox only after this, because the
+   * feed's lock makes a second consumer exit as a duplicate.
+   */
+  released: boolean
+  /**
+   * Retire this consumer: no record it has read is delivered and no further
+   * record is read. The lines it had queued belong to the identity it served,
+   * so they are dropped rather than handed to whatever consumer replaced it.
+   */
+  retire(): void
+  /**
+   * Hand the session's inbox to the replacement waiting behind this consumer,
+   * but only once this process is gone and — unless it was retired — the record
+   * it was delivering has landed. Safe to call repeatedly; it acts only while
+   * this consumer still owns the slot or is the one the session waits on.
+   */
+  settle(): void
 }
 
 /** The process seams a test can replace; production uses node's own. */
@@ -756,19 +775,47 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
   const conversationProviders = new Map<string, MessageProvider>()
   const bindInFlight = new Map<string, Promise<ConversationBinding>>()
   const conversationFeeds = new Map<string, FeedProcess>()
+  // The consumer a session may not replace yet: its process still holds the
+  // feed's lock, or the records it already read are still delivering. A
+  // replacement that started before either finished would take the inbox as a
+  // duplicate or overtake the older record it had not delivered.
+  const handedOffFeeds = new Map<string, FeedProcess>()
+  // The consumer a session is waiting to start at that close. One per session:
+  // a later bind retargets it rather than queueing a second.
+  const pendingFeeds = new Map<string, { binding: ConversationBinding; epoch: number }>()
   // The owner client the current bindings were minted under. A different
   // client means a fresh supervisor singleton, so every binding names a run
   // on a broker that no longer exists and must not be reused.
   let bindingsClient: unknown | undefined
+  // Bumped whenever every binding is dropped. A bind or a handoff that started
+  // under an older epoch is stale even when its client object is unchanged, so
+  // a late answer can never revive a stopped feed.
+  let bindEpoch = 0
+
+  /**
+   * Retire one consumer, and free its slot only while the slot still names it.
+   * A named feed is retired even when a replacement already owns the slot: its
+   * queued rows must not land after its own delivery was refused. Its
+   * replacement is never killed and never waited on by this path.
+   */
+  function retireFeed(sessionId: string, feed: FeedProcess): void {
+    feed.retire()
+    if (conversationFeeds.get(sessionId) === feed) {
+      conversationFeeds.delete(sessionId)
+      feed.child.kill()
+      // The replacement waits for this exact process's close: until then the
+      // dead consumer still holds the inbox lock.
+      if (!feed.released) handedOffFeeds.set(sessionId, feed)
+    }
+    // A retired consumer's queued rows are already dropped, so only its close
+    // is still owed; a close that already landed releases the inbox now.
+    feed.settle()
+  }
 
   function stopFeed(sessionId: string, feed?: FeedProcess): void {
-    const owned = conversationFeeds.get(sessionId)
-    if (!owned) return
-    // A named feed only stops while the slot still names it: a late terminal
-    // diagnostic from a replaced feed must never kill its replacement.
-    if (feed && owned !== feed) return
-    conversationFeeds.delete(sessionId)
-    owned.child.kill()
+    const target = feed ?? conversationFeeds.get(sessionId)
+    if (!target) return
+    retireFeed(sessionId, target)
   }
 
   /**
@@ -777,7 +824,22 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
    * nothing of it — provider, feed, inbox — may serve another turn.
    */
   function resetConversationBindings(): void {
+    // Every bind or handoff still in flight belongs to the identity dropped
+    // here, so it is stale from this point on whatever client object it holds.
+    bindEpoch++
+    // Nothing queued for the dropped identity may start, even from a feed whose
+    // close is still outstanding.
+    pendingFeeds.clear()
     for (const sessionId of [...conversationFeeds.keys()]) stopFeed(sessionId)
+    // A consumer whose process already closed still waiting on its last
+    // delivery is nobody's slot any more, but it belongs to the same dead
+    // identity: drop its queue too. Its close (or the close already seen) is
+    // still what frees the inbox for whatever binds next.
+    for (const feed of [...handedOffFeeds.values()]) {
+      feed.retire()
+      feed.child.kill()
+      feed.settle()
+    }
     conversationBindings.clear()
     conversationProviders.clear()
     bindInFlight.clear()
@@ -800,11 +862,23 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
   }
 
   async function bindConversation(sessionId: string, opts: { reanswer?: boolean } = {}): Promise<ConversationBinding> {
+    // The identity this call was made under. A reset that lands while the owner
+    // client lookup is in flight drops every binding that call could mint, and
+    // the answer may name the same client object, so only this epoch proves it
+    // is stale.
+    const lookupEpoch = bindEpoch
     // Resolving the owner client here is the safe local bootstrap: the same
     // lazily started singleton every avenor tool uses. It also carries the
     // restart signal: a different client means a fresh singleton whose broker
     // no longer holds the old runs, so every stale binding must go.
     const { client, supervisorId } = await getSupervisorClient(undefined, { owner: true })
+    // A reset raced even the lookup: the shutdown already dropped this
+    // conversation, so its late answer must not bind a run or revive a feed.
+    if (lookupEpoch !== bindEpoch) {
+      throw new Error('conversation bind superseded by a supervisor restart')
+    }
+    // A lookup that itself discovered a fresh singleton dropped the stale
+    // bindings above, so the bind it is about to mint belongs to the new epoch.
     if (bindingsClient !== undefined && bindingsClient !== client) resetConversationBindings()
     bindingsClient = client
     if (!opts.reanswer) {
@@ -817,11 +891,15 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     // different run is a new identity, and the old run's per-session records
     // must not carry over.
     const previous = conversationBindings.get(sessionId)
+    const epoch = bindEpoch
     const promise = (async () => {
       const bound = await client.messageBind({ host: 'opencode', session_id: sessionId })
-      // A reset raced this bind: the fresh singleton's bindings win, so the
-      // stale credentials are refused, never served or cached.
-      if (bindingsClient !== client) throw new Error('conversation bind superseded by a supervisor restart')
+      // A reset raced this bind: the dropped bindings win even though this call
+      // still holds the same client object, so the stale credentials are
+      // refused, never served, cached or used to start a consumer.
+      if (bindingsClient !== client || epoch !== bindEpoch) {
+        throw new Error('conversation bind superseded by a supervisor restart')
+      }
       const binding: ConversationBinding = {
         sessionId,
         supervisorId,
@@ -840,7 +918,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       }
       conversationBindings.set(sessionId, binding)
       conversationProviders.set(sessionId, buildConversationProvider(binding))
-      ensureFeed(sessionId, binding)
+      ensureFeed(sessionId, binding, epoch)
       void publishCurrentTitle(sessionId)
       return binding
     })()
@@ -861,7 +939,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
    * run's identity.
    */
   async function restartConversationFeed(sessionId: string): Promise<void> {
-    if (!conversationBindings.has(sessionId) || conversationFeeds.has(sessionId)) return
+    if (!conversationBindings.has(sessionId) || conversationFeeds.has(sessionId) || pendingFeeds.has(sessionId)) return
     // A dead consumer forces a re-answer of the bind, so a reclaimed or
     // re-minted run is noticed and its new identity takes over; a same-run
     // re-answer keeps the session's turn and name records.
@@ -900,6 +978,42 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     const binding = conversationBindings.get(sessionId)
     if (!binding) return undefined
     return { brokerUrl: binding.brokerUrl, runId: binding.runId, token: binding.runToken }
+  }
+
+  /**
+   * Whether a spawn is routed to the supervisor that holds this conversation's
+   * bound run — the only broker where naming that run as the spawn parent is
+   * meaningful. Identity is the supervisor's socket path, canonicalized and
+   * compared by the shared supervisor class, which is the same test the shared
+   * spawn tool makes before reusing the live singleton; a label or a caller's
+   * spelling of a path never matches. A spawn routed anywhere else runs
+   * without a parent route: that broker would mint a parent record nothing
+   * serves, so the child is told no parent it could never reach.
+   */
+  function spawnSharesConversationSupervisor(
+    binding: ConversationBinding,
+    requestedSupervisorId: string | undefined,
+  ): boolean {
+    if (requestedSupervisorId === undefined) return true
+    if (!Supervisor.isCurrentInstance(requestedSupervisorId)) return false
+    return Supervisor.currentInstance()?.supervisorId === binding.supervisorId
+  }
+
+  /**
+   * Whether a shutdown names the supervisor this plugin's conversation bindings
+   * were minted on. Identity is the canonical socket path compared by the
+   * shared supervisor class, never the caller's spelling or a label; a shutdown
+   * aimed elsewhere says nothing about this plugin's conversations.
+   */
+  function shutdownDropsConversations(requestedSupervisorId: string | undefined): boolean {
+    if (requestedSupervisorId === undefined) return true
+    const live = Supervisor.currentInstance()
+    if (!live) return false
+    if (!Supervisor.isCurrentInstance(requestedSupervisorId)) return false
+    for (const binding of conversationBindings.values()) {
+      if (binding.supervisorId !== live.supervisorId) return false
+    }
+    return true
   }
 
   /** The credentials a spawned feed or `avenor message` call authenticates with.
@@ -987,24 +1101,130 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
    * its records arrive as JSON lines on stdout. A feed that exits is logged;
    * the next idle rebinds explicitly rather than respawning in a loop.
    */
-  function ensureFeed(sessionId: string, binding: ConversationBinding): void {
+  function ensureFeed(sessionId: string, binding: ConversationBinding, epoch: number): void {
+    if (epoch !== bindEpoch) return
     const existing = conversationFeeds.get(sessionId)
     if (existing) {
       if (existing.runId === binding.runId && existing.brokerUrl === binding.brokerUrl) return
       stopFeed(sessionId, existing)
     }
+    // A previous consumer's process is still closing and holds the inbox lock:
+    // the replacement is handed off to exactly that close, and a later bind
+    // retargets the one consumer waiting there.
+    if (handedOffFeeds.has(sessionId)) {
+      pendingFeeds.set(sessionId, { binding, epoch })
+      return
+    }
+    spawnFeed(sessionId, binding, epoch)
+  }
+
+  /**
+   * Start the consumer a session is waiting to run once the previous one is
+   * gone and its last delivery landed. The handoff is one close event and one
+   * queued consumer: nothing polls, and a reset drops the queue before it can
+   * start.
+   */
+  function startPendingFeed(sessionId: string): void {
+    if (handedOffFeeds.has(sessionId)) return
+    const pending = pendingFeeds.get(sessionId)
+    if (!pending) return
+    pendingFeeds.delete(sessionId)
+    spawnFeed(sessionId, pending.binding, pending.epoch)
+  }
+
+  /** Start one consumer, or do nothing when the binding it serves is stale. */
+  function spawnFeed(sessionId: string, binding: ConversationBinding, epoch: number): void {
+    if (epoch !== bindEpoch) return
     const child = spawnAvenorProcess(
       [findAvenorBinary(), 'feed', 'broker'],
       childEnv({ brokerUrl: binding.brokerUrl, runId: binding.runId, token: binding.runToken }),
     )
-    const feed: FeedProcess = { child, runId: binding.runId, brokerUrl: binding.brokerUrl }
+    // Records are delivered one at a time in arrival order: the reader pauses
+    // the feed's stdout for the duration of a delivery, so the next record is
+    // never offered to the host while the previous prompt is still open and
+    // the lines waiting are only those a single read chunk already carried.
+    // Nothing polls here — the paused stream is the backpressure.
+    const pending: string[] = []
+    let retired = false
+    let draining = false
+    let readerClosed = false
+    const reader = child.stdout ? readline.createInterface({ input: child.stdout }) : undefined
+    const settle = (): void => {
+      // A process that has not closed still holds the inbox lock.
+      if (!feed.released) return
+      // A consumer that ended on its own keeps the inbox until the record it
+      // was delivering lands: its replacement's newer record must not overtake
+      // it. A retired consumer's queue is already dropped, so it owes only the
+      // close above.
+      if (!retired && draining) return
+      const ownsSlot = conversationFeeds.get(sessionId) === feed
+      const handedOff = handedOffFeeds.get(sessionId) === feed
+      // A consumer a replacement already superseded owns neither.
+      if (!ownsSlot && !handedOff) return
+      if (ownsSlot) conversationFeeds.delete(sessionId)
+      if (handedOff) handedOffFeeds.delete(sessionId)
+      startPendingFeed(sessionId)
+    }
+    const feed: FeedProcess = {
+      child,
+      runId: binding.runId,
+      brokerUrl: binding.brokerUrl,
+      released: false,
+      retire() {
+        retired = true
+        pending.length = 0
+        reader?.close()
+      },
+      settle,
+    }
+    reader?.on('close', () => {
+      readerClosed = true
+    })
     conversationFeeds.set(sessionId, feed)
+    /** A consumer that already owns the slot is this one's replacement. */
+    const superseded = (): boolean => {
+      const owned = conversationFeeds.get(sessionId)
+      return owned !== undefined && owned !== feed
+    }
+    const drain = async (): Promise<void> => {
+      if (draining) return
+      draining = true
+      try {
+        while (!retired && !superseded() && pending.length > 0) {
+          await deliverFeedRecord(sessionId, feed, pending.shift() ?? '')
+        }
+      } finally {
+        draining = false
+        // A retired or replaced feed stays paused: nothing of it may be read
+        // or delivered any more. A reader already closed by its process ending
+        // has no line left to resume, so asking it to would throw.
+        if (!retired && !superseded() && !readerClosed) reader?.resume()
+        // The old process is closed and its last queued record has landed: the
+        // replacement waiting behind it may now claim the inbox in order.
+        settle()
+      }
+    }
+    reader?.on('line', line => {
+      pending.push(line)
+      reader.pause()
+      // A delivery that throws out of its own handling stops this consumer, as
+      // a refused prompt does: the feed it came from is the one at fault.
+      void drain().catch(error => {
+        console.error(`[avenor] feed delivery failed for session ${sessionId}:`, error instanceof Error ? error.message : error)
+        stopFeed(sessionId, feed)
+      })
+    })
     // A spawn that fails to start (a missing or non-executable binary, for
     // instance) must not reach the host as an unhandled 'error' event; the
-    // slot is freed like any other dead consumer so the next idle rebinds.
+    // slot is freed like any other dead consumer so the next idle rebinds. A
+    // process that never started holds no lock, so no replacement waits on it.
     child.on('error', error => {
       console.error(`[avenor] feed ${binding.runId} failed to start:`, error instanceof Error ? error.message : error)
+      feed.released = true
       stopFeed(sessionId, feed)
+      // Nothing was ever launched, so no lock is held and a waiting replacement
+      // does not need the close event this process may never emit.
+      startPendingFeed(sessionId)
     })
     // Feed diagnostics arrive as lines, possibly split across chunks, so they
     // are buffered here and one complete line is handled at a time. A terminal
@@ -1021,17 +1241,16 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     child.on('close', () => {
       if (stderrPending.trim()) handleFeedDiagnostic(sessionId, feed, binding.runId, stderrPending)
       stderrPending = ''
+      // The process is gone and its inbox lock released. The rows it already
+      // read may still be delivering, so the session waits on this consumer
+      // until both are done rather than letting a replacement overtake them.
+      feed.released = true
+      if (conversationFeeds.get(sessionId) === feed) {
+        conversationFeeds.delete(sessionId)
+        handedOffFeeds.set(sessionId, feed)
+      }
+      settle()
     })
-    const stdout = child.stdout
-    let lines: readline.Interface | undefined
-    if (stdout) {
-      lines = readline.createInterface({ input: stdout })
-      lines.on('line', line => {
-        void deliverFeedRecord(sessionId, feed, line).catch(error => {
-          console.error(`[avenor] feed delivery failed for session ${sessionId}:`, error instanceof Error ? error.message : error)
-        })
-      })
-    }
     child.on('exit', (code, signalName) => {
       // Only the feed this slot still names logs its exit: a replaced or reset
       // consumer's death is its replacement's business.
@@ -1039,7 +1258,10 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
         conversationFeeds.delete(sessionId)
         console.error(`[avenor] feed for session ${sessionId} exited (code ${code ?? 'null'}${signalName ? ` signal ${signalName}` : ''}); the next idle rebinds`)
       }
-      lines?.close()
+      // Exit is not EOF: the reader stays open so a record already written to
+      // the feed's stdout is still read and delivered. The process's close is
+      // what releases the inbox for a replacement.
+      if (!feed.released) handedOffFeeds.set(sessionId, feed)
     })
   }
 
@@ -1354,6 +1576,14 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
   // first bind so a conversation that names itself before any messaging call
   // still publishes that name when it binds.
   const sessionTitles = new Map<string, string>()
+  // Bumped by every native rename event. A background title read that started
+  // under an older version answers with a name the human has already replaced,
+  // so its answer is dropped instead of published over the newer one.
+  const titleVersions = new Map<string, number>()
+
+  function titleVersion(sessionId: string): number {
+    return titleVersions.get(sessionId) ?? 0
+  }
 
   function publishSessionTitle(sessionId: string, title: string | undefined): Promise<void> {
     if (typeof title === 'string') sessionTitles.set(sessionId, title)
@@ -1403,8 +1633,13 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       if (typeof remembered === 'string') return publishSessionTitle(sessionId, remembered)
       return Promise.resolve()
     }
+    // The read is asynchronous while renames keep arriving, and a rename that
+    // lands first is strictly newer than an answer this read already owed: the
+    // version it started under is the gate that keeps the human's name.
+    const version = titleVersion(sessionId)
     return readTitle(sessionId)
       .then(title => {
+        if (titleVersion(sessionId) !== version) return
         const name = typeof title === 'string' ? title : remembered
         if (typeof name === 'string') return publishSessionTitle(sessionId, name)
       })
@@ -1414,6 +1649,8 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
   }
 
   const onSessionRenamed = async (sessionID: string, title: string | undefined): Promise<void> => {
+    // Every rename event outranks any title read already in flight.
+    titleVersions.set(sessionID, titleVersion(sessionID) + 1)
     await publishSessionTitle(sessionID, title)
   }
 
@@ -1527,7 +1764,16 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
           // backend side; this surface only names the parent.
           let ownerRunId: string | undefined
           try {
-            ownerRunId = (await bindConversation(context.sessionID)).runId
+            const binding = await bindConversation(context.sessionID)
+            // A parent route only resolves on the broker that holds the parent
+            // run. A spawn pointed at another supervisor runs there without
+            // one, rather than handing that broker a run id it would mint an
+            // unserved parent record for.
+            if (spawnSharesConversationSupervisor(binding, args.supervisor_id)) {
+              ownerRunId = binding.runId
+            } else {
+              console.error(`[avenor] spawn targets supervisor ${args.supervisor_id}; the conversation's parent run lives on ${binding.supervisorId}, so the child starts without a parent route`)
+            }
           } catch (error) {
             console.error('[avenor] conversation bind failed; messaging unavailable for this session:', error instanceof Error ? error.message : error)
           }
@@ -1818,13 +2064,10 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
         async execute(args, _context) {
           await stopTrackedRuns((run) => !args.supervisor_id || run.supervisorId === args.supervisor_id)
           // A supervisor going away means every conversation binding names a
-          // dead run: stop the feeds here rather than letting them burn on a
-          // broker that no longer exists, and drop the bindings so the next
-          // tool call or idle rebinds explicitly.
-          for (const sessionId of [...conversationFeeds.keys()]) stopFeed(sessionId)
-          conversationBindings.clear()
-          conversationProviders.clear()
-          bindInFlight.clear()
+          // dead run — but only the supervisor these bindings were minted on
+          // can revoke them. A shutdown aimed at another supervisor leaves this
+          // one's conversations, feeds and credentials untouched.
+          if (shutdownDropsConversations(args.supervisor_id)) resetConversationBindings()
           const result = await shutdownTool({
             supervisorId: args.supervisor_id,
             force: args.force,

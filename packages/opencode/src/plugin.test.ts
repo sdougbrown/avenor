@@ -282,10 +282,15 @@ mock.module('@dougbots/avenor-core', () => ({
   // The stub keeps the plugin's current-instance override but inherits the
   // real statics (get, getInstance) via the prototype chain — the real
   // constructor is private, so the stub is built with Object.create rather
-  // than a subclass.
+  // than a subclass. The singleton the real statics read is private to the
+  // real class, so the identity check against a requested socket is forwarded
+  // to the same fixture; canonicalizing a path stays the shared class's job.
   Supervisor: Object.assign(
     Object.create(coreModule.Supervisor) as typeof coreModule.Supervisor,
-    { currentInstance: currentSupervisorMock },
+    {
+      currentInstance: currentSupervisorMock,
+      isCurrentInstance: (supervisorId: string) => currentSupervisorMock()?.supervisorId === supervisorId,
+    },
   ),
 }))
 const { AvenorPlugin, buildWaitingText, hostIdentityMetadata, terminalStatus, createAvenorCore } = await import('./plugin.js')
@@ -1142,6 +1147,61 @@ describe('AvenorPlugin', () => {
     expect(child.kill).toHaveBeenCalled()
   })
 
+  it('keeps the parent route on the supervisor that holds the bound run and drops it elsewhere', async () => {
+    const ownerClient = defaultClient
+    const otherClient = {
+      messagePreflight: async () => ({ generation: 'gen-other' }),
+      messageBind: messageBindMock,
+    }
+    getSupervisorClientMock.mockImplementation(async (supervisorId?: string) => ({
+      client: supervisorId === '/tmp/avenor-other.sock' ? otherClient : ownerClient,
+      supervisorId: supervisorId ?? '/tmp/avenor.sock',
+      isSingleton: true,
+      sup: null,
+    }))
+    spawnToolMock.mockImplementation(async (args: ToolArgs) => ({
+      run_id: 'run-1',
+      runtime_id: 'rt-1',
+      label: 'test run',
+      supervisor_id: (args.supervisorId as string | undefined) ?? '/tmp/avenor.sock',
+    }))
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    const spawn = hooks.tool?.avenor_spawn as any
+    const context = {
+      sessionID: 'orchestrator-session',
+      directory: '/tmp/test',
+      abort: new AbortController().signal,
+      metadata: () => {},
+    }
+
+    // The session binds on the live singleton, so its own run is the parent.
+    await spawn.execute({ agent: 'jockey', wait: false }, context)
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({ parent_run_id: 'oc-run-1' })
+
+    // Naming that same supervisor explicitly keeps the parent route.
+    spawnToolMock.mockClear()
+    await spawn.execute({ agent: 'jockey', wait: false, supervisor_id: '/tmp/avenor.sock' }, context)
+    expect(spawnToolMock.mock.calls[0]?.[0]).toMatchObject({
+      supervisorId: '/tmp/avenor.sock',
+      parent_run_id: 'oc-run-1',
+    })
+
+    // The other supervisor's broker has no record of that run: handing it the
+    // id would make its spawn mint an unserved parent mapping. The run still
+    // starts there; only the parent route is omitted.
+    spawnToolMock.mockClear()
+    await spawn.execute({ agent: 'jockey', wait: false, supervisor_id: '/tmp/avenor-other.sock' }, context)
+    const args = spawnToolMock.mock.calls[0]?.[0]
+    expect(args).toMatchObject({ supervisorId: '/tmp/avenor-other.sock' })
+    expect(args).not.toHaveProperty('parent_run_id')
+    // Exactly one bind exists, on the supervisor that minted it, so the other
+    // broker was never told to hold a parent run for this conversation.
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(messageBindMock.mock.calls[0]?.[0]).toMatchObject({ host: 'opencode', session_id: 'orchestrator-session' })
+
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+  })
+
   it('delivers a feed record as an untrusted frame with the native answer route', async () => {
     const promptAsync = mock(async (_args: PromptArgs) => {})
     const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
@@ -1179,19 +1239,17 @@ describe('AvenorPlugin', () => {
   it('renders a record with no stamped sender as unknown and skips malformed rows', async () => {
     const promptAsync = mock(async (_args: PromptArgs) => {})
     const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
-    await (hooks.tool?.avenor_spawn as any).execute(
-      { agent: 'jockey', wait: false },
-      { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
-    )
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('orchestrator-session'))
     const child = spawnProcessMock.mock.results[0]?.value as any
     child.stdout.emit('data', Buffer.from('not json\n'))
     child.stdout.emit('data', Buffer.from(JSON.stringify({ text: 'unstamped body', id: 'm-2' }) + '\n'))
     await waitFor(() => promptAsync.mock.calls.length > 0, 'the unstamped record to be delivered')
 
-    expect(promptAsync).toHaveBeenCalledTimes(1)
-    const delivered = (promptAsync.mock.calls[0]?.[0] as any).body.parts[0].text as string
-    expect(delivered).toContain('unstamped body')
-    expect(delivered).toContain('unknown')
+    const frames = promptAsync.mock.calls
+      .map(([args]) => (args as PromptArgs).body.parts[0]?.text ?? '')
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toContain('unstamped body')
+    expect(frames[0]).toContain('unknown')
 
     await (hooks.tool?.avenor_shutdown as any).execute({}, {})
   })
@@ -1212,6 +1270,102 @@ describe('AvenorPlugin', () => {
 
     await waitFor(() => promptAsync.mock.calls.length > 0, 'the record to reach the host')
     await waitFor(() => child.kill.mock.calls.length > 0, 'the refused delivery to stop its feed')
+
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+  })
+
+  it('delivers a feed\'s records one at a time in arrival order', async () => {
+    // Only the feed's own records are held open; anything else the plugin
+    // prompts (a monitor notice for the spawned run) resolves at once.
+    const releases: Array<() => void> = []
+    const delivered: string[] = []
+    const promptAsync = mock((args: PromptArgs) => {
+      const text = args.body.parts[0]?.text ?? ''
+      if (!text.includes(' body')) return Promise.resolve()
+      delivered.push(text)
+      return new Promise<void>(resolve => releases.push(resolve))
+    })
+    const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync as any) }) as any)
+    await (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: false },
+      { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
+    )
+    const child = spawnProcessMock.mock.results[0]?.value as any
+    child.stdout.emit('data', Buffer.from(
+      JSON.stringify({ text: 'first body', from: 'peer', id: 'm-1' }) + '\n'
+      + JSON.stringify({ text: 'second body', from: 'peer', id: 'm-2' }) + '\n',
+    ))
+    await waitFor(() => delivered.length > 0, 'the first record to reach the host')
+    await flushMicrotasks()
+
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toContain('first body')
+
+    releases.shift()?.()
+    await waitFor(() => delivered.length === 2, 'the second record to reach the host')
+    expect(delivered[1]).toContain('second body')
+    expect(delivered[1]).not.toContain('first body')
+    releases.shift()?.()
+
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+  })
+
+  it('stops delivering a feed\'s remaining records once one is refused', async () => {
+    const attempts: string[] = []
+    const promptAsync = mock(async (args: PromptArgs): Promise<void> => {
+      const text = args.body.parts[0]?.text ?? ''
+      if (!text.includes(' body')) return
+      attempts.push(text)
+      throw new Error('session not found')
+    })
+    const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
+    await (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: false },
+      { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
+    )
+    const child = spawnProcessMock.mock.results[0]?.value as any
+    child.stdout.emit('data', Buffer.from(
+      JSON.stringify({ text: 'first body', from: 'peer', id: 'm-1' }) + '\n'
+      + JSON.stringify({ text: 'second body', from: 'peer', id: 'm-2' }) + '\n',
+    ))
+    await waitFor(() => child.kill.mock.calls.length > 0, 'the refused delivery to stop its feed')
+    await flush()
+    await flushMicrotasks()
+
+    // A refused record ends the consumer: the record behind it is not offered
+    // to a host that has already refused this feed's records.
+    expect(attempts).toHaveLength(1)
+    expect(attempts[0]).toContain('first body')
+
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+  })
+
+  it('keeps delivering a record the feed wrote before its exit', async () => {
+    const releases: Array<() => void> = []
+    const delivered: string[] = []
+    const promptAsync = mock((args: PromptArgs) => {
+      const text = args.body.parts[0]?.text ?? ''
+      if (!text.includes(' body')) return Promise.resolve()
+      delivered.push(text)
+      return new Promise<void>(resolve => releases.push(resolve))
+    })
+    const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync as any) }) as any)
+    await (hooks.tool?.avenor_spawn as any).execute(
+      { agent: 'jockey', wait: false },
+      { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
+    )
+    const child = spawnProcessMock.mock.results[0]?.value as any
+    child.stdout.emit('data', Buffer.from(JSON.stringify({ text: 'first body', from: 'peer', id: 'm-1' }) + '\n'))
+    await waitFor(() => delivered.length > 0, 'the first record to reach the host')
+
+    // The reader is paused while the first delivery is open, so the record the
+    // feed writes next is still in its stdout when the process exits. Exit is
+    // not EOF: what the feed already wrote must still be read and delivered.
+    child.stdout.push(JSON.stringify({ text: 'second body', from: 'peer', id: 'm-2' }) + '\n')
+    child.emit('exit', 0, null)
+    releases.shift()?.()
+    await waitFor(() => delivered.length === 2, 'the record written before the exit to be delivered')
+    expect(delivered[1]).toContain('second body')
 
     await (hooks.tool?.avenor_shutdown as any).execute({}, {})
   })
@@ -1394,9 +1548,10 @@ describe('AvenorPlugin', () => {
     expect(spawnProcessMock).toHaveBeenCalledTimes(1)
 
     // The feed exits: the bind stays, and the next idle rebinds explicitly and
-    // starts a fresh consumer.
+    // starts a fresh consumer once the old process has closed.
     const child = spawnProcessMock.mock.results[0]?.value as any
     child.emit('exit', 0, null)
+    child.emit('close', 0, null)
     await flush()
     await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
     expect(spawnProcessMock).toHaveBeenCalledTimes(1)
@@ -1405,6 +1560,273 @@ describe('AvenorPlugin', () => {
     // A dead consumer is re-answered from the owner bind, which re-reads the
     // credentials instead of reusing the cached ones blindly.
     expect(messageBindMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for the old consumer to close before a replacement claims the inbox', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    const first = spawnProcessMock.mock.results[0]?.value as any
+
+    // The process exits but has not closed: the old consumer still holds the
+    // feed's lock until then, and a second consumer starting now would exit as
+    // a duplicate and leave the inbox unserved.
+    first.emit('exit', 0, null)
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } as any })
+    expect(messageBindMock).toHaveBeenCalledTimes(2)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+
+    // A further idle while the handoff waits is not a second replacement.
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } as any })
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    expect(messageBindMock).toHaveBeenCalledTimes(2)
+
+    // Exactly the old process's close releases the inbox, and the queued
+    // replacement starts once.
+    first.emit('close', 0, null)
+    await flush()
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } as any })
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for a killed consumer to close before the idle rebind starts a replacement', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    const stopped = spawnProcessMock.mock.results[0]?.value as any
+
+    // The broker refuses this consumer for good and the plugin kills it. The
+    // kill does not release the feed's lock; only the process's close does.
+    stopped.stderr.emit('data', Buffer.from('feed broker: terminal broker refusal (HTTP 401)\n'))
+    expect(stopped.kill).toHaveBeenCalled()
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } as any })
+    expect(messageBindMock).toHaveBeenCalledTimes(2)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+
+    stopped.emit('close', 0, null)
+    await flush()
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for the old consumer\'s open delivery before a replacement claims the inbox', async () => {
+    const releases: Array<() => void> = []
+    const delivered: string[] = []
+    const core = createAvenorCore(
+      {
+        promptAsync: (_sessionId, text) => {
+          delivered.push(text)
+          return new Promise<void>(resolve => releases.push(resolve))
+        },
+        getMessage: async () => undefined,
+      },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const hooks = core as unknown as {
+      event?: (input: { event: unknown }) => Promise<void>
+      tool?: Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }>
+    }
+    await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
+    const old = spawnProcessMock.mock.results[0]?.value as any
+    // Both records are already read into the old consumer's queue when the host
+    // holds the first prompt open.
+    old.stdout.emit('data', Buffer.from(
+      JSON.stringify({ text: 'first body', from: 'peer', id: 'm-1' }) + '\n'
+      + JSON.stringify({ text: 'second body', from: 'peer', id: 'm-2' }) + '\n',
+    ))
+    await waitFor(() => delivered.length === 1, 'the first record to reach the host')
+
+    // The process is gone, so no lock is held, but its first record is still
+    // open. The idle bind queues a replacement; the handoff must not start it
+    // yet or the newer consumer would overtake the older message.
+    old.emit('exit', 0, null)
+    old.emit('close', 0, null)
+    await flush()
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } })
+    expect(messageBindMock).toHaveBeenCalledTimes(2)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+
+    // The first record lands, then the second that was already read is
+    // delivered to completion before the replacement starts.
+    releases.shift()?.()
+    await waitFor(() => delivered.length === 2, 'the second queued record to reach the host')
+    expect(delivered[1]).toContain('second body')
+    await flushMicrotasks()
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+
+    releases.shift()?.()
+    await waitFor(() => spawnProcessMock.mock.calls.length === 2, 'the replacement to start after the old queue drained')
+    // Only the replacement the current bind queued starts: the old consumer is
+    // not replayed.
+    expect(messageBindMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops the queued replacement and the old queue when a shutdown retires the feed', async () => {
+    const releases: Array<() => void> = []
+    const delivered: string[] = []
+    const core = createAvenorCore(
+      {
+        promptAsync: (_sessionId, text) => {
+          delivered.push(text)
+          return new Promise<void>(resolve => releases.push(resolve))
+        },
+        getMessage: async () => undefined,
+      },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const hooks = core as unknown as {
+      event?: (input: { event: unknown }) => Promise<void>
+      tool?: Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }>
+    }
+    await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
+    const old = spawnProcessMock.mock.results[0]?.value as any
+    old.stdout.emit('data', Buffer.from(
+      JSON.stringify({ text: 'first body', from: 'peer', id: 'm-1' }) + '\n'
+      + JSON.stringify({ text: 'second body', from: 'peer', id: 'm-2' }) + '\n',
+    ))
+    await waitFor(() => delivered.length === 1, 'the first record to reach the host')
+    old.emit('exit', 0, null)
+    old.emit('close', 0, null)
+    await flush()
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } })
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+
+    // The shutdown retires the handoff as well as the slot: the record it had
+    // queued and the replacement waiting behind it belong to the same dropped
+    // identity and must not start afterwards.
+    await hooks.tool?.avenor_shutdown.execute({}, {})
+    releases.shift()?.()
+    await flush()
+    await flushMicrotasks()
+    expect(delivered).toHaveLength(1)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+
+    // The reset is not a permanent block: the next call binds afresh and starts
+    // a consumer for the new identity, with no replay of the old records.
+    await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
+    expect(messageBindMock).toHaveBeenCalledTimes(3)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+    expect(delivered).toHaveLength(1)
+  })
+
+  it('spawns nothing when the retired old delivery is refused after a shutdown', async () => {
+    const rejections: Array<(error: Error) => void> = []
+    const delivered: string[] = []
+    const core = createAvenorCore(
+      {
+        promptAsync: (_sessionId, text) => {
+          delivered.push(text)
+          return new Promise<void>((_resolve, reject) => rejections.push(reject))
+        },
+        getMessage: async () => undefined,
+      },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const hooks = core as unknown as {
+      event?: (input: { event: unknown }) => Promise<void>
+      tool?: Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }>
+    }
+    await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
+    const old = spawnProcessMock.mock.results[0]?.value as any
+    old.stdout.emit('data', Buffer.from(
+      JSON.stringify({ text: 'first body', from: 'peer', id: 'm-1' }) + '\n'
+      + JSON.stringify({ text: 'second body', from: 'peer', id: 'm-2' }) + '\n',
+    ))
+    await waitFor(() => delivered.length === 1, 'the first record to reach the host')
+    old.emit('exit', 0, null)
+    old.emit('close', 0, null)
+    await flush()
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } })
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+
+    // The shutdown drops the queued replacement and retires the old consumer.
+    // Its open delivery failing afterwards is a failure of the dropped
+    // identity, not a reason to start anything that shutdown cancelled.
+    await hooks.tool?.avenor_shutdown.execute({}, {})
+    rejections.shift()?.(new Error('session gone'))
+    await flush()
+    await flushMicrotasks()
+    expect(delivered).toHaveLength(1)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a bind a shutdown superseded even when the client object is unchanged', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    const first = spawnProcessMock.mock.results[0]?.value as any
+
+    // The consumer dies and the idle rebind's messageBind is held open.
+    first.emit('exit', 0, null)
+    let releaseBind: ((value: { broker_url: string; run_id: string; run_token: string; generation: string; created: boolean }) => void) | undefined
+    messageBindMock.mockImplementation(() =>
+      new Promise<{ broker_url: string; run_id: string; run_token: string; generation: string; created: boolean }>(resolve => {
+        releaseBind = resolve
+      }),
+    )
+    const idle = hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } as any })
+    await waitFor(() => messageBindMock.mock.calls.length === 2, 'the rebind to start')
+
+    // The shutdown drops the binding and bumps the epoch while the bind is in
+    // flight. The client object is the same one it started with, so client
+    // identity cannot be the signal here.
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+
+    releaseBind?.({ broker_url: 'http://broker.test', run_id: 'oc-run-2', run_token: 'oc-token-2', generation: 'gen-bind-2', created: false })
+    await idle
+    await flush()
+
+    // The late bind must not revive what the shutdown dropped: no consumer and
+    // no cached identity to serve.
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    messageBindMock.mockImplementation(async () => ({
+      broker_url: 'http://broker.test',
+      run_id: 'oc-run-3',
+      run_token: 'oc-token-3',
+      generation: 'gen-bind-3',
+      created: true,
+    }))
+    first.emit('close', 0, null)
+    await flush()
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(messageBindMock).toHaveBeenCalledTimes(3)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses a bind whose owner lookup a shutdown outlived', async () => {
+    // The lookup starts before the shutdown and answers with the same client
+    // object afterwards, so client identity cannot be the stale signal.
+    let releaseLookup: ((value: unknown) => void) | undefined
+    let lookups = 0
+    getSupervisorClientMock.mockImplementation(() => {
+      lookups++
+      if (lookups === 1) {
+        return new Promise(resolve => {
+          releaseLookup = resolve
+        }) as any
+      }
+      return defaultSupervisorClient()
+    })
+    const hooks = await AvenorPlugin(makeCtx() as any)
+
+    const stale = (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    await waitFor(() => lookups === 1, 'the first owner lookup to start')
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+
+    releaseLookup?.({ client: defaultClient, supervisorId: '/tmp/avenor.sock', isSingleton: true, sup: null })
+    await expect(stale).rejects.toThrow('broker binding is unavailable')
+    await flush()
+    // The late answer mints no run and revives no consumer behind the reset.
+    expect(messageBindMock).not.toHaveBeenCalled()
+    expect(spawnProcessMock).not.toHaveBeenCalled()
+
+    // The same client object is still the live owner: a fresh call rebinds and
+    // starts the consumer the shutdown dropped.
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    await (hooks.tool?.avenor_shutdown as any).execute({}, {})
   })
 
   it('scrubs inherited AVENOR credentials from messaging children', async () => {
@@ -1471,7 +1893,8 @@ describe('AvenorPlugin', () => {
     expect(child.kill).toHaveBeenCalled()
 
     // The slot is free again, so the next idle rebinds explicitly: the bind is
-    // re-answered and a fresh consumer starts.
+    // re-answered and a fresh consumer starts once the stopped one has closed.
+    child.emit('close', 0, null)
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } as any })
     expect(messageBindMock).toHaveBeenCalledTimes(2)
     expect(spawnProcessMock).toHaveBeenCalledTimes(2)
@@ -1512,13 +1935,15 @@ describe('AvenorPlugin', () => {
     const stale = spawnProcessMock.mock.results[0]?.value as any
 
     // A supervisor restart drops the binding: the stale consumer is stopped
-    // and a fresh one starts under the re-minted identity.
+    // and a fresh one starts under the re-minted identity once it has closed.
     current = second
     await (hooks.tool?.avenor_message as any).execute(
       { action: 'tell', target: 'mesh-a', message: 'hi' },
       toolContext('session-1'),
     )
     expect(stale.kill).toHaveBeenCalled()
+    stale.emit('close', 0, null)
+    await flush()
     const replacement = spawnProcessMock.mock.results[1]?.value as any
 
     // The stale feed's late terminal line names the slot's feed no longer; the
@@ -1555,7 +1980,10 @@ describe('AvenorPlugin', () => {
     current = second
     await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
     // The stale binding is dropped and re-minted on the fresh supervisor; the
-    // feed of the dead run is gone and a consumer starts for the new run.
+    // feed of the dead run is gone and a consumer starts for the new run once
+    // the stopped process has closed.
+    ;(spawnProcessMock.mock.results[0]?.value as any).emit('close', 0, null)
+    await flush()
     expect(messageBindMock).toHaveBeenCalledTimes(2)
     expect(childProviderOptions).toHaveLength(2)
     expect(spawnProcessMock).toHaveBeenCalledTimes(2)
@@ -1636,6 +2064,7 @@ describe('AvenorPlugin', () => {
       created: false,
     }))
     ;(spawnProcessMock.mock.results[0]?.value as any).emit('exit', 0, null)
+    ;(spawnProcessMock.mock.results[0]?.value as any).emit('close', 0, null)
     await flush()
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } as any })
     await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 2, 'the title to republish')
@@ -1664,6 +2093,7 @@ describe('AvenorPlugin', () => {
     // The feed dies and the rebind answers again on the same run: the state
     // stays, so neither the title nor the turn publishes again.
     ;(spawnProcessMock.mock.results[0]?.value as any).emit('exit', 0, null)
+    ;(spawnProcessMock.mock.results[0]?.value as any).emit('close', 0, null)
     await flush()
     await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } as any })
     expect(messageBindMock).toHaveBeenCalledTimes(2)
@@ -1672,6 +2102,47 @@ describe('AvenorPlugin', () => {
     expect(postBrokerCalls).toHaveLength(2)
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
     expect(postBrokerCalls.filter(call => call.path === '/last_message')).toHaveLength(1)
+  })
+
+  it('never lets an initial title read landing after a rename publish the older name', async () => {
+    const reads: Array<(title: string | undefined) => void> = []
+    const core = createAvenorCore(
+      {
+        promptAsync: async () => {},
+        getMessage: async () => undefined,
+        getSessionTitle: () => new Promise<string | undefined>(resolve => reads.push(resolve)),
+      },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const hooks = core as unknown as {
+      event?: (input: { event: unknown }) => Promise<void>
+      tool?: Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }>
+    }
+    await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
+    // The bind starts the initial read, which is still in flight.
+    await waitFor(() => reads.length === 1, 'the initial title read to start')
+
+    await hooks.event?.({
+      event: { type: 'session.renamed', properties: { sessionID: 'session-1', title: 'Chosen Name' } },
+    })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the rename to publish')
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'Chosen Name' })
+
+    // The read answers with the name the human already replaced. The newer
+    // rename wins: the answer is dropped instead of published over it.
+    reads.shift()?.('Old Name')
+    await flush()
+    await flushMicrotasks()
+    const publishes = postBrokerCalls.filter(call => call.path === '/session_name')
+    expect(publishes).toHaveLength(1)
+    expect(publishes[0]?.body).toEqual({ name: 'Chosen Name' })
+
+    // Nor does the dropped answer become the remembered title: a later bind or
+    // idle has nothing new to publish.
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } })
+    await flush()
+    await flushMicrotasks()
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
   })
 
   it('keeps a crafted feed message id inside the quoted literal of the trusted frame', async () => {
@@ -1795,6 +2266,9 @@ describe('AvenorPlugin', () => {
     current = second
     await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
     expect(stale.kill).toHaveBeenCalled()
+    // The replacement waits for the old process to close, then takes the inbox.
+    stale.emit('close', 0, null)
+    await flush()
     const replacement = spawnProcessMock.mock.results[1]?.value as any
 
     // Now the stale delivery fails: only the feed it arrived from may stop,
@@ -1804,6 +2278,147 @@ describe('AvenorPlugin', () => {
     expect(replacement.kill).not.toHaveBeenCalled()
     await core.onSessionIdle('session-1')
     expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('fences an exited feed whose later prompt is refused, without touching its replacement', async () => {
+    const rejections: Array<(error: Error) => void> = []
+    const delivered: string[] = []
+    const core = createAvenorCore(
+      {
+        promptAsync: (_sessionId, text) => {
+          if (!text.includes(' body')) return Promise.resolve()
+          delivered.push(text)
+          return new Promise<void>((_resolve, reject) => rejections.push(reject))
+        },
+        getMessage: async () => undefined,
+      },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const hooks = core as unknown as {
+      event?: (input: { event: unknown }) => Promise<void>
+      tool?: Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }>
+    }
+    await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
+    const stale = spawnProcessMock.mock.results[0]?.value as any
+    stale.stdout.emit('data', Buffer.from(
+      JSON.stringify({ text: 'first body', from: 'peer', id: 'm-1' }) + '\n'
+      + JSON.stringify({ text: 'second body', from: 'peer', id: 'm-2' }) + '\n',
+    ))
+    const deadDeadline = Date.now() + scaleMs(2_000)
+    while (delivered.length === 0 && Date.now() < deadDeadline) await flush()
+    expect(delivered).toHaveLength(1)
+
+    // The consumer exits with the second record still queued and the slot now
+    // empty, and only then is its open prompt refused. The refusal must retire
+    // that very feed, discarding the row it was holding.
+    stale.emit('exit', 0, null)
+    rejections.shift()?.(new Error('session gone'))
+    await flush()
+    await flushMicrotasks()
+    expect(delivered).toHaveLength(1)
+
+    // A consumer that starts afterwards keeps the inbox, untouched by the dead
+    // feed's refusal.
+    stale.emit('close', 0, null)
+    await flush()
+    await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'session-1' } } })
+    const replacement = spawnProcessMock.mock.results[1]?.value as any
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+    expect(replacement.kill).not.toHaveBeenCalled()
+    await flush()
+    await flushMicrotasks()
+    expect(delivered).toHaveLength(1)
+  })
+
+  it('never delivers a replaced feed\'s buffered records into the replacement', async () => {
+    // The first delivery is still pending when the consumer is replaced, so the
+    // record queued behind it is what a stale feed could still hand the host.
+    const releases: Array<() => void> = []
+    const delivered: string[] = []
+    const core = createAvenorCore(
+      {
+        promptAsync: (_sessionId, text) => {
+          delivered.push(text)
+          return new Promise<void>(resolve => releases.push(resolve))
+        },
+        getMessage: async () => undefined,
+      },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const first = {
+      messagePreflight: async () => ({ generation: 'gen-1' }),
+      messageBind: messageBindMock,
+    }
+    const second = {
+      messagePreflight: async () => ({ generation: 'gen-2' }),
+      messageBind: messageBindMock,
+    }
+    let current = first
+    getSupervisorClientMock.mockImplementation(async () => ({
+      client: current,
+      supervisorId: '/tmp/avenor.sock',
+      isSingleton: true,
+      sup: null,
+    }))
+    let bindCount = 0
+    messageBindMock.mockImplementation(async () => {
+      bindCount++
+      return {
+        broker_url: 'http://broker.test',
+        run_id: `oc-run-${bindCount}`,
+        run_token: `oc-token-${bindCount}`,
+        generation: 'gen-bind-1',
+        created: true,
+      }
+    })
+    const hooks = core as unknown as { tool?: Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }> }
+    await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
+    const stale = spawnProcessMock.mock.results[0]?.value as any
+
+    stale.stdout.emit('data', Buffer.from(
+      JSON.stringify({ text: 'first body', from: 'peer', id: 'm-1' }) + '\n'
+      + JSON.stringify({ text: 'second body', from: 'peer', id: 'm-2' }) + '\n',
+    ))
+    const deliveryDeadline = Date.now() + scaleMs(2_000)
+    while (delivered.length === 0 && Date.now() < deliveryDeadline) await flush()
+    expect(delivered).toHaveLength(1)
+
+    // A supervisor restart replaces the consumer, and the queue that belonged
+    // to the old identity is dropped rather than delivered into the new one.
+    current = second
+    await hooks.tool?.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
+    expect(stale.kill).toHaveBeenCalled()
+    stale.emit('close', 0, null)
+    await flush()
+    releases.shift()?.()
+    await flush()
+    await flushMicrotasks()
+
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toContain('first body')
+    expect(delivered.join('\n')).not.toContain('second body')
+  })
+
+  it('leaves the bound conversations alone when the shutdown names another supervisor', async () => {
+    const hooks = await AvenorPlugin(makeCtx() as any)
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    const feed = spawnProcessMock.mock.results[0]?.value as any
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+
+    // Another supervisor going away says nothing about the one this
+    // conversation is bound to: its consumer keeps running and its identity is
+    // still served, with no second bind and no second consumer.
+    await (hooks.tool?.avenor_shutdown as any).execute({ supervisor_id: '/tmp/avenor-other.sock' }, {})
+    expect(shutdownToolMock).toHaveBeenCalledWith({ supervisorId: '/tmp/avenor-other.sock', force: undefined })
+    expect(feed.kill).not.toHaveBeenCalled()
+    await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+
+    // The bound supervisor's own shutdown does drop them.
+    await (hooks.tool?.avenor_shutdown as any).execute({ supervisor_id: '/tmp/avenor.sock' }, {})
+    expect(feed.kill).toHaveBeenCalled()
   })
 
   it('closes observers on shutdown and exposes avenor_inspect output', async () => {

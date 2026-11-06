@@ -22,21 +22,4 @@ state named in each file is the acceptance bar for that feature.
 | Claude peer layer | [claude-peers.md](claude-peers.md) | plugin `hooks/` mods layer → `SendMessage({to:"avenor:*"})`, inbound prompt turn, blocking `ask` |
 | Top-level Pi–Claude peers | [top-level-peers.md](top-level-peers.md) | independent sessions → central broker over outbound polling, combined local-child peers, identity lifecycle |
 | Codex peer layer | [codex-peers.md](codex-peers.md) | plugin `hooks/codex.json` command hooks → identity-bound `message`/`peers`, `codex queue` idle delivery |
-
-Known secondary surfaces not yet mapped: embedded board web UI (built with
-`-tags board`, see `mise.toml:go-build-full`), MCP server (`avenor mcp`,
-`docs/mcp.md`), multi-phase loops/teams/workflows (`docs/loop.md`,
-`docs/team.md`, `docs/workflow.md`), and `avenor await`. Add a map file here
-when one of these needs verification coverage.
-
-The backend for all drives is `pi` (the only agent runtime guaranteed on this
-machine). `opencode` is installed at `/usr/local/bin/opencode`, so the
-`opencode-acp` backend is driveable too — but the installed
-`~/.config/opencode/opencode.json` is rejected by opencode 1.15.5, so a drive
-must point `XDG_CONFIG_HOME` at a scratch config (see
-[messaging.md](messaging.md#gotchas)).
-
-Drives that put the Pi extension itself in the loop — messaging and completion
-notices — also need a built `packages/pi/dist` and children that load it; the
-launch and JSONL-client recipe lives in
-[messaging.md](messaging.md#driving-it-with-the-avenor-binary).
+| OpenCode conversations | [opencode-conversations.md](opencode-conversations.md) | native OpenCode host per-conversation messaging (tell, ask, reply, withdraw, child-parent routing) |
