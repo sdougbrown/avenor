@@ -84,6 +84,7 @@ export {
   MAX_WAIT_MS,
   MAX_FINAL_OUTPUT_RUNES,
   MESSAGE_OUTCOMES,
+  PEER_MESSAGE_NOTICE,
   normalizeTurnStopReason,
   extractTurnText,
   boundFinalOutput,
@@ -121,7 +122,7 @@ export { killTool } from './tools/kill.js'
 export type { KillToolArgs, KillResult } from './tools/kill.js'
 export { brokerReceiveTool } from './tools/broker-receive.js'
 export type { BrokerReceiveArgs, InboundAsk, BrokerReceiveResult } from './tools/broker-receive.js'
-export { BrokerHttpError, createBrokerChildBroker, postBroker } from './broker-http.js'
+export { BrokerHttpError, createBrokerChildBroker, postBroker, publishHarnessName } from './broker-http.js'
 export type { SubAgentEnv } from './broker-http.js'
 
 export type { ExecutionIdentity, WorkflowGateOperation, WorkflowCompleteParams, WorkflowGateParams, WorkflowHeartbeatParams, WorkflowControllerCreateParams } from './client.js'

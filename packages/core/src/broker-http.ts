@@ -102,6 +102,21 @@ export async function postBroker(
   return res.json()
 }
 
+/**
+ * Publish the harness's own user-defined session name for this run, or clear it
+ * with an empty name. The broker stores this name apart from any name the model
+ * set for itself and prefers it, so a peer sees the name the human gave the
+ * session. The POST is bounded: a broker that stops answering must leave the
+ * caller's publish chain able to run the next name rather than hang it forever.
+ */
+export async function publishHarnessName(
+  env: SubAgentEnv,
+  name: string | undefined,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  await postBroker(env, '/session_name', { name: name ?? '' }, fetchImpl, AbortSignal.timeout(5000))
+}
+
 /** Authenticated GET; broker credentials travel in headers, never the URL. */
 async function getBroker(
   env: SubAgentEnv,
