@@ -356,6 +356,28 @@ describe('v2Host', () => {
     expect(await host.getMessage('s1', 'm2')).toEqual({ id: 'm2', type: 'assistant', content: [{ type: 'text', text: 'hi' }] } as never)
     expect(await host.getMessage('s1', 'missing')).toBeUndefined()
   })
+
+  test('getSessionTitle reports the title the session carries, and nothing when it cannot be read', async () => {
+    const ctx = {
+      location: { directory: '/x' },
+      session: {
+        prompt: async () => {},
+        context: async () => [],
+        get: async ({ sessionID }: { sessionID: string }) => {
+          if (sessionID === 'broken') throw new Error('session gone')
+          return sessionID === 'untitled' ? { title: 7 } : { title: 'my title' }
+        },
+      },
+    }
+    const host = v2Host(ctx as never)
+    const readTitle = host.getSessionTitle
+    if (!readTitle) throw new Error('the V2 host must expose a session title reader')
+    expect(await readTitle('s1')).toBe('my title')
+    expect(await readTitle('untitled')).toBeUndefined()
+    // A session the adapter cannot read has no name to publish, so the caller
+    // falls back instead of failing the notify.
+    expect(await readTitle('broken')).toBeUndefined()
+  })
 })
 
 describe('permissionAskFromEvent', () => {
