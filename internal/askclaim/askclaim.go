@@ -29,6 +29,25 @@ var ErrAskerMismatch = errors.New("ask claim: asker mismatch")
 // validID reports whether id can name a claim file.
 func validID(id string) bool { return id != "." && id != ".." && messageIDPattern.MatchString(id) }
 
+// A record has two forms, and every site that names one derives it here. A
+// suffix added to Record but not to ClaimAsk would be written and never claimed;
+// one added to those but not to recordSuffixes would never be pruned, so its
+// run directory would never empty out.
+const (
+	recordAnswerable = ".json"    // an open ask, answerable by a reply
+	recordClaimed    = ".claimed" // an answered ask, kept so a second reply is edge-absent
+)
+
+// recordSuffixes is every form a record takes, in the order the prune reads
+// them.
+var recordSuffixes = []string{recordAnswerable, recordClaimed}
+
+// recordPath is where one form of a record lives. Callers pass a suffix from
+// the vocabulary above.
+func recordPath(dir, messageID, suffix string) string {
+	return filepath.Join(dir, messageID+suffix)
+}
+
 // Record persists an inbound ask without replacing an existing record, and
 // records nothing for an ask that was already claimed.
 func Record(dir, messageID, askerRunID string) error {
@@ -38,8 +57,8 @@ func Record(dir, messageID, askerRunID string) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, messageID+".json")
-	claimed := filepath.Join(dir, messageID+".claimed")
+	path := recordPath(dir, messageID, recordAnswerable)
+	claimed := recordPath(dir, messageID, recordClaimed)
 	check := func() (bool, error) {
 		found := false
 		for _, name := range []string{claimed, path} {
@@ -103,8 +122,8 @@ func (p *Provider) ClaimAsk(id string) (string, bool) {
 	if p.Dir == "" || !validID(id) {
 		return "", false
 	}
-	claimed := filepath.Join(p.Dir, id+".claimed")
-	source := filepath.Join(p.Dir, id+".json")
+	claimed := recordPath(p.Dir, id, recordClaimed)
+	source := recordPath(p.Dir, id, recordAnswerable)
 	if err := os.Link(source, claimed); err != nil {
 		return "", false
 	}
@@ -127,8 +146,8 @@ func (p *Provider) RestoreAsk(id, _ string) {
 	if p.Dir == "" || !validID(id) {
 		return
 	}
-	claimed := filepath.Join(p.Dir, id+".claimed")
-	_ = os.Rename(claimed, filepath.Join(p.Dir, id+".json"))
+	claimed := recordPath(p.Dir, id, recordClaimed)
+	_ = os.Rename(claimed, recordPath(p.Dir, id, recordAnswerable))
 }
 
 // BrokerKey hashes a normalized broker URL and run ID for local identity files.
@@ -256,7 +275,7 @@ func pruneRunDir(dir string, cutoff time.Time) error {
 // isClaimRecordName reports whether name is a claim record's file name: a
 // message id this package accepts, with the answered or unanswered suffix.
 func isClaimRecordName(name string) bool {
-	for _, suffix := range []string{".json", ".claimed"} {
+	for _, suffix := range recordSuffixes {
 		if id, ok := strings.CutSuffix(name, suffix); ok {
 			return validID(id)
 		}
