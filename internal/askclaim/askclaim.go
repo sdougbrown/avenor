@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/childmessaging"
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -166,4 +167,81 @@ func DefaultDir(stateHome, brokerURL, runID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(stateHome, "feed-asks", key), nil
+}
+
+// AskClaimMaxAge bounds how long a claim record is kept. A caller can hold an
+// ask open no longer than the messaging wait cap, so a day leaves a wide margin
+// while keeping the directory from growing without bound.
+const AskClaimMaxAge = 24 * time.Hour
+
+// PruneRoot removes claim records older than maxAge from every run directory
+// under root, then removes a run directory left empty. Each supervisor-minted
+// run gets its own directory, so without this the state home accumulates one
+// directory per delegation and nothing ever removes them.
+//
+// Only files named like a claim record are considered, so an unrelated file in
+// a run directory is left alone. Callers treat a failure as housekeeping that
+// did not happen rather than a reason to stop.
+func PruneRoot(root string, maxAge time.Duration) error {
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-maxAge)
+	var firstErr error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		if err := pruneRunDir(dir, cutoff); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		removeIfEmptyDir(dir)
+	}
+	return firstErr
+}
+
+// pruneRunDir removes the expired claim records in one run directory.
+func pruneRunDir(dir string, cutoff time.Time) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !isClaimRecordName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
+	return nil
+}
+
+// isClaimRecordName reports whether name is a claim record's file name: a
+// message id this package accepts, with the answered or unanswered suffix.
+func isClaimRecordName(name string) bool {
+	for _, suffix := range []string{".json", ".claimed"} {
+		if id, ok := strings.CutSuffix(name, suffix); ok {
+			return validID(id)
+		}
+	}
+	return false
+}
+
+// removeIfEmptyDir drops a run directory that no longer holds anything.
+func removeIfEmptyDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) > 0 {
+		return
+	}
+	_ = os.Remove(dir)
 }

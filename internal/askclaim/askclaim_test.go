@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestRecord checks the persisted ask and its permissions.
@@ -149,5 +150,56 @@ func TestAClaimedAskIsNotRecordedAgain(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "av1.ask.json")); !os.IsNotExist(err) {
 		t.Fatalf("claimed ask was recorded again: %v", err)
+	}
+}
+
+// TestPruneRootRemovesExpiredRecords proves the housekeeping a feed does on
+// start: expired records and the run directory they left behind go, a recent
+// record and anything that is not a claim record stay.
+func TestPruneRootRemovesExpiredRecords(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * AskClaimMaxAge)
+	write := func(dir, name string, mod time.Time) {
+		t.Helper()
+		path := filepath.Join(root, dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"message_id":"m","asker_run_id":"r"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One run directory whose records all expired, one holding a live ask.
+	write("broker-a", "answered.claimed", old)
+	write("broker-a", "unanswered.json", old)
+	write("broker-b", "live.json", time.Now())
+	// Not claim records: kept whatever their age.
+	write("broker-b", "notes.txt", old)
+	// A directory holding only an unrelated file survives the empty sweep.
+	write("broker-c", "keep.txt", old)
+
+	if err := PruneRoot(root, AskClaimMaxAge); err != nil {
+		t.Fatalf("PruneRoot: %v", err)
+	}
+	for _, gone := range []string{"broker-a"} {
+		if _, err := os.Stat(filepath.Join(root, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s survived with only expired records", gone)
+		}
+	}
+	for _, kept := range []string{"broker-b/live.json", "broker-b/notes.txt", "broker-c/keep.txt"} {
+		if _, err := os.Stat(filepath.Join(root, kept)); err != nil {
+			t.Errorf("%s was removed: %v", kept, err)
+		}
+	}
+}
+
+// TestPruneRootMissingRoot proves a first run, whose root does not exist yet,
+// is not an error.
+func TestPruneRootMissingRoot(t *testing.T) {
+	if err := PruneRoot(filepath.Join(t.TempDir(), "absent"), AskClaimMaxAge); err != nil {
+		t.Fatalf("PruneRoot on a missing root: %v", err)
 	}
 }

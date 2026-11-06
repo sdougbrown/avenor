@@ -91,6 +91,12 @@ without a record, reports `edge-absent`. The broker resolves a reply to a tell
 without a claim record. A `timed-out` ask exits 0 and remains open to a later
 reply; use `--action withdraw --message-id MESSAGE_ID` to close it.
 
+Each run gets its own directory under `feed-asks`. The default root is pruned
+when a feed starts: records older than a day go, and a run directory left empty
+goes with them. A day is generous because no caller can hold an ask
+open longer than the messaging wait cap. Only the default root is pruned; a
+directory named by `--asks-dir` is the caller's to clean.
+
 ## Transport contract
 
 ```go

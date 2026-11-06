@@ -87,6 +87,12 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 			fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 			return 1
 		}
+		// A run directory per spawn accumulates in the default root and nothing
+		// else removes it. Pruning is housekeeping: a failure here is reported
+		// and the feed runs anyway.
+		if err := askclaim.PruneRoot(filepath.Dir(b.AsksDir), askclaim.AskClaimMaxAge); err != nil {
+			fmt.Fprintln(b.Log, "feed broker: prune ask claim records:", err)
+		}
 	}
 	if err := os.MkdirAll(b.LockDir, 0700); err != nil {
 		fmt.Fprintln(b.Log, "feed broker: cannot create lock directory:", err)
