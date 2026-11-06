@@ -75,7 +75,9 @@ Supervisor drives (spawn/list/status/prompt/cancel via control socket):
 
 Event stream reads: `features/watch.md`. Permission answers:
 `features/permissions.md`. Config validation without a live agent:
-`features/verify-command.md`.
+`features/verify-command.md`. Owner-only `message_bind` (credentials + typed
+refusals, driven by the JSON-RPC bind script):
+`features/message-bind.md`.
 
 Stable handles over coordinates: sentinel file keys (`DONE`, `SESSION=`,
 `STOP_REASON=end_turn`), NDJSON event names (`session.start`,

@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/control/controltest"
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 type bindHandler struct {
@@ -41,6 +43,22 @@ func (h *bindHandler) observed() (messaging.Caller, messaging.MessageBindRequest
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.caller, h.req
+}
+
+// bindErrorCode decodes the typed code a bind refusal carries in error.data.
+func bindErrorCode(t *testing.T, err error) string {
+	t.Helper()
+	var rpcErr *client.RPCError
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("bind error = %v, want an RPC error", err)
+	}
+	var data struct {
+		Code string `json:"code"`
+	}
+	if len(rpcErr.Data) == 0 || json.Unmarshal(rpcErr.Data, &data) != nil {
+		t.Fatalf("bind error data = %s, want a typed code", rpcErr.Data)
+	}
+	return data.Code
 }
 
 func bindServer(t *testing.T, h *bindHandler) *client.Client {
@@ -125,6 +143,38 @@ func TestMessageBind(t *testing.T) {
 		}
 		if rpcErr.Message != "bind refused: unknown host" {
 			t.Fatalf("rpc message = %q, want the handler's error text", rpcErr.Message)
+		}
+		if code := bindErrorCode(t, err); code != "invalid-request" {
+			t.Fatalf("untyped refusal code = %q, want invalid-request", code)
+		}
+	})
+
+	t.Run("carries the handler's typed tool code", func(t *testing.T) {
+		for _, tc := range []struct{ code, message string }{
+			{"not_permitted", "message_bind requires the owner connection"},
+			{"refused", "message bind capacity reached (256 bound conversations)"},
+		} {
+			h := &bindHandler{}
+			h.set(messaging.MessageBindResult{}, &router.ToolError{Code: tc.code, Message: tc.message})
+			c := bindServer(t, h)
+
+			_, err := c.MessageBindContext(context.Background(), messaging.MessageBindRequest{
+				Host:      "pi",
+				SessionID: "sess_3",
+			})
+			var rpcErr *client.RPCError
+			if !errors.As(err, &rpcErr) {
+				t.Fatalf("code %s: bind error = %v, want an RPC error", tc.code, err)
+			}
+			if rpcErr.Code != -32000 {
+				t.Fatalf("code %s: rpc code = %d, want -32000", tc.code, rpcErr.Code)
+			}
+			if rpcErr.Message != tc.message {
+				t.Fatalf("code %s: rpc message = %q, want %q", tc.code, rpcErr.Message, tc.message)
+			}
+			if got := bindErrorCode(t, err); got != tc.code {
+				t.Fatalf("code %s: error.data.code = %q", tc.code, got)
+			}
 		}
 	})
 }

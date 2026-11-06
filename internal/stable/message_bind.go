@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 // maxMessageBindings bounds the conversations one supervisor binds. A bound
@@ -23,6 +24,10 @@ type messageBindKey struct {
 	sessionID string
 }
 
+func refuseBind(err error) (messaging.MessageBindResult, error) {
+	return messaging.MessageBindResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
+}
+
 // MessageBind implements control.StableHandler for the owner-only message_bind
 // verb: it maps one (host, native session) pair to exactly one broker-owned
 // run and returns that run's messaging credentials. The pi host reuses the
@@ -34,7 +39,10 @@ type messageBindKey struct {
 // fails closed instead.
 func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
 	if caller.Kind != messaging.CallerOwner {
-		return messaging.MessageBindResult{}, fmt.Errorf("message_bind requires the owner connection")
+		return messaging.MessageBindResult{}, &router.ToolError{
+			Code:    "not_permitted",
+			Message: "message_bind requires the owner connection",
+		}
 	}
 	if !messageBindHosts[req.Host] {
 		return messaging.MessageBindResult{}, fmt.Errorf("message_bind does not serve host %q", req.Host)
@@ -45,7 +53,7 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 	s.messageBindMu.Lock()
 	defer s.messageBindMu.Unlock()
 	if s.broker == nil || s.messaging == nil {
-		return messaging.MessageBindResult{}, fmt.Errorf("broker not available")
+		return refuseBind(fmt.Errorf("broker not available"))
 	}
 	key := messageBindKey{host: req.Host, sessionID: req.SessionID}
 	if runID, ok := s.messageBinds[key]; ok {
@@ -54,7 +62,7 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 			return res, nil
 		}
 		if req.Host == "pi" {
-			return messaging.MessageBindResult{}, err
+			return refuseBind(err)
 		}
 		// The broker has confirmed the mapped record removed, expired or
 		// retired, so the stale binding is dropped and reminted below. The
@@ -66,27 +74,27 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 	if req.Host == "pi" {
 		for bound := range s.messageBinds {
 			if bound.host == "pi" {
-				return messaging.MessageBindResult{}, fmt.Errorf("host pi already binds session %q; one conversation per supervisor singleton", bound.sessionID)
+				return refuseBind(fmt.Errorf("host pi already binds session %q; one conversation per supervisor singleton", bound.sessionID))
 			}
 		}
 	}
 	if len(s.messageBinds) >= maxMessageBindings {
 		s.reclaimUnavailableBinds()
 		if len(s.messageBinds) >= maxMessageBindings {
-			return messaging.MessageBindResult{}, fmt.Errorf("message bind capacity reached (%d bound conversations)", maxMessageBindings)
+			return refuseBind(fmt.Errorf("message bind capacity reached (%d bound conversations)", maxMessageBindings))
 		}
 	}
 	var runID string
 	if req.Host == "pi" {
 		id, token := s.registerBrokerRun()
 		if id == "" || token == "" {
-			return messaging.MessageBindResult{}, fmt.Errorf("supervisor broker run unavailable; host pi cannot bind")
+			return refuseBind(fmt.Errorf("supervisor broker run unavailable; host pi cannot bind"))
 		}
 		runID = id
 	} else {
 		id, err := s.mintBoundRun()
 		if err != nil {
-			return messaging.MessageBindResult{}, err
+			return refuseBind(err)
 		}
 		runID = id
 	}
@@ -136,7 +144,7 @@ func (s *Supervisor) reclaimUnavailableBinds() {
 func (s *Supervisor) messageBindCredentials(runID string, created bool) (messaging.MessageBindResult, error) {
 	token, ok := s.broker.OwnedReachableToken(runID)
 	if !ok {
-		return messaging.MessageBindResult{}, fmt.Errorf("bound run %s is unowned, expired or retired; the bind fails closed", runID)
+		return refuseBind(fmt.Errorf("bound run %s is unowned, expired or retired; the bind fails closed", runID))
 	}
 	return messaging.MessageBindResult{
 		BrokerURL:  s.brokerURL(),

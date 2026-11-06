@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 func bindCaller() messaging.Caller {
@@ -57,8 +59,8 @@ func TestMessageBindPiReusesTheSupervisorRun(t *testing.T) {
 		t.Fatalf("repeated pi bind = %+v, want %+v", repeat, res)
 	}
 
-	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "pi", SessionID: "ses_second"}); err == nil {
-		t.Fatal("a second pi session must be refused, not bound to the supervisor singleton")
+	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "pi", SessionID: "ses_second"}); err == nil || bindRefusalCode(t, err) != "refused" {
+		t.Fatalf("a second pi session must be refused, not bound to the supervisor singleton (err %v)", err)
 	}
 
 	again, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "pi", SessionID: "ses_pi"})
@@ -142,8 +144,8 @@ func TestMessageBindRefusesAnExternallyRegisteredRun(t *testing.T) {
 	}
 
 	sup.mintBoundRunID = func() string { return "external-run" }
-	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_x"}); err == nil {
-		t.Fatal("a bind colliding with an externally registered run must be refused, not adopted")
+	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_x"}); err == nil || bindRefusalCode(t, err) != "refused" {
+		t.Fatalf("a bind colliding with an externally registered run must be refused, not adopted (err %v)", err)
 	}
 	if sup.broker.GetRun("external-run").Token != "caller-chosen-token" {
 		t.Fatal("the refused bind must leave the external record's credential untouched")
@@ -163,11 +165,11 @@ func TestMessageBindCapsBoundConversations(t *testing.T) {
 			t.Fatalf("bind %d: %v", i, err)
 		}
 	}
-	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_over"}); err == nil {
-		t.Fatal("a bind past the conversation cap must be refused")
+	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_over"}); err == nil || bindRefusalCode(t, err) != "refused" {
+		t.Fatalf("a bind past the conversation cap must be refused (err %v)", err)
 	}
-	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "pi", SessionID: "ses_pi"}); err == nil {
-		t.Fatal("a pi bind past the conversation cap must be refused like any other host")
+	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "pi", SessionID: "ses_pi"}); err == nil || bindRefusalCode(t, err) != "refused" {
+		t.Fatalf("a pi bind past the conversation cap must be refused like any other host (err %v)", err)
 	}
 	repeat, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_0"})
 	if err != nil {
@@ -334,8 +336,8 @@ func TestMessageBindRefusesANonOwnerCaller(t *testing.T) {
 	sup, _ := newStage2Supervisor(t, 2)
 
 	broker := messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_child"}
-	if _, err := sup.MessageBind(broker, messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_1"}); err == nil {
-		t.Fatal("a broker caller must not bind a conversation")
+	if _, err := sup.MessageBind(broker, messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_1"}); err == nil || bindRefusalCode(t, err) != "not_permitted" {
+		t.Fatalf("a broker caller must not bind a conversation (err %v)", err)
 	}
 	res, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_1"})
 	if err != nil || !res.Created {
@@ -419,8 +421,12 @@ func TestMessageBindRefusesUnknownHostsAndEmptySessions(t *testing.T) {
 		"opencode": "",
 		"":         "ses_c",
 	} {
-		if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: host, SessionID: session}); err == nil {
+		_, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: host, SessionID: session})
+		if err == nil {
 			t.Fatalf("bind host=%q session=%q must be refused", host, session)
+		}
+		if code := bindRefusalCode(t, err); code != "" {
+			t.Fatalf("bind host=%q session=%q must stay untyped for the wire's invalid-request class, got code %q", host, session, code)
 		}
 	}
 }
@@ -433,7 +439,18 @@ func TestMessageBindRequiresBrokerMessaging(t *testing.T) {
 	sup.broker = nil
 	sup.messaging = nil
 
-	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_1"}); err == nil {
-		t.Fatal("a bind without broker messaging must be refused")
+	if _, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_1"}); err == nil || bindRefusalCode(t, err) != "refused" {
+		t.Fatalf("a bind without broker messaging must be refused (err %v)", err)
 	}
+}
+
+// bindRefusalCode reports the typed tool code a bind refusal carries, or ""
+// when the error is untyped and falls back to the wire's invalid-request class.
+func bindRefusalCode(t *testing.T, err error) string {
+	t.Helper()
+	var toolErr *router.ToolError
+	if !errors.As(err, &toolErr) {
+		return ""
+	}
+	return toolErr.Code
 }
