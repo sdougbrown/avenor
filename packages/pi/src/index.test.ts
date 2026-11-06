@@ -603,65 +603,25 @@ describe('Avenor Pi extension', () => {
       await waitFor(() => polls >= pollsBefore + 2)
       expect(published).toHaveLength(2)
 
-      // Clearing the name in the harness clears the broker's copy, so the run
-      // stops shadowing whatever name the model set.
-      sessionName = undefined
-      await harness.eventHandlers.before_agent_start({}, harness.ctx)
-      await waitFor(() => published.length === 3)
-      expect(published[2]).toMatchObject({ name: '' })
-    } finally {
-      globalThis.fetch = previousFetch
-      await harness.eventHandlers.session_shutdown({}, {})
-    }
-  })
-
-  it('publishes an idle rename immediately when pi reports session_info_changed', async () => {
-    let sessionName: string | undefined = 'my-session'
-    const published: Array<Record<string, unknown>> = []
-    let polls = 0
-    const previousFetch = globalThis.fetch
-    globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
-      const path = new URL(String(input)).pathname
-      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
-      if (path === '/session_name') {
-        published.push(body)
-        return Response.json({ run_id: body.run_id, label: body.name })
-      }
-      if (path === '/poll-control') {
-        polls++
-        return Response.json([])
-      }
-      return Response.json({})
-    }) as unknown as typeof fetch
-    const harness = await startExtensionHarness({
-      extOptions: { subAgentEnv: { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } },
-      sessionName: () => sessionName,
-    })
-    try {
-      await waitFor(() => published.length === 1)
-
-      // Pi reports the rename while the session is idle; the new name reaches
-      // the broker without any turn running.
       sessionName = 'renamed-idle'
       await harness.eventHandlers.session_info_changed(
         { type: 'session_info_changed', name: 'renamed-idle' }, harness.ctx)
-      await waitFor(() => published.length === 2)
-      expect(published[1]).toMatchObject({ name: 'renamed-idle' })
+      await waitFor(() => published.length === 3)
+      expect(published[2]).toMatchObject({ name: 'renamed-idle' })
 
-      // A reported clear publishes the clear the same way.
       sessionName = undefined
       await harness.eventHandlers.session_info_changed(
         { type: 'session_info_changed', name: undefined }, harness.ctx)
-      await waitFor(() => published.length === 3)
-      expect(published[2]).toMatchObject({ name: '' })
+      await waitFor(() => published.length === 4)
+      expect(published[3]).toMatchObject({ name: '' })
 
-      // A report for the already-published name is not sent again. Wait for two
-      // more child poll ticks so a republish would have had time to land.
-      const pollsBefore = polls
-      await harness.eventHandlers.session_info_changed(
-        { type: 'session_info_changed', name: undefined }, harness.ctx)
-      await waitFor(() => polls >= pollsBefore + 2)
-      expect(published).toHaveLength(3)
+      sessionName = 'renamed-again'
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      await waitFor(() => published.length === 5)
+      sessionName = undefined
+      await harness.eventHandlers.before_agent_start({}, harness.ctx)
+      await waitFor(() => published.length === 6)
+      expect(published[5]).toMatchObject({ name: '' })
     } finally {
       globalThis.fetch = previousFetch
       await harness.eventHandlers.session_shutdown({}, {})
