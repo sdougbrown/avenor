@@ -47,11 +47,6 @@ type Broker struct {
 	Out io.Writer
 	// Log receives diagnostics without message text.
 	Log io.Writer
-
-	// pruneLogMu guards pruneLogged, which remembers the last failure reported
-	// per root so a persistent denial is reported once rather than hourly.
-	pruneLogMu  sync.Mutex
-	pruneLogged map[string]string
 }
 
 // Run consumes messages until shutdown, parent loss, or an unrecoverable write.
@@ -87,7 +82,8 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 		return 1
 	}
-	b.pruneAskClaims()
+	reporter := &pruneReporter{out: b.Log}
+	b.pruneAskClaims(reporter)
 	if b.AsksDir == "" {
 		b.AsksDir, err = askclaim.DefaultDir(appdir.StateHome(), b.BrokerURL, b.RunID)
 		if err != nil {
@@ -113,7 +109,7 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 	// lives: run returns on parent loss and terminal errors while ctx is still
 	// open, and a pruner outliving the lock would contradict the exclusivity
 	// the lock is taken for.
-	stopPruner := b.startAskClaimPruner(ctx)
+	stopPruner := b.startAskClaimPruner(ctx, reporter)
 	defer stopPruner()
 	alive := func() bool { return parentPID() == parent }
 	wait := func(d time.Duration) bool {
@@ -277,42 +273,52 @@ var askClaimPruneInterval = time.Hour
 // pruneAskClaims removes expired records from the default root. It is
 // housekeeping: a failure is reported and the feed keeps running, which is why
 // neither caller branches on the error.
-func (b *Broker) pruneAskClaims() {
+func (b *Broker) pruneAskClaims(reporter *pruneReporter) {
 	root, prune := askClaimPruneRoot(b.AsksDir, appdir.StateHome(), b.BrokerURL, b.RunID)
 	if !prune {
 		return
 	}
 	if err := askclaim.PruneRoot(root, askclaim.AskClaimMaxAge); err != nil {
-		b.reportPruneError(root, err)
+		reporter.report(root, err)
 		return
 	}
-	b.forgetPruneError(root)
+	reporter.forget(root)
 }
 
-// reportPruneError reports a prune failure once per root and message. The prune
+// pruneReporter reports prune failures once per root and message. The prune
 // runs hourly for the life of a feed, and an unwritable root fails identically
 // on every pass; repeating it would bury everything else in the log.
-func (b *Broker) reportPruneError(root string, err error) {
-	message := err.Error()
-	b.pruneLogMu.Lock()
-	if b.pruneLogged == nil {
-		b.pruneLogged = make(map[string]string)
-	}
-	if b.pruneLogged[root] == message {
-		b.pruneLogMu.Unlock()
-		return
-	}
-	b.pruneLogged[root] = message
-	b.pruneLogMu.Unlock()
-	fmt.Fprintln(b.Log, "feed broker: prune ask claim records:", err)
+//
+// It is a pointer-owned type rather than fields on Broker: Broker is passed by
+// value, and a mutex inside it makes every copy a copylocks finding and every
+// future method a cross-copy race.
+type pruneReporter struct {
+	mu     sync.Mutex
+	logged map[string]string
+	out    io.Writer
 }
 
-// forgetPruneError clears the suppression for a root that pruned cleanly, so a
-// later failure is reported again.
-func (b *Broker) forgetPruneError(root string) {
-	b.pruneLogMu.Lock()
-	defer b.pruneLogMu.Unlock()
-	delete(b.pruneLogged, root)
+func (r *pruneReporter) report(root string, err error) {
+	message := err.Error()
+	r.mu.Lock()
+	if r.logged == nil {
+		r.logged = make(map[string]string)
+	}
+	if r.logged[root] == message {
+		r.mu.Unlock()
+		return
+	}
+	r.logged[root] = message
+	r.mu.Unlock()
+	fmt.Fprintln(r.out, "feed broker: prune ask claim records:", err)
+}
+
+// forget clears the suppression for a root that pruned cleanly, so a later
+// failure is reported again.
+func (r *pruneReporter) forget(root string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.logged, root)
 }
 
 // startAskClaimPruner prunes on each tick and returns a stop function that
@@ -322,7 +328,7 @@ func (b *Broker) forgetPruneError(root string) {
 // Feeds for different runs hold different locks (the key is the (broker, run)
 // pair) and prune the same root concurrently. That is benign because every step
 // of PruneRoot is best-effort and idempotent; it is not an invariant to lean on.
-func (b *Broker) startAskClaimPruner(ctx context.Context) func() {
+func (b *Broker) startAskClaimPruner(ctx context.Context, reporter *pruneReporter) func() {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -336,7 +342,7 @@ func (b *Broker) startAskClaimPruner(ctx context.Context) func() {
 			case <-stop:
 				return
 			case <-ticker.C:
-				b.pruneAskClaims()
+				b.pruneAskClaims(reporter)
 			}
 		}
 	}()

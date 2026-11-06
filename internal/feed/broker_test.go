@@ -634,7 +634,7 @@ func TestStartAskClaimPrunerStops(t *testing.T) {
 	b := &Broker{RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", Log: io.Discard}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop := b.startAskClaimPruner(ctx)
+	stop := b.startAskClaimPruner(ctx, &pruneReporter{out: io.Discard})
 	stopped := make(chan struct{})
 	go func() {
 		stop()
@@ -664,9 +664,10 @@ func TestPruneFailureIsReportedOncePerRoot(t *testing.T) {
 	if err := os.WriteFile(root, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	b.pruneAskClaims()
+	reporter := &pruneReporter{out: &log}
+	b.pruneAskClaims(reporter)
 	first := strings.Count(log.String(), "prune ask claim records")
-	b.pruneAskClaims()
+	b.pruneAskClaims(reporter)
 	if second := strings.Count(log.String(), "prune ask claim records"); second != first {
 		t.Fatalf("the same failure was reported again: %d then %d", first, second)
 	}
@@ -674,8 +675,8 @@ func TestPruneFailureIsReportedOncePerRoot(t *testing.T) {
 		t.Fatal("the first failure was not reported")
 	}
 	// A root that prunes cleanly forgets the suppression.
-	b.forgetPruneError(root)
-	b.pruneAskClaims()
+	reporter.forget(root)
+	b.pruneAskClaims(reporter)
 	if third := strings.Count(log.String(), "prune ask claim records"); third != first+1 {
 		t.Fatalf("a later failure was suppressed: %d then %d", first, third)
 	}
