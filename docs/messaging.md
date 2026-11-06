@@ -86,8 +86,9 @@ A child with broker credentials can use `avenor message --action tell`,
 router as other messaging surfaces; see [avenor message](cli.md#avenor-message).
 Use `--message-stdin` instead of `--message` to keep message text out of command
 arguments. The command reads up to 1 MiB of valid UTF-8 from stdin and refuses
-a read error or non-UTF-8 input without sending; the broker also applies a
-limit to the encoded payload.
+a read error or non-UTF-8 input without sending; `--message` text must be
+valid UTF-8 too, and invalid UTF-8 exits 1 without sending. The broker also
+applies a limit to the encoded payload.
 
 A reply to an ask needs the claim record the feed wrote. Use `--asks-dir` if
 the feed uses a non-default directory. A second reply, or a reply to an ask

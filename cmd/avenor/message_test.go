@@ -18,6 +18,25 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
+// receiveInbound polls the supervisor transport until a message arrives or the
+// deadline lapses.
+func receiveInbound(t *testing.T, tr *localhttp.Transport, generation string) messaging.InboundMessage {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		res, err := tr.Receive(t.Context(), messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "supervisor"}, Generation: generation})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Messages) > 0 {
+			return res.Messages[0]
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("message not received")
+	return messaging.InboundMessage{}
+}
+
 // TestMessageRoundTrips exercises the commands with real broker credentials.
 func TestMessageRoundTrips(t *testing.T) {
 	b := broker.New("")
@@ -45,22 +64,6 @@ func TestMessageRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receive := func() messaging.InboundMessage {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			res, err := tr.Receive(t.Context(), messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "supervisor"}, Generation: pre.Generation})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(res.Messages) > 0 {
-				return res.Messages[0]
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatal("message not received")
-		return messaging.InboundMessage{}
-	}
 	stateHome := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateHome)
 	dir, err := askclaim.DefaultDir(filepath.Join(stateHome, "avenor"), "http://"+b.Addr(), "child")
@@ -71,7 +74,7 @@ func TestMessageRoundTrips(t *testing.T) {
 	if code := runDeclared([]string{"message", "--action=tell", "--target=supervisor", "--message=hello"}, &out, &stderr); code != 0 {
 		t.Fatalf("tell: %d %s", code, &stderr)
 	}
-	msg := receive()
+	msg := receiveInbound(t, tr, pre.Generation)
 	if msg.FromRunID != "child" || !strings.Contains(string(msg.Payload), "hello") {
 		t.Fatalf("tell message: %+v", msg)
 	}
@@ -85,7 +88,7 @@ func TestMessageRoundTrips(t *testing.T) {
 		code := runDeclared([]string{"message", "--action=ask", "--target=supervisor", "--message=question", "--timeout-ms=5000"}, &o, &e)
 		done <- result{code, o.String(), e.String()}
 	}()
-	msg = receive()
+	msg = receiveInbound(t, tr, pre.Generation)
 	if msg.FromRunID != "child" || !strings.Contains(string(msg.Payload), "question") {
 		t.Fatalf("ask message: %+v", msg)
 	}
@@ -144,7 +147,7 @@ func TestMessageRoundTrips(t *testing.T) {
 	if code := runDeclared([]string{"message", "--action=reply", "--reply-to=" + tellID, "--asks-dir=" + dir, "--message=notice answer"}, &out, &stderr); code != 0 || !strings.Contains(out.String(), `"outcome": "sent"`) {
 		t.Fatalf("tell reply: exit %d, stdout %s, stderr %s", code, &out, &stderr)
 	}
-	msg = receive()
+	msg = receiveInbound(t, tr, pre.Generation)
 	if msg.FromRunID != "child" || !strings.Contains(string(msg.Payload), "notice answer") {
 		t.Fatalf("tell reply delivery: %+v", msg)
 	}
@@ -185,7 +188,7 @@ func TestMessageRoundTrips(t *testing.T) {
 	if code := runDeclared([]string{"message", "--action=tell", "--target=supervisor", "--message=by flags", "--broker-url=http://" + b.Addr(), "--run-id=child", "--token=" + child}, &out, &stderr); code != 0 {
 		t.Fatalf("tell by flags: %d %s %s", code, &out, &stderr)
 	}
-	msg = receive()
+	msg = receiveInbound(t, tr, pre.Generation)
 	if msg.FromRunID != "child" || !strings.Contains(string(msg.Payload), "by flags") {
 		t.Fatalf("tell by flags delivery: %+v", msg)
 	}
@@ -263,23 +266,6 @@ func TestMessageStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	// receive polls the supervisor until a message arrives or the deadline lapses.
-	receive := func() messaging.InboundMessage {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			res, err := tr.Receive(t.Context(), messaging.ReceiveRequest{Sender: messaging.Identity{RunID: "supervisor"}, Generation: pre.Generation})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(res.Messages) > 0 {
-				return res.Messages[0]
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		t.Fatal("message not received")
-		return messaging.InboundMessage{}
-	}
 	// noDelivery long-polls the supervisor once; the broker's poll waits for a
 	// message before returning empty, so an empty result proves nothing landed.
 	noDelivery := func() bool {
@@ -331,7 +317,7 @@ func TestMessageStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("stdin tell: %d %s", code, stderr)
 	}
-	msg := receive()
+	msg := receiveInbound(t, tr, pre.Generation)
 	if msg.FromRunID != "child" || payloadText(msg.Payload) != "line one\nline two\n" {
 		t.Fatalf("stdin tell: %+v", msg)
 	}
@@ -371,7 +357,7 @@ func TestMessageStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("empty stdin: %d %s", code, stderr)
 	}
-	msg = receive()
+	msg = receiveInbound(t, tr, pre.Generation)
 	if msg.FromRunID != "child" || payloadText(msg.Payload) != "" {
 		t.Fatalf("empty stdin: %+v", msg)
 	}
@@ -399,7 +385,7 @@ func TestMessageStdin(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("stdin=false: %d %s", code, stderr)
 	}
-	msg = receive()
+	msg = receiveInbound(t, tr, pre.Generation)
 	if msg.FromRunID != "child" || payloadText(msg.Payload) != "inline" {
 		t.Fatalf("stdin=false: %+v", msg)
 	}
@@ -421,5 +407,38 @@ func TestMessageStdin(t *testing.T) {
 	}
 	if !noDelivery() {
 		t.Fatal("invalid utf-8 delivered a message")
+	}
+
+	// Invalid UTF-8 in --message is refused before transport, just like
+	// stdin: nothing is sent and the raw bytes never reach stderr.
+	code, _, stderr = runStdin("", "--action=tell", "--target=supervisor", "--message=\xff\xfe")
+	if code != 1 || !strings.Contains(stderr, "not valid UTF-8") {
+		t.Fatalf("invalid utf-8 inline: %d %s", code, stderr)
+	}
+	if strings.Contains(stderr, "\xff\xfe") {
+		t.Fatalf("invalid utf-8 inline leaked raw bytes: %s", stderr)
+	}
+	if !noDelivery() {
+		t.Fatal("invalid utf-8 inline delivered a message")
+	}
+
+	// The refusal holds with --message-stdin=false too.
+	code, _, stderr = runStdin("", "--action=tell", "--target=supervisor", "--message=\xff\xfe", "--message-stdin=false")
+	if code != 1 || !strings.Contains(stderr, "not valid UTF-8") {
+		t.Fatalf("invalid utf-8 inline, stdin=false: %d %s", code, stderr)
+	}
+	if !noDelivery() {
+		t.Fatal("invalid utf-8 inline, stdin=false delivered a message")
+	}
+
+	// An explicit empty --message with stdin disabled delivers an empty
+	// message, as before.
+	code, _, stderr = runStdin("unread", "--action=tell", "--target=supervisor", "--message=", "--message-stdin=false")
+	if code != 0 {
+		t.Fatalf("empty inline: %d %s", code, stderr)
+	}
+	msg = receiveInbound(t, tr, pre.Generation)
+	if msg.FromRunID != "child" || payloadText(msg.Payload) != "" {
+		t.Fatalf("empty inline: %+v", msg)
 	}
 }

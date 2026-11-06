@@ -25,7 +25,8 @@ children and coordinate these commands through their shell tools, recording JSON
    `printf 'CLI-STDIN-ONE\nCLI-STDIN-TWO\n' | avenor message --action tell --target supervisor --message-stdin`.
    The host receives the exact multiline text, trailing newline included. A
    conflicting `--message` plus `--message-stdin` exits 2 and delivers nothing;
-   `--message-stdin=false` keeps the inline `--message` behavior.
+   `--message-stdin=false` keeps the inline `--message` behavior. Verify that
+   invalid UTF-8 in either input exits 1 and delivers nothing.
 3. The host tells A `CLI-NOTICE`; A runs
    `printf 'CLI-TELL-REPLY\n' | avenor message --action reply --reply-to ID --message-stdin`.
    The host receives the reply with the trailing newline and A reports `sent`.

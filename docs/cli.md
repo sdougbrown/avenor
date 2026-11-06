@@ -361,9 +361,12 @@ without a claim record. Use `withdraw` with `--message-id` to close an open ask.
 This keeps the text out of command arguments, which can be visible to other
 processes. The flag is mutually exclusive with `--message`, including an empty
 `--message=`. Supplying both exits 2 without sending. When the flag is absent or
-false, the command does not read stdin. A read error, input past 1 MiB, or
-input that is not valid UTF-8 exits 1 without sending. The broker also applies
-a limit to the encoded payload.
+false, the command does not read stdin. A read error, input past 1 MiB of raw
+input, or input that is not valid UTF-8 exits 1 without sending. `--message`
+text must be valid UTF-8 too; invalid UTF-8 exits 1 without sending, instead
+of being silently replaced with the Unicode replacement character during
+encoding. The broker separately caps the entire JSON-encoded request at 1 MiB,
+so encoding and metadata can make the effective text limit smaller.
 
 Each command uses `AVENOR_BROKER_URL`, `AVENOR_BROKER_TOKEN` and
 `AVENOR_RUN_ID`, or the respective `--broker-url`, `--token` and `--run-id`

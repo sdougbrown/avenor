@@ -68,9 +68,16 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 		if err != nil {
 			return nil, fmt.Errorf("avenor message: %w", err)
 		}
+		if err := validateMessageText("message stdin", text); err != nil {
+			return nil, fmt.Errorf("avenor message: %w", err)
+		}
 		input["message"] = text
 	case inv.Supplied["message"]:
-		input["message"] = inv.Flags["message"]
+		text := inv.Flags["message"]
+		if err := validateMessageText("--message", text); err != nil {
+			return nil, fmt.Errorf("avenor message: %w", err)
+		}
+		input["message"] = text
 	}
 	raw, err := json.Marshal(input)
 	if err != nil {
@@ -108,12 +115,14 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 	return result.Output(), nil
 }
 
-// messageStdinLimit bounds a --message-stdin read at 1 MiB; reading one byte
-// past it detects oversized input without truncating it. The broker still owns
-// the final encoded payload limit.
+// messageStdinLimit bounds a --message-stdin read at 1 MiB of raw input for
+// bounded memory; reading one byte past it detects oversized input without
+// truncating it. The broker separately caps the entire JSON-encoded request
+// at 1 MiB, so encoding and metadata can make the effective text limit
+// smaller.
 const messageStdinLimit = 1 << 20
 
-// readMessageStdin reads UTF-8 message text to EOF without truncating it.
+// readMessageStdin reads message text to EOF without truncating it.
 func readMessageStdin(r io.Reader) (string, error) {
 	buf, err := io.ReadAll(io.LimitReader(r, messageStdinLimit+1))
 	if err != nil {
@@ -122,8 +131,15 @@ func readMessageStdin(r io.Reader) (string, error) {
 	if len(buf) > messageStdinLimit {
 		return "", fmt.Errorf("message stdin exceeds 1 MiB")
 	}
-	if !utf8.Valid(buf) {
-		return "", fmt.Errorf("message stdin is not valid UTF-8")
-	}
 	return string(buf), nil
+}
+
+// validateMessageText rejects message text that is not valid UTF-8 before it
+// reaches the transport, where JSON encoding would silently replace invalid
+// bytes with the Unicode replacement character.
+func validateMessageText(source, text string) error {
+	if !utf8.ValidString(text) {
+		return fmt.Errorf("%s is not valid UTF-8", source)
+	}
+	return nil
 }
