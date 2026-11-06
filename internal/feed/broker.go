@@ -81,14 +81,7 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 		return 1
 	}
-	if pruneRoot, prune := askClaimPruneRoot(b.AsksDir, appdir.StateHome(), b.BrokerURL, b.RunID); prune {
-		// A run directory per spawn accumulates in the default root and nothing
-		// else removes it. Pruning is housekeeping: a failure here is reported
-		// and the feed runs anyway.
-		if err := askclaim.PruneRoot(pruneRoot, askclaim.AskClaimMaxAge); err != nil {
-			fmt.Fprintln(b.Log, "feed broker: prune ask claim records:", err)
-		}
-	}
+	b.pruneAskClaims()
 	if b.AsksDir == "" {
 		b.AsksDir, err = askclaim.DefaultDir(appdir.StateHome(), b.BrokerURL, b.RunID)
 		if err != nil {
@@ -110,6 +103,9 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		return 0
 	}
 	defer unlock()
+	// The consumer lock is ours, so this feed is the one that prunes; a second
+	// feed would have returned above.
+	go b.runAskClaimPruner(ctx)
 	alive := func() bool { return parentPID() == parent }
 	wait := func(d time.Duration) bool {
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -261,6 +257,39 @@ func terminal(err error) bool {
 		return status.Status >= 400 && status.Status < 500
 	}
 	return errors.Is(err, localhttp.ErrUnsupportedLocalProtocol) || errors.Is(err, messaging.ErrAuthRejected) || errors.Is(err, messaging.ErrInvalidRequest)
+}
+
+// askClaimPruneInterval paces the prune a running feed performs. A feed lives
+// as long as its supervisor parent, so start-up pruning alone would leave every
+// record written since then in place. The interval is a variable so a test can
+// shorten it.
+var askClaimPruneInterval = time.Hour
+
+// pruneAskClaims removes expired records from the default root. It is
+// housekeeping: a failure is reported and the feed keeps running, which is why
+// neither caller branches on the error.
+func (b *Broker) pruneAskClaims() {
+	root, prune := askClaimPruneRoot(b.AsksDir, appdir.StateHome(), b.BrokerURL, b.RunID)
+	if !prune {
+		return
+	}
+	if err := askclaim.PruneRoot(root, askclaim.AskClaimMaxAge); err != nil {
+		fmt.Fprintln(b.Log, "feed broker: prune ask claim records:", err)
+	}
+}
+
+// runAskClaimPruner prunes on each tick until the feed ends.
+func (b *Broker) runAskClaimPruner(ctx context.Context) {
+	ticker := time.NewTicker(askClaimPruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.pruneAskClaims()
+		}
+	}
 }
 
 // askClaimPruneRoot reports the directory to prune, if any. The supervised poo

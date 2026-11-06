@@ -570,3 +570,55 @@ func TestPruneFailureDoesNotStopTheFeed(t *testing.T) {
 	cancel()
 	awaitExit(t, done)
 }
+
+// TestRunningFeedPrunesNewRecords is what start-up pruning cannot cover: the
+// feed outlives the retention window, so records written after it started must
+// still be swept while it runs. The first delivery proves the feed is past its
+// start-up prune, which otherwise races this test's own write.
+func TestRunningFeedPrunesNewRecords(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	oldInterval := askClaimPruneInterval
+	askClaimPruneInterval = 20 * time.Millisecond
+	t.Cleanup(func() { askClaimPruneInterval = oldInterval })
+
+	var polls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		if polls.Add(1) == 1 {
+			fmt.Fprint(w, `[{"id":"m1","from_run_id":"sender","payload":{"id":"m1","message":"running","expects_reply":false}}]`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), Out: out, RequestTimeout: time.Second})
+	defer func() { cancel(); awaitExit(t, done) }()
+	select {
+	case <-out.wrote:
+	case <-time.After(3 * time.Second):
+		t.Fatal("feed did not deliver, so it never reached its poll loop")
+	}
+
+	// Written after the start-up prune has certainly run.
+	asksDir, err := askclaim.DefaultDir(filepath.Join(root, "avenor"), s.URL, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(asksDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	late := filepath.Join(asksDir, "late.json")
+	if err := os.WriteFile(late, []byte(`{"message_id":"late","asker_run_id":"s"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	aged := time.Now().Add(-2 * askclaim.AskClaimMaxAge)
+	if err := os.Chtimes(late, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	waitForPrune(t, late)
+}
