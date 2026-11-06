@@ -8,9 +8,11 @@ import {
   createTopLevelPeerEnv,
   registerTopLevelPeer,
   formatInboundAskBody,
+  isInvalidNameRefusal,
   parseControlMessage,
   postBroker,
   publishHarnessName,
+  publishLastTurn,
   readSubAgentEnv,
   type InboundAsk,
   type InboundAskBodyOptions,
@@ -738,7 +740,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           refusedSessionName = null
           clearPeerFailure('session-name')
         } catch (error) {
-          if (error instanceof BrokerHttpError && error.status === 400 && error.code === 'invalid-name') {
+          if (isInvalidNameRefusal(error)) {
             // Retrying a name the broker refuses only costs a failed POST every
             // turn; a name that changes to a different value is sent again.
             refusedSessionName = name ?? null
@@ -1878,9 +1880,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const record = centralPendingTurn
           if (!record || record.generation !== generation) return
           try {
-            await postBroker(env, '/last_message', {
-              sequence: record.sequence, final_output: record.final_output, stop_reason: record.stop_reason, truncated: record.truncated,
-            }, fetch, signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000))
+            await publishLastTurn(env, record, fetch, signal)
             if (centralPendingTurn === record) centralPendingTurn = null
             clearPeerFailure('publish-turn')
           } catch (error) {

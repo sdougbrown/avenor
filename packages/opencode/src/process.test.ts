@@ -57,7 +57,7 @@ describe('runAvenorCommand stdin', () => {
     // stream error and never a second result.
     const result = await runAvenorCommand(['/bin/sh', '-c', 'exit 3'], {}, undefined, 'x'.repeat(1 << 20))
 
-    expect(result.code).toBe(3)
+    expect(result).toEqual({ code: 3, stdout: '', stderr: '' })
   })
 
   it('reports an unstartable child as uncertainty rather than absence', async () => {

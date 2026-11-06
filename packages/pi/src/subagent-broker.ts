@@ -11,7 +11,15 @@ import { PEER_MESSAGE_NOTICE, postBroker, sanitize } from '@dougbots/avenor-core
 import type { SubAgentEnv } from '@dougbots/avenor-core'
 
 // The shared HTTP broker adapter, its request helpers, and its error type.
-export { BrokerHttpError, createBrokerChildBroker, postBroker, publishHarnessName } from '@dougbots/avenor-core'
+export {
+  BrokerHttpError,
+  createBrokerChildBroker,
+  isInvalidNameRefusal,
+  postBroker,
+  publishHarnessName,
+  publishLastTurn,
+} from '@dougbots/avenor-core'
+export type { LastTurnRecord } from '@dougbots/avenor-core'
 export type { SubAgentEnv } from '@dougbots/avenor-core'
 
 export function readSubAgentEnv(env: NodeJS.ProcessEnv = process.env): SubAgentEnv | null {

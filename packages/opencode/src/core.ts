@@ -32,11 +32,13 @@ import {
   inspectTool,
   messageTool,
   normalizeTurnStopReason,
+  isInvalidNameRefusal,
   observeRun,
   PEER_MESSAGE_NOTICE,
   peersTool,
   postBroker,
   publishHarnessName,
+  publishLastTurn,
   resultTool,
   sanitize,
   type MessageProvider,
@@ -1494,12 +1496,9 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       ])
       const bounded = boundFinalOutput(turn.text)
       const sequence = ++state.sequence
-      await postBroker(
+      await publishLastTurn(
         { brokerUrl: binding.brokerUrl, runId: binding.runId, token: binding.runToken },
-        '/last_message',
-        { final_output: bounded, stop_reason: turn.stopReason, truncated: turn.text.length > bounded.length, sequence },
-        fetch,
-        AbortSignal.timeout(5000),
+        { sequence, final_output: bounded, stop_reason: turn.stopReason, truncated: turn.text.length > bounded.length },
       )
       // Claimed only once the broker accepted the turn, so a transient failure
       // leaves it unclaimed and the next event for it is retried.
@@ -1612,11 +1611,11 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
         )
         refusedTitles.delete(sessionId)
       } catch (error) {
-        if (error instanceof BrokerHttpError && error.status === 400 && error.code === 'invalid-name') {
+        if (isInvalidNameRefusal(error)) {
           // Retrying a name the broker refuses only costs a failed POST per
           // rename event; a different title is sent again.
           refusedTitles.set(sessionId, { name: title ?? undefined })
-          console.error('[avenor] session_name_set refused:', error.message)
+          console.error('[avenor] session_name_set refused:', error instanceof Error ? error.message : error)
           return
         }
         // A later publish may already hold a newer record; only forget this
