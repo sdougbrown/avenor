@@ -617,15 +617,33 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
     return handle.promise
   }
 
-  async function promptSession(sessionId: string, text: string): Promise<void> {
-    await host.promptAsync(sessionId, text)
+  /**
+   * The reason a failed prompt names. A host can reject with an error whose
+   * message is empty, so a named error falls back to its name and anything
+   * else to a fixed description rather than logging a bare colon.
+   */
+  function promptFailureText(error: unknown): string {
+    if (error instanceof Error) {
+      if (error.message) return error.message
+      if (error.name && error.name !== 'Error') return error.name
+      return 'the host refused the prompt'
+    }
+    return typeof error === 'string' && error ? error : 'the host refused the prompt'
+  }
+
+  async function notifySession(sessionId: string, text: string): Promise<void> {
+    try {
+      await host.promptAsync(sessionId, text)
+    } catch (error) {
+      console.error(`[avenor] notification failed for session ${sessionId}:`, promptFailureText(error))
+    }
   }
 
   async function monitorRun(run: TrackedRun): Promise<void> {
     const outcome = await observeTrackedRun(run)
 
     if (outcome.kind === 'error') {
-      await promptSession(
+      await notifySession(
         run.orchestratorSessionId,
         `Monitoring of "${run.label}" (run_id: ${run.runId}) failed: ${outcome.error ?? 'unknown error'}. The run may still be active — use avenor_status to check.`,
       )
@@ -634,7 +652,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
 
     if (outcome.kind === 'waiting') {
       if (!outcome.notified) {
-        await promptSession(run.orchestratorSessionId, buildWaitingText(run, outcome.snapshot))
+        await notifySession(run.orchestratorSessionId, buildWaitingText(run, outcome.snapshot))
       }
       return
     }
@@ -642,7 +660,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
     if (outcome.kind === 'terminal') {
       const inspection = await loadInspection(run)
       const snapshot = inspection?.snapshot ?? outcome.snapshot
-      await promptSession(
+      await notifySession(
         run.orchestratorSessionId,
         buildCompletionText(run, snapshot, inspection?.status, inspection?.final_output),
       )
@@ -706,11 +724,9 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
             ?? runtimeIdToRunId.get(from)
           const runInfo = resolvedRunId ? trackedRuns.get(resolvedRunId) : undefined
           const channelText = formatAgentMessage(runInfo?.agent ?? 'agent', from, '', text)
-          try {
-            await host.promptAsync(sessionId, channelText)
-          } catch {
-            return
-          }
+          // A refused row is logged and dropped: the rest of the batch is still
+          // worth delivering, and the poll stays alive for later ones.
+          await notifySession(sessionId, channelText)
         }
       }
     } finally {
@@ -947,7 +963,7 @@ export function createAvenorCore(host: PluginHost): AvenorCore {
 
     await primeTrackedRun(run, { captureLatestSeq: true })
     await stopMonitor(run.runId, 'permission-routed')
-    await promptSession(run.orchestratorSessionId, lines.join('\n'))
+    await notifySession(run.orchestratorSessionId, lines.join('\n'))
   }
 
   const onChatMessage = (message: { parts?: Array<{ type?: string; text?: string }> } | undefined): void => {
