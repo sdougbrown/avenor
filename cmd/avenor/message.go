@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"unicode/utf8"
 
 	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/askclaim"
@@ -28,6 +29,7 @@ func messageCommand() *clicontract.Command {
 			{Name: "action", Kind: clicontract.String, Usage: "tell, ask, reply or withdraw", Required: true},
 			{Name: "target", Kind: clicontract.String, Usage: "recipient run id or label"},
 			{Name: "message", Kind: clicontract.String, Usage: "message text"},
+			{Name: "message-stdin", Kind: clicontract.Bool, Usage: "read the message text from stdin to EOF (mutually exclusive with --message)"},
 			{Name: "reply-to", Kind: clicontract.String, Usage: "message id to reply to"},
 			{Name: "message-id", Kind: clicontract.String, Usage: "message id to withdraw"},
 			{Name: "timeout-ms", Kind: clicontract.Int, Usage: "wait in milliseconds (maximum 600000)"},
@@ -49,13 +51,26 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 		return nil, usageErrorf("avenor message: --broker-url, --token and --run-id (or their environment variables) are required")
 	}
 	input := map[string]any{"action": inv.Flags["action"]}
-	for _, field := range []struct{ flag, key string }{{"target", "target"}, {"message", "message"}, {"reply-to", "reply_to"}, {"message-id", "message_id"}} {
+	for _, field := range []struct{ flag, key string }{{"target", "target"}, {"reply-to", "reply_to"}, {"message-id", "message_id"}} {
 		if inv.Supplied[field.flag] {
 			input[field.key] = inv.Flags[field.flag]
 		}
 	}
 	if inv.Supplied["timeout-ms"] {
 		input["timeout_ms"] = inv.Ints["timeout-ms"]
+	}
+	stdinEnabled := inv.Supplied["message-stdin"] && inv.Bools["message-stdin"]
+	switch {
+	case stdinEnabled && inv.Supplied["message"]:
+		return nil, usageErrorf("avenor message: --message and --message-stdin are mutually exclusive")
+	case stdinEnabled:
+		text, err := readMessageStdin(os.Stdin)
+		if err != nil {
+			return nil, fmt.Errorf("avenor message: %w", err)
+		}
+		input["message"] = text
+	case inv.Supplied["message"]:
+		input["message"] = inv.Flags["message"]
 	}
 	raw, err := json.Marshal(input)
 	if err != nil {
@@ -91,4 +106,24 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 		return nil, fmt.Errorf("avenor message: %w", err)
 	}
 	return result.Output(), nil
+}
+
+// messageStdinLimit bounds a --message-stdin read at 1 MiB; reading one byte
+// past it detects oversized input without truncating it. The broker still owns
+// the final encoded payload limit.
+const messageStdinLimit = 1 << 20
+
+// readMessageStdin reads UTF-8 message text to EOF without truncating it.
+func readMessageStdin(r io.Reader) (string, error) {
+	buf, err := io.ReadAll(io.LimitReader(r, messageStdinLimit+1))
+	if err != nil {
+		return "", err
+	}
+	if len(buf) > messageStdinLimit {
+		return "", fmt.Errorf("message stdin exceeds 1 MiB")
+	}
+	if !utf8.Valid(buf) {
+		return "", fmt.Errorf("message stdin is not valid UTF-8")
+	}
+	return string(buf), nil
 }

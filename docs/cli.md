@@ -348,6 +348,7 @@ avenor message --action tell --target supervisor --message "Status update"
 avenor message --action ask --target supervisor --message "Question?" --timeout-ms 30000
 avenor message --action reply --reply-to MESSAGE_ID --message "Answer"
 avenor message --action withdraw --message-id MESSAGE_ID
+printf 'line one\nline two\n' | avenor message --action tell --target supervisor --message-stdin
 ```
 
 `--target` accepts a broker run ID or label. An ask reply needs the claim
@@ -355,6 +356,14 @@ record written by the feed; `--asks-dir` selects its directory when the feed
 uses a non-default location. A second reply to the same ask, or a reply to an
 ask with no record, reports `edge-absent`. The broker resolves a reply to a tell
 without a claim record. Use `withdraw` with `--message-id` to close an open ask.
+
+`--message-stdin` reads the message text from stdin to EOF, preserving newlines.
+This keeps the text out of command arguments, which can be visible to other
+processes. The flag is mutually exclusive with `--message`, including an empty
+`--message=`. Supplying both exits 2 without sending. When the flag is absent or
+false, the command does not read stdin. A read error, input past 1 MiB, or
+input that is not valid UTF-8 exits 1 without sending. The broker also applies
+a limit to the encoded payload.
 
 Each command uses `AVENOR_BROKER_URL`, `AVENOR_BROKER_TOKEN` and
 `AVENOR_RUN_ID`, or the respective `--broker-url`, `--token` and `--run-id`

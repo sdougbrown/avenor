@@ -84,6 +84,10 @@ The `avenor_message` registry entry invokes `avenor message` as the child. See [
 A child with broker credentials can use `avenor message --action tell`,
 `ask`, `reply` or `withdraw` to route messages as its own run. The command uses the same
 router as other messaging surfaces; see [avenor message](cli.md#avenor-message).
+Use `--message-stdin` instead of `--message` to keep message text out of command
+arguments. The command reads up to 1 MiB of valid UTF-8 from stdin and refuses
+a read error or non-UTF-8 input without sending; the broker also applies a
+limit to the encoded payload.
 
 A reply to an ask needs the claim record the feed wrote. Use `--asks-dir` if
 the feed uses a non-default directory. A second reply, or a reply to an ask
