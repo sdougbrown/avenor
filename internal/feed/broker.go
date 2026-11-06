@@ -81,17 +81,19 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 		return 1
 	}
+	if pruneRoot, prune := askClaimPruneRoot(b.AsksDir, appdir.StateHome(), b.BrokerURL, b.RunID); prune {
+		// A run directory per spawn accumulates in the default root and nothing
+		// else removes it. Pruning is housekeeping: a failure here is reported
+		// and the feed runs anyway.
+		if err := askclaim.PruneRoot(pruneRoot, askclaim.AskClaimMaxAge); err != nil {
+			fmt.Fprintln(b.Log, "feed broker: prune ask claim records:", err)
+		}
+	}
 	if b.AsksDir == "" {
 		b.AsksDir, err = askclaim.DefaultDir(appdir.StateHome(), b.BrokerURL, b.RunID)
 		if err != nil {
 			fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 			return 1
-		}
-		// A run directory per spawn accumulates in the default root and nothing
-		// else removes it. Pruning is housekeeping: a failure here is reported
-		// and the feed runs anyway.
-		if err := askclaim.PruneRoot(filepath.Dir(b.AsksDir), askclaim.AskClaimMaxAge); err != nil {
-			fmt.Fprintln(b.Log, "feed broker: prune ask claim records:", err)
 		}
 	}
 	if err := os.MkdirAll(b.LockDir, 0700); err != nil {
@@ -259,4 +261,20 @@ func terminal(err error) bool {
 		return status.Status >= 400 && status.Status < 500
 	}
 	return errors.Is(err, localhttp.ErrUnsupportedLocalProtocol) || errors.Is(err, messaging.ErrAuthRejected) || errors.Is(err, messaging.ErrInvalidRequest)
+}
+
+// askClaimPruneRoot reports the directory to prune, if any. The supervised poo
+// path always passes --asks-dir, and it passes the default one, so keying on
+// an empty flag would prune exactly the deployments that do not accumulate.
+func askClaimPruneRoot(asksDir, stateHome, brokerURL, runID string) (string, bool) {
+	defaultDir, err := askclaim.DefaultDir(stateHome, brokerURL, runID)
+	if err != nil {
+		return "", false
+	}
+	if asksDir != "" && asksDir != defaultDir {
+		// A caller's own directory is the caller's to clean: pruning it would
+		// mean deleting files under a path whose layout we merely assume.
+		return "", false
+	}
+	return askclaim.DefaultRoot(stateHome), true
 }

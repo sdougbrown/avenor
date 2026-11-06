@@ -441,3 +441,88 @@ func TestWriteFailureReportsAllUndeliveredIDs(t *testing.T) {
 		t.Fatalf("exit %d logs %q", code, logs.String())
 	}
 }
+
+// TestAskClaimPruneRoot covers where pruning happens. The supervised poo path
+// always passes --asks-dir, and it passes the default directory, so a prune
+// keyed on an empty flag would never run where the per-run directories
+// accumulate.
+func TestAskClaimPruneRoot(t *testing.T) {
+	stateHome := filepath.Join(t.TempDir(), "avenor")
+	brokerURL := "http://127.0.0.1:9"
+	defaultDir, err := askclaim.DefaultDir(stateHome, brokerURL, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot := askclaim.DefaultRoot(stateHome)
+	for _, tc := range []struct {
+		name     string
+		asksDir  string
+		wantPrun bool
+	}{
+		{name: "no flag prunes the default root", wantPrun: true},
+		{name: "the default directory passed explicitly still prunes", asksDir: defaultDir, wantPrun: true},
+		{name: "a caller's own directory is left alone", asksDir: filepath.Join(t.TempDir(), "asks"), wantPrun: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, prune := askClaimPruneRoot(tc.asksDir, stateHome, brokerURL, "r")
+			if prune != tc.wantPrun {
+				t.Fatalf("prune = %v, want %v", prune, tc.wantPrun)
+			}
+			if prune && root != wantRoot {
+				t.Fatalf("root = %q, want %q", root, wantRoot)
+			}
+		})
+	}
+}
+
+// TestExplicitDefaultAskDirectoryPrunes is the production shape: poo's manifest
+// passes --asks-dir pointing at the default directory, so a feed started that
+// way must prune the records an earlier run left behind.
+func TestExplicitDefaultAskDirectoryPrunes(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", root)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sessions" {
+			fmt.Fprint(w, `{"messaging_protocol":1,"generation":"g"}`)
+			return
+		}
+		fmt.Fprint(w, `[]`)
+	}))
+	defer s.Close()
+	stateHome := filepath.Join(root, "avenor")
+	asksDir, err := askclaim.DefaultDir(stateHome, s.URL, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An earlier run's answered ask, older than the bound.
+	stale := filepath.Join(asksDir, "earlier.claimed")
+	if err := os.MkdirAll(asksDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte(`{"message_id":"earlier","asker_run_id":"s"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	aged := time.Now().Add(-2 * askclaim.AskClaimMaxAge)
+	if err := os.Chtimes(stale, aged, aged); err != nil {
+		t.Fatal(err)
+	}
+
+	out := &lockedBuffer{wrote: make(chan struct{}, 1)}
+	cancel, done := startFeed(t, Broker{RunID: "r", Token: "t", BrokerURL: s.URL, LockDir: t.TempDir(), AsksDir: asksDir, Out: out, RequestTimeout: time.Second})
+	defer func() { cancel(); awaitExit(t, done) }()
+	waitForPrune(t, stale)
+}
+
+// waitForPrune waits for the feed's start-up prune, which runs before the first
+// poll, so the record disappears without any message being delivered.
+func waitForPrune(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s survived the start-up prune", path)
+}

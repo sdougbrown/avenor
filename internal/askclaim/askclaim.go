@@ -166,7 +166,14 @@ func DefaultDir(stateHome, brokerURL, runID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(stateHome, "feed-asks", key), nil
+	return filepath.Join(DefaultRoot(stateHome), key), nil
+}
+
+// DefaultRoot is the directory holding one run's directory per (broker, run)
+// pair. A feed prunes it when the directory it serves is this root's child, so
+// the layout is stated once here rather than inferred from a path.
+func DefaultRoot(stateHome string) string {
+	return filepath.Join(stateHome, "feed-asks")
 }
 
 // AskClaimMaxAge bounds how long a claim record is kept. A caller can hold an
