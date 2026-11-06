@@ -2206,6 +2206,17 @@ type mockStableHandler struct {
 	lastRuntimeID    string
 	lastSetErr       error
 	lastSetCalls     int
+
+	bindCaller messaging.Caller
+	bindReq    messaging.MessageBindRequest
+	bindResult messaging.MessageBindResult
+	bindErr    error
+}
+
+func (m *mockStableHandler) MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	m.bindCaller = caller
+	m.bindReq = req
+	return m.bindResult, m.bindErr
 }
 
 func (m *mockStableHandler) Spawn(params json.RawMessage) (any, error) {

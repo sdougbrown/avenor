@@ -1139,6 +1139,22 @@ func (c *Client) MessagePreflightContext(ctx context.Context) (messaging.Preflig
 	return result.PreflightResult(), nil
 }
 
+// MessageBind binds one native host conversation to a broker-owned run and
+// returns the credentials that conversation speaks messaging with.
+func (c *Client) MessageBind(req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	return c.MessageBindContext(context.Background(), req)
+}
+
+// MessageBindContext binds one native host conversation and stops waiting when
+// ctx is done.
+func (c *Client) MessageBindContext(ctx context.Context, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	var result control.MessageBindResult
+	if err := c.CallContext(ctx, "message_bind", control.NewMessageBindParams(req), &result); err != nil {
+		return messaging.MessageBindResult{}, err
+	}
+	return result.MessageBindResult(), nil
+}
+
 // Resume continues a prior run in a new one.
 func (c *Client) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
 	return c.ResumeContext(context.Background(), req)

@@ -5,6 +5,7 @@ package controltest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/control"
@@ -75,6 +76,10 @@ func (h *MessageHandler) SessionLast(string) (broker.LastAgentMessage, bool, err
 
 func (h *MessageHandler) SessionLastSet(messaging.Caller, string, string, string, bool) error {
 	return nil
+}
+
+func (h *MessageHandler) MessageBind(messaging.Caller, messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	return messaging.MessageBindResult{}, fmt.Errorf("message_bind is not served by this handler")
 }
 
 func (h *MessageHandler) TreeBudgetStatus() any { return nil }

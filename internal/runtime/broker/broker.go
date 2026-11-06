@@ -2409,6 +2409,24 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 // (SetIdentity), not the process: a successor that comes back under the same
 // identity adopts its predecessor's records instead of refusing them.
 func (b *Broker) EnsureRun(runID, name string) (string, bool, error) {
+	return b.ensureRun(runID, name, false)
+}
+
+// EnsurePeerRun registers a peer-kind run under runID if one does not already
+// exist, minted and owned exactly as EnsureRun mints one, with its lease
+// running from creation. An existing run keeps its credential and its kind;
+// the ownership rule is EnsureRun's, shared through one mint path. The lease
+// is what backs a conversation this supervisor binds: a record whose consumer
+// stops answering is expired, tombstoned and reaped by the broker's own peer
+// lifecycle instead of living forever.
+func (b *Broker) EnsurePeerRun(runID string) (string, bool, error) {
+	return b.ensureRun(runID, "", true)
+}
+
+// ensureRun is the one mint path behind EnsureRun and EnsurePeerRun: the
+// caller names the record kind, and the adoption rule and the broker lock are
+// written once.
+func (b *Broker) ensureRun(runID, name string, peer bool) (string, bool, error) {
 	b.mu.Lock()
 	if st, exists := b.runs[runID]; exists {
 		token := st.Token
@@ -2420,6 +2438,10 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool, error) {
 		return token, false, nil
 	}
 	st := b.newRunState(runID, name)
+	if peer {
+		st.peer = true
+		st.renewPeerLeaseLocked(time.Now())
+	}
 	b.runs[runID] = st
 	token := st.Token
 	b.mu.Unlock()
