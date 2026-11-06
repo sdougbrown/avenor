@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/appdir"
@@ -46,6 +47,11 @@ type Broker struct {
 	Out io.Writer
 	// Log receives diagnostics without message text.
 	Log io.Writer
+
+	// pruneLogMu guards pruneLogged, which remembers the last failure reported
+	// per root so a persistent denial is reported once rather than hourly.
+	pruneLogMu  sync.Mutex
+	pruneLogged map[string]string
 }
 
 // Run consumes messages until shutdown, parent loss, or an unrecoverable write.
@@ -277,8 +283,36 @@ func (b *Broker) pruneAskClaims() {
 		return
 	}
 	if err := askclaim.PruneRoot(root, askclaim.AskClaimMaxAge); err != nil {
-		fmt.Fprintln(b.Log, "feed broker: prune ask claim records:", err)
+		b.reportPruneError(root, err)
+		return
 	}
+	b.forgetPruneError(root)
+}
+
+// reportPruneError reports a prune failure once per root and message. The prune
+// runs hourly for the life of a feed, and an unwritable root fails identically
+// on every pass; repeating it would bury everything else in the log.
+func (b *Broker) reportPruneError(root string, err error) {
+	message := err.Error()
+	b.pruneLogMu.Lock()
+	if b.pruneLogged == nil {
+		b.pruneLogged = make(map[string]string)
+	}
+	if b.pruneLogged[root] == message {
+		b.pruneLogMu.Unlock()
+		return
+	}
+	b.pruneLogged[root] = message
+	b.pruneLogMu.Unlock()
+	fmt.Fprintln(b.Log, "feed broker: prune ask claim records:", err)
+}
+
+// forgetPruneError clears the suppression for a root that pruned cleanly, so a
+// later failure is reported again.
+func (b *Broker) forgetPruneError(root string) {
+	b.pruneLogMu.Lock()
+	defer b.pruneLogMu.Unlock()
+	delete(b.pruneLogged, root)
 }
 
 // startAskClaimPruner prunes on each tick and returns a stop function that

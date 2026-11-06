@@ -646,3 +646,37 @@ func TestStartAskClaimPrunerStops(t *testing.T) {
 		t.Fatal("stop did not return, so the pruner goroutine did not exit")
 	}
 }
+
+// TestPruneFailureIsReportedOncePerRoot is the log half of the non-fatal
+// contract: an unwritable root fails identically every hour, so the diagnostic
+// must land once, and land again only after a pass that succeeds.
+func TestPruneFailureIsReportedOncePerRoot(t *testing.T) {
+	var log strings.Builder
+	b := &Broker{RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", Log: &log}
+	// The default root is what pruneAskClaims targets, so the unwritable shape
+	// has to sit exactly there.
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	root := askclaim.DefaultRoot(filepath.Join(stateHome, "avenor"))
+	if err := os.MkdirAll(filepath.Dir(root), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b.pruneAskClaims()
+	first := strings.Count(log.String(), "prune ask claim records")
+	b.pruneAskClaims()
+	if second := strings.Count(log.String(), "prune ask claim records"); second != first {
+		t.Fatalf("the same failure was reported again: %d then %d", first, second)
+	}
+	if first == 0 {
+		t.Fatal("the first failure was not reported")
+	}
+	// A root that prunes cleanly forgets the suppression.
+	b.forgetPruneError(root)
+	b.pruneAskClaims()
+	if third := strings.Count(log.String(), "prune ask claim records"); third != first+1 {
+		t.Fatalf("a later failure was suppressed: %d then %d", first, third)
+	}
+}
