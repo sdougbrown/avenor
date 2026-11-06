@@ -189,8 +189,7 @@ describe('createV2EventHandler', () => {
     expect(handled).toEqual(['idle', 'step', 'idle'])
   })
 
-  test('routes idle and step.ended onto the core handlers', async () => {
-    const calls: string[] = []
+  test('routes idle and step.ended onto the core handlers', async () => {    const calls: string[] = []
     const onEvent = createV2EventHandler({
       onSessionRenamed: async () => {},
       onMessageUpdated: async () => {},
@@ -216,6 +215,22 @@ describe('createV2EventHandler', () => {
     await onEvent({ type: 'session.step.ended', data: { assistantMessageID: 'm1' } })
     await onEvent({ type: 'session.idle' })
     expect(calls).toEqual([])
+  })
+
+  test('routes rename, update and message events from the V2 data field', async () => {
+    const calls: string[] = []
+    const onEvent = createV2EventHandler({
+      onSessionRenamed: async (sessionID, title) => { calls.push(`renamed:${sessionID}:${title}`) },
+      onMessageUpdated: async (info) => { calls.push(`message:${String(info.id)}`) },
+      onSessionIdle: async () => {},
+      onStepEnded: async () => {},
+    })
+    await onEvent({ type: 'session.renamed', data: { sessionID: 's1', title: 'My Title' } })
+    await onEvent({ type: 'session.updated', data: { info: { id: 's2', title: 'Other Title' } } })
+    await onEvent({ type: 'message.updated', data: { info: { id: 'm1', role: 'assistant' } } })
+    // The V2 domain carries the same fields under `data`, not `properties`, so
+    // a wrong extraction field leaves every one of these unrouted.
+    expect(calls).toEqual(['renamed:s1:My Title', 'renamed:s2:Other Title', 'message:m1'])
   })
 })
 
