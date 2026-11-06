@@ -93,9 +93,11 @@ reply; use `--action withdraw --message-id MESSAGE_ID` to close it.
 
 Each run gets its own directory under `feed-asks`. The default root is pruned
 when a feed starts: records older than a day go, and a run directory left empty
-goes with them. A day is generous because no caller can hold an ask
-open longer than the messaging wait cap. Only the default root is pruned; a
-directory named by `--asks-dir` is the caller's to clean.
+goes with them. A day is generous because no caller can hold an ask open longer
+than the messaging wait cap. A run directory touched inside that day is left
+alone entirely. A feed writing its first record therefore cannot lose the
+directory to a sibling's prune. Only the default root is pruned; a directory
+named by `--asks-dir` is the caller's to clean.
 
 ## Transport contract
 

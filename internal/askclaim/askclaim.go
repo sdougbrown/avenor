@@ -203,6 +203,14 @@ func PruneRoot(root string, maxAge time.Duration) error {
 		if !entry.IsDir() {
 			continue
 		}
+		// A run directory touched since the cutoff can belong to a feed that is
+		// starting now: Record creates the directory and then opens the file, so
+		// removing it between those calls would fail a record for a live ask.
+		// The directory's own age is the gate; the records inside get theirs.
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
 		dir := filepath.Join(root, entry.Name())
 		if err := pruneRunDir(dir, cutoff); err != nil && firstErr == nil {
 			firstErr = err

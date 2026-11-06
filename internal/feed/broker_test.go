@@ -502,9 +502,14 @@ func TestExplicitDefaultAskDirectoryPrunes(t *testing.T) {
 	if err := os.WriteFile(stale, []byte(`{"message_id":"earlier","asker_run_id":"s"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// An earlier run's directory is as old as its records; the directory's own
+	// age is what the prune gates on, so a feed starting now cannot lose a
+	// directory another feed is filling.
 	aged := time.Now().Add(-2 * askclaim.AskClaimMaxAge)
-	if err := os.Chtimes(stale, aged, aged); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{stale, asksDir} {
+		if err := os.Chtimes(path, aged, aged); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	out := &lockedBuffer{wrote: make(chan struct{}, 1)}

@@ -154,8 +154,10 @@ func TestAClaimedAskIsNotRecordedAgain(t *testing.T) {
 }
 
 // TestPruneRootRemovesExpiredRecords proves the housekeeping a feed does on
-// start: expired records and the run directory they left behind go, a recent
-// record and anything that is not a claim record stay.
+// start over the state matrix that matters: a run directory whose records all
+// expired goes, a directory holding a pending ask keeps the ask and itself
+// while its expired sibling goes, a directory a feed is writing to right now is
+// left alone, and anything that is not a claim record survives.
 func TestPruneRootRemovesExpiredRecords(t *testing.T) {
 	root := t.TempDir()
 	old := time.Now().Add(-2 * AskClaimMaxAge)
@@ -172,27 +174,53 @@ func TestPruneRootRemovesExpiredRecords(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// One run directory whose records all expired, one holding a live ask.
+	// Ageing a directory means writing the files first, because writing updates
+	// the directory's own mtime.
+	ageDir := func(dir string, mod time.Time) {
+		t.Helper()
+		if err := os.Chtimes(filepath.Join(root, dir), mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// broker-a: everything expired, so the directory goes.
 	write("broker-a", "answered.claimed", old)
 	write("broker-a", "unanswered.json", old)
+	ageDir("broker-a", old)
+	// broker-b: a live ask and an unrelated file, both kept.
 	write("broker-b", "live.json", time.Now())
-	// Not claim records: kept whatever their age.
 	write("broker-b", "notes.txt", old)
-	// A directory holding only an unrelated file survives the empty sweep.
+	ageDir("broker-b", old)
+	// broker-c: only an unrelated file, so the directory survives the sweep.
 	write("broker-c", "keep.txt", old)
+	ageDir("broker-c", old)
+	// broker-d: an expired record beside a pending one.
+	write("broker-d", "expired.claimed", old)
+	write("broker-d", "pending.json", time.Now())
+	ageDir("broker-d", old)
+	// broker-e: an old record in a directory a feed touched just now, which is
+	// the window where Record has created the directory but not yet the file.
+	write("broker-e", "stale.json", old)
+	ageDir("broker-e", time.Now())
 
 	if err := PruneRoot(root, AskClaimMaxAge); err != nil {
 		t.Fatalf("PruneRoot: %v", err)
 	}
-	for _, gone := range []string{"broker-a"} {
-		if _, err := os.Stat(filepath.Join(root, gone)); !os.IsNotExist(err) {
-			t.Errorf("%s survived with only expired records", gone)
-		}
+	if _, err := os.Stat(filepath.Join(root, "broker-a")); !os.IsNotExist(err) {
+		t.Error("broker-a survived with only expired records")
 	}
-	for _, kept := range []string{"broker-b/live.json", "broker-b/notes.txt", "broker-c/keep.txt"} {
+	for _, kept := range []string{
+		"broker-b/live.json",
+		"broker-b/notes.txt",
+		"broker-c/keep.txt",
+		"broker-d/pending.json",
+		"broker-e/stale.json",
+	} {
 		if _, err := os.Stat(filepath.Join(root, kept)); err != nil {
 			t.Errorf("%s was removed: %v", kept, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "broker-d/expired.claimed")); !os.IsNotExist(err) {
+		t.Error("the expired record beside a pending one survived")
 	}
 }
 
