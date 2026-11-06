@@ -92,6 +92,12 @@ type permissionAsk struct {
 	id        json.RawMessage
 }
 
+// credentialEnvNames are the variables a poo child keeps for its own
+// subsystems — its inbox feed and its avenor_message entry — and that a
+// model-invoked tool must not read. poo removes them from a tool's child
+// environment and keeps them in the session's.
+var credentialEnvNames = []string{runtime.EnvBrokerURL, runtime.EnvBrokerRunID, runtime.EnvBrokerToken}
+
 // startClient spawns the resolved binary and returns the connected client. The
 // command and its args are the recorded launch identity, so the process is
 // exactly the one the session owns.
@@ -113,6 +119,11 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 			}
 			proc.Env = append(proc.Env, peer.RunEnv()...)
 			proc.Env = append(proc.Env, runtime.EnvPooFeedsPath+"="+paths.feeds, runtime.EnvPooCLIRegistryPath+"="+paths.registry)
+			// The trio stays in the child's environment because the feed and
+			// the avenor_message entry read it. poo removes these names from
+			// the environment a model-invoked tool receives, so a bash command
+			// cannot read the run token.
+			proc.Env = append(proc.Env, runtime.EnvPooCredentialEnv+"="+strings.Join(credentialEnvNames, string(os.PathListSeparator)))
 		}
 	}
 
