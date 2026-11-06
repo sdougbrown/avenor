@@ -224,7 +224,7 @@ generation.
 
 Both child clients obey this rule. The Go child reads it in `Prepare`
 (`internal/childmessaging`); the Pi extension's child broker pins it on first use
-(`packages/pi/src/subagent-broker.ts`).
+(`packages/core/src/broker-http.ts`).
 
 An id posted without a generation is refused `409 generation-mismatch`, which the
 tool reports as `<id> was not sent to "<target>"; nothing is pending`. That is

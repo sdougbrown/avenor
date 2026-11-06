@@ -185,6 +185,61 @@ describe('child broker ask', () => {
     expect(result.outcome).toBe('possibly-pending')
     expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
   })
+
+  it('withdraws an ask whose send was aborted in flight', async () => {
+    const controller = new AbortController()
+    let markSendStarted!: () => void
+    const sendStarted = new Promise<void>(resolve => { markSendStarted = resolve })
+    const { calls, fetchImpl } = stubFetch({
+      '/send': init => { markSendStarted(); return waitUntilAborted(init) },
+      '/cancel_message': () => Response.json({ outcome: 'withdrawn' }),
+    })
+    const pending = createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.41', undefined, controller.signal)
+    await sendStarted
+    controller.abort()
+    const result = await pending
+    expect(result.outcome).toBe('withdrawn')
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+    expect(calls.find(call => call.url.endsWith('/cancel_message'))?.body).toMatchObject({ cancel_message_id: 'av1.m.41', generation: 'gen-1' })
+    expect(calls.some(call => call.url.endsWith('/health'))).toBe(false)
+    expect(calls.some(call => call.url.endsWith('/wait_reply'))).toBe(false)
+  })
+
+  it('reports possibly-pending when a plain send failure meets a live broker and the cleanup fails', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Promise.reject(new Error('connection reset')),
+      '/health': () => new Response('ok'),
+      '/cancel_message': () => Promise.reject(new Error('socket hang up')),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.42')
+    expect(result.outcome).toBe('possibly-pending')
+    expect(calls.some(call => call.url.endsWith('/health'))).toBe(true)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+  })
+
+  it('keeps an ask possibly pending when the health probe also fails ambiguously', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Promise.reject(new Error('connection reset')),
+      '/health': () => Promise.reject(new Error('connection reset')),
+      '/cancel_message': () => Promise.reject(new Error('socket hang up')),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.44')
+    expect(result.outcome).toBe('possibly-pending')
+    expect(calls.some(call => call.url.endsWith('/health'))).toBe(true)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(true)
+  })
+
+  it('reports not-sent when a plain send failure meets a broker whose dial never opened', async () => {
+    const unreachable = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } })
+    const { calls, fetchImpl } = stubFetch({
+      '/send': () => Promise.reject(new Error('connection reset')),
+      '/health': () => Promise.reject(unreachable),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).ask('supervisor', 'q', 'av1.m.43')
+    expect(result.outcome).toBe('not-sent')
+    expect(calls.some(call => call.url.endsWith('/health'))).toBe(true)
+    expect(calls.some(call => call.url.endsWith('/cancel_message'))).toBe(false)
+  })
 })
 
 describe('child broker routes', () => {
