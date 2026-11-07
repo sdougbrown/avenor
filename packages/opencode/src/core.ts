@@ -4,7 +4,7 @@ import { tool } from '@opencode-ai/plugin'
 import * as readline from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
 import { spawnAvenorProcess as defaultSpawnProcess, runAvenorCommand as defaultRunCommand } from './process.js'
-import { sessionLabel } from './label.js'
+import { sessionLabel, MAX_NAME_RUNES, truncateRunes } from './label.js'
 import {
   formatAnswerPermissionOutput,
   formatEventsOutput,
@@ -1663,17 +1663,66 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     await publishSessionTitle(sessionID, title)
   }
 
+  // The highest -N collision suffix a conversation default label carries, and
+  // that suffix spelled out: the room a truncation must leave for one.
+  const MAX_LABEL_SUFFIX = 9
+  const MAX_LABEL_SUFFIX_TEXT = '-9'
+
+  /**
+   * The label a conversation publishes for its derived base: the base itself
+   * when no peer holds it, then the base-2 … base-9 suffixed variants, the
+   * base cut to leave room for the longest suffix once suffixing starts. When
+   * every variant is taken, or the peers read returned no information, the
+   * unsuffixed base is kept rather than a name invented.
+   */
+  function pickConversationLabel(base: string, taken: Set<string> | undefined): string {
+    if (!taken || !taken.has(base)) return base
+    let stem = truncateRunes(base, MAX_NAME_RUNES - MAX_LABEL_SUFFIX_TEXT.length)
+    // A dash at the cut boundary would double with the appended separator.
+    stem = stem.replace(/-+$/, '')
+    if (stem !== '') {
+      for (let n = 2; n <= MAX_LABEL_SUFFIX; n++) {
+        const candidate = `${stem}-${n}`
+        if (!taken.has(candidate)) return candidate
+      }
+    }
+    return base
+  }
+
+  /**
+   * The labels the broker already holds, read through the conversation's own
+   * bound identity — the same read a bound session's peers list serves. A read
+   * that fails, or comes back marked incomplete, is no information: the caller
+   * keeps the unsuffixed base rather than guessing at unlisted labels.
+   */
+  async function takenSessionLabels(sessionId: string): Promise<Set<string> | undefined> {
+    const provider = conversationProviders.get(sessionId)
+    if (!provider) return undefined
+    try {
+      const listing = await provider.peers()
+      if (listing.detail !== undefined) return undefined
+      const taken = new Set<string>()
+      for (const peer of listing.peers) {
+        if (peer.label) taken.add(peer.label)
+      }
+      return taken
+    } catch {
+      return undefined
+    }
+  }
+
   /**
    * Bind a conversation the moment the host shows it: the session's created
    * event, or the session's first turn when the plugin loaded after the
    * session already existed. Binding gives the conversation its run, feed and
    * name before its first messaging call, and an already-bound session takes
    * no second identity. A conversation no human has named is named from the
-   * directory the appearing event carries: a native title — remembered from an
-   * earlier rename or read at bind time — always outranks the derived label,
-   * and a later rename outranks a published default. Safe to run without
-   * awaiting: the caller keeps the event pump moving while the bind and the
-   * git reads behind the label proceed here.
+   * directory the appearing event carries, uniquely among the labels the
+   * broker holds: a native title — remembered from an earlier rename or read
+   * at bind time — always outranks the derived label, and a later rename
+   * outranks a published default. Safe to run without awaiting: the caller
+   * keeps the event pump moving while the bind and the git reads behind the
+   * label proceed here.
    */
   const onSessionAppeared = async (sessionID: string, directory?: string): Promise<void> => {
     try {
@@ -1691,7 +1740,14 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     const version = titleVersion(sessionID)
     const label = await sessionLabel(directory)
     if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
-    if (label !== '') await publishSessionTitle(sessionID, label)
+    if (label === '') return
+    // The bound conversation's own credential reads the labels the broker
+    // already holds, so a second conversation in the same work takes the next
+    // free suffixed variant. The gate runs again after the read: a native
+    // title landing during it must not be overwritten either.
+    const taken = await takenSessionLabels(sessionID)
+    if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
+    await publishSessionTitle(sessionID, pickConversationLabel(label, taken))
   }
 
   /**

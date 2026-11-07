@@ -1686,6 +1686,66 @@ describe('AvenorPlugin', () => {
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
   })
 
+  it('gives two conversations in the same work distinct default labels', async () => {
+    // The peers read reports the labels already published, as the broker does:
+    // each conversation reads with its own credential before naming itself.
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: postBrokerCalls
+          .filter(call => call.path === '/session_name')
+          .map(call => ({ run_id: String(call.env.runId), label: String((call.body as Record<string, unknown>).name) })),
+      }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 1, 'the first label to publish')
+    await onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 2, 'the second label to publish')
+    expect(postBrokerCalls.filter(call => call.path === '/session_name').map(call => call.body.name))
+      .toEqual(['avenor@feat', 'avenor@feat-2'])
+  })
+
+  it('takes the next free suffix when earlier ones are held', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: [
+          { run_id: 'r1', label: 'avenor@feat' },
+          { run_id: 'r2', label: 'avenor@feat-2' },
+        ],
+      }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat-3' })
+  })
+
+  it('publishes the plain base when the taken-label read fails', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => {
+        throw new Error('broker down')
+      },
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // A failed read is no information: the unsuffixed base is kept, not skipped.
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+  })
+
   it('restarts a bound conversation\'s feed when its execution succeeds', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },

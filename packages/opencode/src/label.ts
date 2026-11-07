@@ -22,7 +22,7 @@ const RESERVED_REFERENCES = new Set(['self', 'supervisor'])
 
 // The session display-name limit: 1-64 runes with no control, format, line-
 // or paragraph-separator characters.
-const MAX_NAME_RUNES = 64
+export const MAX_NAME_RUNES = 64
 
 const GIT_TIMEOUT_MS = 5_000
 
@@ -51,7 +51,8 @@ export function sanitizeSessionLabel(label: string): string {
   return truncated.replace(/^-+|-+$/g, '')
 }
 
-function truncateRunes(label: string, limit: number): string {
+/** Cut label to at most limit runes without splitting one. */
+export function truncateRunes(label: string, limit: number): string {
   const runes = Array.from(label)
   return runes.length > limit ? runes.slice(0, limit).join('') : label
 }

@@ -1,8 +1,18 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import * as nodeChildProcess from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 
 import plugin, { createV2EventHandler, evaluatePermissionAsk, permissionAskFromEvent, setupAvenor, stepEndedInfo, toV2ToolResult, v2Host, v2ToolEntry } from './index.js'
 import { sanitizeSessionLabel, sessionLabel } from './label.js'
+
+// The git reader's contract — resolve '' on any error or timeout, never
+// reject — is what makes the once-per-session attempt mark safe, so the real
+// reader is exercised through a mocked execFile: a callback invoked with an
+// error must land as an empty answer, not a rejection.
+const execFileMock = mock((_file: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
+  callback(new Error('git missing'), '')
+})
+mock.module('node:child_process', () => ({ ...nodeChildProcess, execFile: execFileMock }))
 
 function makeV2Ctx() {
   const added: Array<Record<string, any>> = []
@@ -580,9 +590,38 @@ describe('sessionLabel', () => {
     expect(sanitizeSessionLabel('a\u0000b')).toBe('ab')
   })
 
-  test('truncates to 64 runes without splitting one', async () => {
-    const label = sanitizeSessionLabel('☃'.repeat(70) + '-tail')
-    expect(Array.from(label)).toHaveLength(64)
-    expect(label.startsWith('☃')).toBe(true)
+  test('truncates to 64 runes without splitting a surrogate pair', async () => {
+    // 63 BMP runes plus one supplementary rune: 64 runes but 65 code units, so
+    // a code-unit slice would cut the pair in two.
+    const label = sanitizeSessionLabel('a'.repeat(63) + '𝄞' + '-tail')
+    expect(label).toBe('a'.repeat(63) + '𝄞')
+  })
+})
+
+describe('defaultGitReader', () => {
+  beforeEach(() => {
+    execFileMock.mockImplementation((_file: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
+      callback(new Error('git missing'), '')
+    })
+  })
+
+  afterEach(() => {
+    execFileMock.mockClear()
+  })
+
+  test('resolves an empty label when git errors, never rejecting', async () => {
+    // An error falls through to the directory base name; nothing here may
+    // reject, or the once-per-session attempt would leave a bound conversation
+    // unnamed forever.
+    await expect(sessionLabel('/repo/avenor')).resolves.toBe('avenor')
+  })
+
+  test('resolves an empty label when git is killed by its timeout', async () => {
+    execFileMock.mockImplementation((_file: string, _args: string[], options: unknown, callback: (error: Error | null, stdout: string) => void) => {
+      // The reader bounds each git call at five seconds.
+      expect((options as { timeout?: number }).timeout).toBe(5000)
+      callback(Object.assign(new Error('command failed'), { killed: true, signal: 'SIGTERM' }), '')
+    })
+    await expect(sessionLabel('/repo/avenor')).resolves.toBe('avenor')
   })
 })
