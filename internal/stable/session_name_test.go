@@ -107,6 +107,10 @@ func TestSessionRenameNameRules(t *testing.T) {
 		"zero width": "a\u200Bb",
 		"carriage":   "a\rb",
 		"paragraph":  "a\u2029b",
+		// Reserved references resolve before any label is read, so a session
+		// wearing one would be unreachable by name.
+		"self alias":     "self",
+		"supervisor run": messaging.SupervisorRunID,
 	}
 	for name, value := range cases {
 		t.Run(name, func(t *testing.T) {

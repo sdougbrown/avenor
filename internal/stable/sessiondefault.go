@@ -10,7 +10,6 @@ import (
 	"unicode"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
 // defaultBranchNames are the branch names a session label does not carry.
@@ -58,7 +57,7 @@ func DefaultSessionLabel(dir string) string {
 // session's default display label: it must satisfy the name rule and must not
 // be a reference the router resolves before labels are ever consulted.
 func labelUsable(label string) bool {
-	return messaging.ValidSessionName(label) && !router.IsReservedTarget(label)
+	return messaging.ValidSessionName(label)
 }
 
 // pickSessionLabel returns the display label a supervisor run registers under

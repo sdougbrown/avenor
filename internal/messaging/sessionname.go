@@ -41,13 +41,23 @@ func StripDisallowedIdentifierRunes(s string) string {
 // MaxSessionNameRunes bounds a session display name's rune length.
 const MaxSessionNameRunes = 64
 
+// ReservedSelfAlias is the reference a caller's own session is addressed by.
+// Resolution substitutes it before any label is consulted, so no session can
+// be reached by a label of the same spelling.
+const ReservedSelfAlias = "self"
+
 // ValidSessionName applies the one session display-name rule: 1-64 runes with
-// no control, format, line- or paragraph-separator characters. The rename
-// authority and the broker-only /rename fallback share it so neither can store
-// a name the other rejects.
+// no control, format, line- or paragraph-separator characters, and not a
+// reserved reference — the empty reference, the self alias, or the supervisor
+// run id — because resolution answers those before it ever reads a label. The
+// rename authority and the broker's /rename and /session_name writers share
+// it, so no path can store a name the others reject.
 func ValidSessionName(name string) bool {
 	runes := []rune(name)
 	if len(runes) == 0 || len(runes) > MaxSessionNameRunes {
+		return false
+	}
+	if name == ReservedSelfAlias || name == SupervisorRunID {
 		return false
 	}
 	return !disallowedIdentifierRunes(name)
