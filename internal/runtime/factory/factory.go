@@ -8,6 +8,7 @@
 //   - cursor-acp: spawns agent acp subprocess, owns lifecycle.
 //   - pi: spawns pi --mode rpc subprocess, owns lifecycle.
 //   - poo: spawns a poo binary subprocess and drives it over its stdio protocol.
+//   - mini-swe-agent: runs mini as a one-shot subprocess.
 //   - pony: test/stub backend.
 //   - claude: Claude Code backend; PTY by default, AVENOR_CLAUDE_TERMINAL=tmux for tmux.
 package factory
@@ -23,6 +24,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/codexappserver"
 	"github.com/sdougbrown/avenor/internal/runtime/cursoracp"
 	"github.com/sdougbrown/avenor/internal/runtime/geminiacp"
+	"github.com/sdougbrown/avenor/internal/runtime/miniswe"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodeacp"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodehttp"
 	"github.com/sdougbrown/avenor/internal/runtime/pi"
@@ -56,6 +58,9 @@ var providers = map[string]func(runtime.StartOptions) (runtime.Provider, error){
 	},
 	"poo": func(o runtime.StartOptions) (runtime.Provider, error) {
 		return poo.NewWithOptions(o), nil
+	},
+	"mini-swe-agent": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return miniswe.NewWithOptions(o), nil
 	},
 	"pony": func(o runtime.StartOptions) (runtime.Provider, error) {
 		return pony.NewWithOptions(o), nil
