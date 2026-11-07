@@ -53,12 +53,19 @@ runs, and a provider that owns a session-scoped run deletes it when its session
 ends. For those runs `target-unavailable` can mean the run ended; for a run
 nothing removed, it means the run was never registered on that broker.
 
-The OpenCode plugin is the surface that supplies `parent_run_id` on
-`avenor_spawn`, a fresh UUID per plugin instance. The control `spawn` method
-accepts the field directly. The supervisor registers that parent run and
-prepends its broker run ID to the child's prompt.
+Each OpenCode conversation binds through the owner control connection's
+`message_bind`: the supervisor maps one (host, native session) pair to exactly
+one broker run and returns that run's messaging credentials. The conversation's
+messaging tools and its one inbound consumer authenticate as that run and
+nothing else. A spawn the conversation starts names its own bound run as
+`parent_run_id`, so a child's messages ride the same inbox the conversation's
+feed consumes; a conversation whose bind cannot land advertises no parent route
+at all, and neither does a spawn explicitly pointed at another supervisor —
+that broker holds no record of the bound run, so its child starts without one.
+The supervisor reclaims a bound run the broker reports dead and mints a
+replacement on the next bind.
 
-The `pi` extension supplies it too, as `supervisor`, for host-mode spawns that
+The pi extension supplies it too, as `supervisor`, for host-mode spawns that
 reach this process's singleton supervisor: omit `supervisor_id` or supply the
 singleton's own socket. The supervisor registers that run eagerly, so the note
 reaches the child without the spawner writing the address into the brief.
@@ -78,6 +85,38 @@ forward their asks to the parent.
 ```
 
 The `avenor_message` registry entry invokes `avenor message` as the child. See [poo messaging](backends.md#messaging) for the switch, launch checks and credential visibility.
+
+## OpenCode conversations
+
+A bound OpenCode conversation runs the same pieces a poo child does, as the
+conversation's own broker run:
+
+- **Inbox** — the plugin starts one `avenor feed broker` per bound conversation,
+  authenticated by the run's credentials in the child's environment (never
+  argv). The feed's lock keeps a second consumer out, its parent-loss detection
+  ends it with the host, and its ask records land in the same claim directory
+  the reply path reads, so the feed and the reply share one claim store with no
+  second copy.
+- **Delivery** — each feed record becomes a prompt into the conversation, one
+  record at a time in arrival order: the reader pauses the feed while a prompt
+  is open, so a slow turn never reorders the inbox and a replaced or failed
+  consumer delivers nothing further. A record a dying feed already wrote is
+  still read and delivered; only the process's own close releases the inbox,
+  so its replacement never starts into the dead consumer's lock. The
+  plugin's frame marks the text as another session's words, never operator
+  instructions, and maps the feed's `call_cli` answer instruction onto the
+  native `avenor_message` tool: when a record's trailing note says to answer,
+  the conversation answers with `action: "reply"` and the record's message id.
+  The feed's own refusal wording passes through untouched.
+- **Reply** — `avenor_message` with `action: "reply"` runs `avenor message` as
+  the conversation, so the Go claim store authorizes exactly the asks the feed
+  delivered here; a second reply reports `edge-absent`. The plugin passes reply
+  text through stdin, not command arguments. Tell, ask and withdraw use the
+  shared broker adapter; resume stays owner-only.
+- **Identity** — the conversation's native title publishes as its harness name
+  (`/session_name`), and each settled turn publishes through the peer
+  `/last_message` route in per-conversation order, so peers' name and last
+  reads see the conversation they name.
 
 ## Child CLI messages
 

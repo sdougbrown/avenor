@@ -140,15 +140,18 @@ describe('setupAvenor', () => {
     expect(prompt.text).not.toContain('<channel ')
   })
 
-  test('step.ended for an unbound session does not read the session context', async () => {
-    const { ctx, contextCalls, events, drained } = makeV2Ctx()
+  test('a step.ended for an unbound session publishes nothing', async () => {
+    const { ctx, contextCalls, promptCalls, events, drained } = makeV2Ctx()
     events.push(
       { type: 'session.step.ended', data: { sessionID: 's1', assistantMessageID: 'm1' } },
       { type: 'session.idle', data: { sessionID: 's1' } },
     )
     await setupAvenor(ctx as never)
     await drained
-    expect(contextCalls).toEqual([])
+    // The settled message is read once, but with no bound conversation the
+    // turn publishes nowhere, and an idle alone never contacts the supervisor.
+    expect(contextCalls).toEqual([{ sessionID: 's1' }])
+    expect(promptCalls).toEqual([])
   })
 
   test('an event stream that throws does not break setup or cleanup', async () => {
@@ -175,6 +178,8 @@ describe('createV2EventHandler', () => {
   test('a throwing handler does not stop later events', async () => {
     const handled: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
       onSessionIdle: () => { handled.push('idle'); throw new Error('idle boom') },
       onStepEnded: () => { handled.push('step'); throw new Error('step boom') },
     })
@@ -184,9 +189,10 @@ describe('createV2EventHandler', () => {
     expect(handled).toEqual(['idle', 'step', 'idle'])
   })
 
-  test('routes idle and step.ended onto the core handlers', async () => {
-    const calls: string[] = []
+  test('routes idle and step.ended onto the core handlers', async () => {    const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
       onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
       onStepEnded: async (sessionID, messageID) => { calls.push(`step:${sessionID}:${messageID}`) },
     })
@@ -199,6 +205,8 @@ describe('createV2EventHandler', () => {
   test('drops incomplete events without calling the core handlers', async () => {
     const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
       onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
       onStepEnded: async (sessionID, messageID) => { calls.push(`step:${sessionID}:${messageID}`) },
     })
@@ -207,6 +215,22 @@ describe('createV2EventHandler', () => {
     await onEvent({ type: 'session.step.ended', data: { assistantMessageID: 'm1' } })
     await onEvent({ type: 'session.idle' })
     expect(calls).toEqual([])
+  })
+
+  test('routes rename, update and message events from the V2 data field', async () => {
+    const calls: string[] = []
+    const onEvent = createV2EventHandler({
+      onSessionRenamed: async (sessionID, title) => { calls.push(`renamed:${sessionID}:${title}`) },
+      onMessageUpdated: async (info) => { calls.push(`message:${String(info.id)}`) },
+      onSessionIdle: async () => {},
+      onStepEnded: async () => {},
+    })
+    await onEvent({ type: 'session.renamed', data: { sessionID: 's1', title: 'My Title' } })
+    await onEvent({ type: 'session.updated', data: { info: { id: 's2', title: 'Other Title' } } })
+    await onEvent({ type: 'message.updated', data: { info: { id: 'm1', role: 'assistant' } } })
+    // The V2 domain carries the same fields under `data`, not `properties`, so
+    // a wrong extraction field leaves every one of these unrouted.
+    expect(calls).toEqual(['renamed:s1:My Title', 'renamed:s2:Other Title', 'message:m1'])
   })
 })
 
@@ -346,6 +370,28 @@ describe('v2Host', () => {
     const host = v2Host(ctx as never)
     expect(await host.getMessage('s1', 'm2')).toEqual({ id: 'm2', type: 'assistant', content: [{ type: 'text', text: 'hi' }] } as never)
     expect(await host.getMessage('s1', 'missing')).toBeUndefined()
+  })
+
+  test('getSessionTitle reports the title the session carries, and nothing when it cannot be read', async () => {
+    const ctx = {
+      location: { directory: '/x' },
+      session: {
+        prompt: async () => {},
+        context: async () => [],
+        get: async ({ sessionID }: { sessionID: string }) => {
+          if (sessionID === 'broken') throw new Error('session gone')
+          return sessionID === 'untitled' ? { title: 7 } : { title: 'my title' }
+        },
+      },
+    }
+    const host = v2Host(ctx as never)
+    const readTitle = host.getSessionTitle
+    if (!readTitle) throw new Error('the V2 host must expose a session title reader')
+    expect(await readTitle('s1')).toBe('my title')
+    expect(await readTitle('untitled')).toBeUndefined()
+    // A session the adapter cannot read has no name to publish, so the caller
+    // falls back instead of failing the notify.
+    expect(await readTitle('broken')).toBeUndefined()
   })
 })
 

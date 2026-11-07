@@ -28,6 +28,8 @@ function promptRefusalError(error: unknown): Error {
 export const AvenorPlugin: Plugin = async (ctx) => {
   const core = createAvenorCore({
     promptAsync: async (sessionId, text) => {
+      // A refused prompt must reach the core: its delivery path owns the feed,
+      // and a swallowed rejection leaves that feed draining unattended.
       const result = await ctx.client.session.promptAsync({
         path: { id: sessionId },
         body: { parts: [{ type: 'text', text }] },
@@ -37,6 +39,11 @@ export const AvenorPlugin: Plugin = async (ctx) => {
     getMessage: async (sessionId, messageId) => {
       const response = await ctx.client.session.message({ path: { id: sessionId, messageID: messageId } })
       return response.data
+    },
+    getSessionTitle: async (sessionId) => {
+      const response = await ctx.client.session.get({ path: { id: sessionId } }).catch(() => undefined)
+      const session = response?.data as { title?: unknown } | undefined
+      return typeof session?.title === 'string' ? session.title : undefined
     },
   })
   return {

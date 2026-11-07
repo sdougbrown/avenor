@@ -102,6 +102,61 @@ export async function postBroker(
   return res.json()
 }
 
+/**
+ * Publish the harness's own user-defined session name for this run, or clear it
+ * with an empty name. The broker stores this name apart from any name the model
+ * set for itself and prefers it, so a peer sees the name the human gave the
+ * session. The POST is bounded: a broker that stops answering must leave the
+ * caller's publish chain able to run the next name rather than hang it forever.
+ */
+export async function publishHarnessName(
+  env: SubAgentEnv,
+  name: string | undefined,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  await postBroker(env, '/session_name', { name: name ?? '' }, fetchImpl, AbortSignal.timeout(5000))
+}
+
+/** One last-turn record a host publishes for its bound conversation. */
+export interface LastTurnRecord {
+  sequence: number
+  final_output: string
+  stop_reason: string
+  truncated: boolean
+}
+
+/**
+ * Publish the conversation's newest settled turn. Both hosts write the same
+ * `/last_message` body, so a change to that contract lands in one place instead
+ * of leaving one host's peers reading a stale turn. The POST is bounded unless
+ * the caller supplies its own signal, which a host uses to abandon a publish
+ * its session has already left.
+ */
+export async function publishLastTurn(
+  env: SubAgentEnv,
+  record: LastTurnRecord,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<void> {
+  await postBroker(
+    env,
+    '/last_message',
+    { sequence: record.sequence, final_output: record.final_output, stop_reason: record.stop_reason, truncated: record.truncated },
+    fetchImpl,
+    signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
+  )
+}
+
+/**
+ * A name the broker refused as invalid can never be accepted, so a host
+ * remembers it instead of re-sending it on every rename. One predicate answers
+ * that question for every host, so a change to the broker's refusal code does
+ * not silently start a failing POST per event on one surface only.
+ */
+export function isInvalidNameRefusal(error: unknown): boolean {
+  return error instanceof BrokerHttpError && error.status === 400 && error.code === 'invalid-name'
+}
+
 /** Authenticated GET; broker credentials travel in headers, never the URL. */
 async function getBroker(
   env: SubAgentEnv,
