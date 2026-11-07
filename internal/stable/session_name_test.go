@@ -25,16 +25,17 @@ func TestSessionRenameLevelsAndResolution(t *testing.T) {
 
 	// The owner may rename the supervisor session, and the event is published
 	// after the write with the label before and after.
+	previous := sup.broker.DisplayName(messaging.SupervisorRunID)
 	result, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, "", "main")
 	if err != nil {
 		t.Fatalf("owner rename: %v", err)
 	}
-	if result.RunID != "supervisor" || result.Label != "main" || result.PreviousLabel != "supervisor" {
+	if result.RunID != "supervisor" || result.Label != "main" || result.PreviousLabel != previous {
 		t.Fatalf("rename result = %+v", result)
 	}
 	ev := log.waitFor(t, "session.renamed", func(ev events.Event) bool { return ev.Event == "session.renamed" })
 	if ev.Fields["run_id"] != "supervisor" || ev.Fields["runtime_id"] != "supervisor" ||
-		ev.Fields["label"] != "main" || ev.Fields["previous_label"] != "supervisor" || ev.Fields["actor"] != "owner" {
+		ev.Fields["label"] != "main" || ev.Fields["previous_label"] != previous || ev.Fields["actor"] != "owner" {
 		t.Fatalf("session.renamed fields = %v", ev.Fields)
 	}
 
@@ -360,6 +361,7 @@ func TestSessionRenameIndexesRuntimeHistory(t *testing.T) {
 	}
 	defer c.Close()
 
+	previous := sup.broker.DisplayName(messaging.SupervisorRunID)
 	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, "", "main"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -373,7 +375,7 @@ func TestSessionRenameIndexesRuntimeHistory(t *testing.T) {
 		if ev["event"] != "session.renamed" {
 			continue
 		}
-		if ev["label"] != "main" || ev["previous_label"] != "supervisor" {
+		if ev["label"] != "main" || ev["previous_label"] != previous {
 			t.Fatalf("session.renamed history fields = %v", ev)
 		}
 		return

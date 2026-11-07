@@ -200,7 +200,7 @@ func TestMCPAutostartAuthenticatedAttachment(t *testing.T) {
 		if len(entry.Session) > 0 {
 			_ = json.Unmarshal(entry.Session, &session)
 		}
-		if session["run_id"] == "supervisor" && session["label"] == "supervisor" {
+		if session["run_id"] == "supervisor" && session["label"] != "" {
 			found = true
 		}
 	}

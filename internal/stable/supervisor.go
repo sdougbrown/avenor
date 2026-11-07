@@ -138,6 +138,11 @@ type Config struct {
 	// the bound address. Empty advertises the bound address. A value that is not
 	// a reachable http or https base URL fails startup.
 	BrokerAdvertiseURL string
+
+	// WorkingDir is the directory the supervisor derives its default display
+	// label from when it registers its own run. Empty uses the process
+	// working directory.
+	WorkingDir string
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
@@ -2351,6 +2356,32 @@ func (s *Supervisor) parentRunClaims() []messaging.RunClaim {
 	return s.broker.ParentRunClaims()
 }
 
+// supervisorRunLabel picks the display label the supervisor run registers
+// under: the work-derived default for Config.WorkingDir (the process working
+// directory when unset), collision-suffixed and validated by pickSessionLabel.
+// The run id stays supervisor either way.
+func (s *Supervisor) supervisorRunLabel() string {
+	workingDir := s.config.WorkingDir
+	if workingDir == "" {
+		var err error
+		if workingDir, err = os.Getwd(); err != nil {
+			return pickSessionLabel("", s.labelHeldByAnotherRun)
+		}
+	}
+	return pickSessionLabel(DefaultSessionLabel(workingDir), s.labelHeldByAnotherRun)
+}
+
+// labelHeldByAnotherRun reports whether any run other than the supervisor's
+// own already wears label.
+func (s *Supervisor) labelHeldByAnotherRun(label string) bool {
+	for _, runID := range s.broker.MatchLabel(label) {
+		if runID != messaging.SupervisorRunID {
+			return true
+		}
+	}
+	return false
+}
+
 // registerBrokerRun ensures the supervisor has its own run registered in the
 // broker for authentication. Returns the run ID and token.
 func (s *Supervisor) registerBrokerRun() (string, string) {
@@ -2368,7 +2399,7 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	// is not adoptable: its credential belongs to whoever posted it, so the
 	// supervisor runs without a broker identity of its own rather than under one
 	// that writer chose.
-	token, _, err := s.broker.EnsureRun(messaging.SupervisorRunID, "supervisor")
+	token, _, err := s.broker.EnsureRun(messaging.SupervisorRunID, s.supervisorRunLabel())
 	if err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: supervisor run %s not adopted: %v; the supervisor sends no broker asks\n", messaging.SupervisorRunID, err)
 		return "", ""
