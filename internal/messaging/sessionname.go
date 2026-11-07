@@ -64,9 +64,10 @@ func ValidSessionName(name string) bool {
 }
 
 // SessionNameRuleMessage renders the one refusal text for a name the rule
-// rejects.
+// rejects, naming every part of the rule so a caller can tell which one the
+// name broke.
 func SessionNameRuleMessage(name string) string {
-	return fmt.Sprintf("name must be 1-64 characters with no control or formatting characters: %q", name)
+	return fmt.Sprintf("name must be 1-64 characters with no control or formatting characters, and must not be a reserved reference (%s or %s): %q", ReservedSelfAlias, SupervisorRunID, name)
 }
 
 // MaxSessionIDBytes bounds a native session id's byte size. The id names a
