@@ -21,12 +21,19 @@ children and coordinate these commands through their shell tools, recording JSON
 1. Child A runs `avenor message --action tell --target supervisor --message CLI-TELL`
    and `avenor message --action ask --target supervisor --message CLI-ASK --timeout-ms 120000`.
    The host receives both from A and replies `CLI-ANSWER`; A reports `replied`.
-2. The host tells A `CLI-NOTICE`; A runs `avenor message --action reply --reply-to ID --message CLI-TELL-REPLY`.
-   The host receives the reply and A reports `sent`.
-3. The host asks A `CLI-QUESTION`; A runs `avenor message --action reply --reply-to ID --message CLI-REPLY`.
+2. Child A pipes a multiline message with
+   `printf 'CLI-STDIN-ONE\nCLI-STDIN-TWO\n' | avenor message --action tell --target supervisor --message-stdin`.
+   The host receives the exact multiline text, trailing newline included. A
+   conflicting `--message` plus `--message-stdin` exits 2 and delivers nothing;
+   `--message-stdin=false` keeps the inline `--message` behavior. Verify that
+   invalid UTF-8 in either input exits 1 and delivers nothing.
+3. The host tells A `CLI-NOTICE`; A runs
+   `printf 'CLI-TELL-REPLY\n' | avenor message --action reply --reply-to ID --message-stdin`.
+   The host receives the reply with the trailing newline and A reports `sent`.
+4. The host asks A `CLI-QUESTION`; A runs `avenor message --action reply --reply-to ID --message CLI-REPLY`.
    A reports `replied`, and the host receives `CLI-REPLY`. Repeating the reply
    reports `edge-absent`.
-4. A asks an idle child with `--timeout-ms 1000`. Its command exits 0 with
+5. A asks an idle child with `--timeout-ms 1000`. Its command exits 0 with
    outcome `timed-out`. Missing action or credentials exits 2; an unknown
    target exits 1 with `unknown_target` in stdout JSON.
 
