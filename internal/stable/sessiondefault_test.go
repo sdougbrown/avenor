@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // gitRepoWithBranch creates a git repository with the named branch checked
@@ -294,5 +295,21 @@ func TestPickSessionLabelNeverReturnsAReservedReference(t *testing.T) {
 	}
 	if got := pickSessionLabel("", takenLabels()); got != fallbackSessionLabel {
 		t.Fatalf("label for an empty base = %q, want %q", got, fallbackSessionLabel)
+	}
+}
+
+// TestAttemptSpawnDirSharesTheSupervisorWorkingDir pins the one answer to the
+// working-directory question: a workflow attempt with no declared directory
+// spawns where the supervisor's label is derived from, so the two cannot
+// diverge when the configured directory is set.
+func TestAttemptSpawnDirSharesTheSupervisorWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	sup := newTestSupervisor(t, Config{WorkingDir: dir})
+	got, err := sup.attemptSpawnDir(workflow.ExecutorContext{})
+	if err != nil {
+		t.Fatalf("attempt spawn dir: %v", err)
+	}
+	if got != dir {
+		t.Fatalf("attempt spawn dir = %q, want the configured working directory %q", got, dir)
 	}
 }
