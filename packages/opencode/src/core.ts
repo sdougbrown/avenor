@@ -1590,6 +1590,11 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
   // when the derivation named the session, and not when it found nothing to
   // name (a repository spelled like a reserved reference, for instance).
   const derivationAttempts = new Set<string>()
+  // The chain the default-label work queues onto — the same shape the title
+  // publishes use: one derive → read-taken → pick → publish at a time, so two
+  // conversations appearing together cannot read the same taken-set and name
+  // themselves alike; each pick runs after the previous conversation's publish.
+  let labelPublishChain: Promise<void> = Promise.resolve()
 
   function titleVersion(sessionId: string): number {
     return titleVersions.get(sessionId) ?? 0
@@ -1734,20 +1739,27 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     if (directory === undefined || typeof sessionTitles.get(sessionID) === 'string') return
     if (derivationAttempts.has(sessionID)) return
     derivationAttempts.add(sessionID)
-    // The bind's own title read resolves while git runs, so the version the
-    // derivation started under is captured now and the label is dropped when
-    // a native name arrived during it — a moved version or a remembered title.
-    const version = titleVersion(sessionID)
-    const label = await sessionLabel(directory)
-    if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
-    if (label === '') return
-    // The bound conversation's own credential reads the labels the broker
-    // already holds, so a second conversation in the same work takes the next
-    // free suffixed variant. The gate runs again after the read: a native
-    // title landing during it must not be overwritten either.
-    const taken = await takenSessionLabels(sessionID)
-    if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
-    await publishSessionTitle(sessionID, pickConversationLabel(label, taken))
+    // Queued behind any earlier conversation's naming work, so the taken-set
+    // read sees what the previous publish landed.
+    const naming = labelPublishChain.then(async () => {
+      // The bind's own title read resolves while git runs: the version captured
+      // here gates the publish on a native name arriving during the derivation.
+      const version = titleVersion(sessionID)
+      const label = await sessionLabel(directory)
+      if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
+      if (label === '') return
+      // The bound conversation's own credential reads the labels the broker
+      // already holds, so a second conversation in the same work takes the next
+      // free suffixed variant. The gate runs again after the read: a native
+      // title landing during it must not be overwritten either.
+      const taken = await takenSessionLabels(sessionID)
+      if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
+      await publishSessionTitle(sessionID, pickConversationLabel(label, taken))
+    })
+    // A failed naming step must not hold later conversations' labels: the
+    // chain keeps a resolved tail while the caller still sees the rejection.
+    labelPublishChain = naming.catch(() => {})
+    await naming
   }
 
   /**
@@ -1803,6 +1815,11 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
         event as { type: 'session.idle'; properties: { sessionID: string } }
       ).properties
 
+      // The V1 generation has no created event, so the turn's end is where a
+      // session first appears: it binds here through the same handler. The
+      // event carries no directory, so the derived default label is simply not
+      // published on this generation — a native title still publishes at bind.
+      await onSessionAppeared(sessionID)
       await onSessionIdle(sessionID)
     },
 
@@ -2217,8 +2234,11 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
 
   return {
     ...hooks,
-    // Handlers the V2 adapter registers through its own domains; the hooks
-    // above are the V1 spellings of the same behavior.
+    // Handlers the V2 adapter registers through its own domains. The hooks
+    // above carry the same behavior for the V1 generation, except where the
+    // generations differ: V1 has no created event, so its hook binds on the
+    // idle that ends a turn, and with no directory available the derived
+    // default label is never published there.
     onSessionIdle,
     onSessionAppeared,
     onSessionRenamed,

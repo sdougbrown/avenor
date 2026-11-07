@@ -1746,6 +1746,56 @@ describe('AvenorPlugin', () => {
     expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
   })
 
+  it('treats a partial peers listing as no information', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: [{ run_id: 'r1', label: 'avenor@feat' }],
+        detail: 'listing incomplete: transport error',
+      }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // Peers plus an error is no information: the unsuffixed base publishes
+    // exactly once rather than a guess at the unlisted labels.
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+  })
+
+  it('gives two sessions appearing concurrently distinct labels', async () => {
+    // The peers read snapshots at call time and answers late, so two reads
+    // running concurrently would both capture an empty set and publish alike;
+    // the naming chain must keep the second read behind the first publish.
+    providerFactory = () => makeProvider({
+      peers: () => {
+        const snapshot = postBrokerCalls
+          .filter(call => call.path === '/session_name')
+          .map(call => ({ run_id: String(call.env.runId), label: String((call.body as Record<string, unknown>).name) }))
+        return new Promise(resolve => setTimeout(() => resolve({ peers: snapshot }), 0))
+      },
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    // Nothing serializes the two handlers before the naming chain does.
+    await Promise.all([
+      onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } }),
+      onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/repo/avenor' } } }),
+    ])
+    await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 2, 'both labels to publish')
+    const names = postBrokerCalls
+      .filter(call => call.path === '/session_name')
+      .map(call => call.body.name as string)
+      .sort()
+    expect(names).toEqual(['avenor@feat', 'avenor@feat-2'])
+  })
+
   it('restarts a bound conversation\'s feed when its execution succeeds', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
