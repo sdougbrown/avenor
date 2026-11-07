@@ -45,8 +45,7 @@ export function v2Host(ctx: V2Context): PluginHost {
   return {
     promptAsync: (sessionId, text) =>
       ctx.session.prompt({ sessionID: sessionId, text, delivery: 'steer' })
-        .then(() => undefined)
-        .catch(() => undefined),
+        .then(() => undefined),
     getMessage: async (sessionId, messageId) => {
       // The V2 session domain exposes no single-message read; the message is
       // looked up in the session context instead.

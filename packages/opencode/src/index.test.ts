@@ -314,7 +314,7 @@ describe('v2ToolEntry', () => {
 })
 
 describe('v2Host', () => {
-  test('promptAsync maps onto session.prompt with steer delivery and swallows failures', async () => {
+  test('promptAsync maps onto session.prompt with steer delivery and surfaces failures', async () => {
     const promptCalls: Array<Record<string, unknown>> = []
     const ctx = {
       location: { directory: '/x' },
@@ -327,8 +327,12 @@ describe('v2Host', () => {
       },
     }
     const host = v2Host(ctx as never)
+    await expect(host.promptAsync('s1', 'run finished')).rejects.toThrow('busy')
     await host.promptAsync('s1', 'run finished')
-    expect(promptCalls).toEqual([{ sessionID: 's1', text: 'run finished', delivery: 'steer' }])
+    expect(promptCalls).toEqual([
+      { sessionID: 's1', text: 'run finished', delivery: 'steer' },
+      { sessionID: 's1', text: 'run finished', delivery: 'steer' },
+    ])
   })
 
   test('getMessage finds the message by id in the session context', async () => {

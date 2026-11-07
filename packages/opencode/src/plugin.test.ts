@@ -752,6 +752,102 @@ describe('AvenorPlugin', () => {
     expect(completionStream.closeMock).toHaveBeenCalledTimes(1)
   })
 
+  it('reports a refused completion prompt without re-notifying the finished run', async () => {
+    const completionStream = makeEventClient([
+      { event: 'session.end', runtime_id: 'rt-1', session_id: 'child-session', seq: 5, final_output: 'final answer', stop_reason: 'end_turn' },
+    ])
+    dialQueue.push(completionStream)
+    const promptAsync = mock(async (_args: PromptArgs) => {
+      throw new Error('orchestrator session gone')
+    })
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
+      await (hooks.tool?.avenor_spawn as any).execute(
+        { agent: 'jockey', wait: false },
+        { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
+      )
+      await flush()
+      expect(promptAsync).toHaveBeenCalledTimes(1)
+
+      // The run finished either way: the refusal is reported once, not retried
+      // on every later idle.
+      await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'orchestrator-session' } } as any })
+      await flush()
+      expect(promptAsync).toHaveBeenCalledTimes(1)
+    } finally {
+      console.error = originalError
+    }
+    expect(logged.join('\n')).toContain('notification failed for session orchestrator-session')
+  })
+
+  it('reports a completion prompt the host resolved as a refusal', async () => {
+    // The generated client resolves a 4xx body instead of rejecting unless it
+    // was built with throwOnError, so that shape has to reach the core too.
+    const completionStream = makeEventClient([
+      { event: 'session.end', runtime_id: 'rt-1', session_id: 'child-session', seq: 5, final_output: 'final answer', stop_reason: 'end_turn' },
+    ])
+    dialQueue.push(completionStream)
+    const promptAsync = mock(async (_args: PromptArgs) => ({ error: { data: { message: 'session not found' } } }))
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync as any) }) as any)
+      await (hooks.tool?.avenor_spawn as any).execute(
+        { agent: 'jockey', wait: false },
+        { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
+      )
+      await flush()
+      expect(promptAsync).toHaveBeenCalledTimes(1)
+
+      await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'orchestrator-session' } } as any })
+      await flush()
+      expect(promptAsync).toHaveBeenCalledTimes(1)
+    } finally {
+      console.error = originalError
+    }
+    // The refusal body is what the log names, not a generic failure.
+    expect(logged.join('\n')).toContain('notification failed for session orchestrator-session')
+    expect(logged.join('\n')).toContain('session not found')
+  })
+
+  it('names a completion refusal whose host error carries no message', async () => {
+    const completionStream = makeEventClient([
+      { event: 'session.end', runtime_id: 'rt-1', session_id: 'child-session', seq: 5, final_output: 'final answer', stop_reason: 'end_turn' },
+    ])
+    dialQueue.push(completionStream)
+    const promptAsync = mock(async (_args: PromptArgs) => {
+      throw new Error('')
+    })
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
+      await (hooks.tool?.avenor_spawn as any).execute(
+        { agent: 'jockey', wait: false },
+        { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
+      )
+      await flush()
+      expect(promptAsync).toHaveBeenCalledTimes(1)
+
+      // The finished run is still unregistered, so the failed notice is not
+      // retried on the next idle.
+      await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'orchestrator-session' } } as any })
+      await flush()
+      expect(promptAsync).toHaveBeenCalledTimes(1)
+    } finally {
+      console.error = originalError
+    }
+    const line = logged.find(entry => entry.includes('notification failed for session orchestrator-session')) ?? ''
+    // An empty host message must not leave the reason blank after the colon.
+    expect(line.replace('notification failed for session orchestrator-session:', '').trim()).not.toBe('')
+    expect(line).toContain('the host refused the prompt')
+  })
+
   it('routes permission.ask via session mapping, closes the observer, and resumes after idle', async () => {
     statusToolMock
       .mockImplementationOnce(async () => ({
@@ -993,7 +1089,73 @@ describe('AvenorPlugin', () => {
     expect(delivered).toContain('child-ru')
     expect(delivered).not.toContain('supervis')
 
+    // A refused delivery is best-effort: the poll keeps its cadence instead of
+    // ending on the first failure.
+    jest.advanceTimersByTime(3_000)
+    await flushMicrotasks()
+    jest.advanceTimersByTime(3_000)
+    await flushMicrotasks()
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+
     await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+  })
+
+  it('keeps polling when one row in a batch is refused', async () => {
+    jest.useFakeTimers()
+    const fetchMock = mock().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { type: 'agent_message', from_run_id: 'child-run', payload: { message: 'first body' } },
+        { type: 'agent_message', from_run_id: 'child-run', payload: { message: 'second body' } },
+      ],
+    })
+    globalThis.fetch = fetchMock as any
+    spawnToolMock.mockResolvedValueOnce({
+      run_id: 'run-1',
+      runtime_id: 'rt-1',
+      label: 'test run',
+      supervisor_id: '/tmp/avenor.sock',
+      broker_url: 'http://broker.test',
+      parent_token: 'parent-token',
+    } as any)
+    const stream = makeEventClient([], { hangAfterExhausted: true })
+    dialQueue.push(stream)
+    let attempts = 0
+    const promptAsync = mock(async (_args: PromptArgs) => {
+      attempts++
+      if (attempts === 1) throw new Error('session busy')
+    })
+    const logged: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')) }
+    try {
+      const hooks = await AvenorPlugin(makeCtx({ client: makeClient(promptAsync) }) as any)
+      await (hooks.tool?.avenor_spawn as any).execute(
+        { agent: 'jockey', wait: false },
+        { sessionID: 'orchestrator-session', directory: '/tmp/test', abort: new AbortController().signal, metadata: () => {} },
+      )
+      await hooks.event?.({ event: { type: 'session.idle', properties: { sessionID: 'orchestrator-session' } } as any })
+
+      jest.advanceTimersByTime(3_000)
+      await flushMicrotasks()
+
+      // Both rows of the batch reach the host: the refused one is reported, not
+      // allowed to abandon the rest.
+      expect(promptAsync).toHaveBeenCalledTimes(2)
+      const delivered = promptAsync.mock.calls.map(call => (call[0] as PromptArgs).body.parts[0].text)
+      expect(delivered[0]).toContain('first body')
+      expect(delivered[1]).toContain('second body')
+
+      // The poll stays alive for later batches.
+      jest.advanceTimersByTime(3_000)
+      await flushMicrotasks()
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+
+      await (hooks.tool?.avenor_shutdown as any).execute({}, {})
+    } finally {
+      console.error = originalError
+    }
+    expect(logged.join('\n')).toContain('notification failed for session orchestrator-session')
   })
 
   it('falls back to the payload sender only for a row with no stamp', async () => {
