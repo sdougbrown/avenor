@@ -166,8 +166,8 @@ prose:
   the supervisor run rather than the public child run. Compare `runtime_id` in
   the results to prove the parked runtime was reused.
 - `control-tail.ndjson`: `session.renamed` with `runtime_id`, `label`,
-  `previous_label` (`supervisor` for a supervisor rename, the child's `rt_N` for
-  a self rename).
+  `previous_label` (the supervisor's work-derived label for a supervisor
+  rename, the child's `rt_N` for a self rename).
 - `$AVENOR_HOME/sockets/*.sock`: shut the supervisor down through the control
   plane (`avenor control --socket <sock> shutdown graceful`) and close the
   host's stdin.
