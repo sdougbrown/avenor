@@ -125,6 +125,22 @@ type MessagePreflightResult struct {
 	Generation string `json:"generation"`
 }
 
+// MessageBindParams is the message_bind request. The trusted host adapter
+// supplies the native host and session id; the request carries no credential.
+type MessageBindParams struct {
+	Host      string `json:"host"`
+	SessionID string `json:"session_id"`
+}
+
+// MessageBindResult is the message_bind response.
+type MessageBindResult struct {
+	BrokerURL  string `json:"broker_url"`
+	RunID      string `json:"run_id"`
+	RunToken   string `json:"run_token"`
+	Generation string `json:"generation"`
+	Created    bool   `json:"created"`
+}
+
 // ResumeParams is the resume request.
 type ResumeParams struct {
 	RunID          string `json:"run_id"`
@@ -294,9 +310,18 @@ func (p MessageReceiveParams) request(from messaging.Identity) messaging.Receive
 	}
 }
 
+// NewMessageBindParams projects a bind request onto the wire shape.
+func NewMessageBindParams(req messaging.MessageBindRequest) MessageBindParams {
+	return MessageBindParams{Host: req.Host, SessionID: req.SessionID}
+}
+
 // NewMessagePeersParams projects a peers request onto the wire shape.
 func NewMessagePeersParams(req messaging.PeersRequest) MessagePeersParams {
 	return MessagePeersParams{Generation: req.Generation}
+}
+
+func (p MessageBindParams) request() messaging.MessageBindRequest {
+	return messaging.MessageBindRequest{Host: p.Host, SessionID: p.SessionID}
 }
 
 func (p MessagePeersParams) request(from messaging.Identity) messaging.PeersRequest {
@@ -387,6 +412,16 @@ func newMessagePeersResult(res messaging.PeersResult) MessagePeersResult {
 
 func newMessagePreflightResult(res messaging.PreflightResult) MessagePreflightResult {
 	return MessagePreflightResult{Protocol: res.Protocol, Generation: res.Generation}
+}
+
+func newMessageBindResult(res messaging.MessageBindResult) MessageBindResult {
+	return MessageBindResult{
+		BrokerURL:  res.BrokerURL,
+		RunID:      res.RunID,
+		RunToken:   res.RunToken,
+		Generation: res.Generation,
+		Created:    res.Created,
+	}
 }
 
 func newResumeResult(res messaging.ResumeResult) ResumeResult {
@@ -514,6 +549,17 @@ func (r MessagePeersResult) PeersResult() messaging.PeersResult {
 // PreflightResult decodes a preflight response.
 func (r MessagePreflightResult) PreflightResult() messaging.PreflightResult {
 	return messaging.PreflightResult{Protocol: r.Protocol, Generation: r.Generation}
+}
+
+// MessageBindResult decodes a bind response.
+func (r MessageBindResult) MessageBindResult() messaging.MessageBindResult {
+	return messaging.MessageBindResult{
+		BrokerURL:  r.BrokerURL,
+		RunID:      r.RunID,
+		RunToken:   r.RunToken,
+		Generation: r.Generation,
+		Created:    r.Created,
+	}
 }
 
 // ResumeResult decodes a resume response.

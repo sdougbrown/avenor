@@ -116,6 +116,27 @@ type RenameResult struct {
 	PreviousLabel string // the resolved display name before the rename
 }
 
+// MessageBindRequest binds one native host conversation to a broker-owned run.
+// The trusted host adapter supplies the host and the native session id; the
+// supervisor maps that pair to exactly one run it owns and returns the run's
+// messaging credentials. The bind grants messaging credentials only; it never
+// attaches, replaces or rotates a receiver.
+type MessageBindRequest struct {
+	Host      string // native host, e.g. pi or opencode
+	SessionID string // native conversation id on that host
+}
+
+// MessageBindResult reports the bound conversation's messaging credentials.
+// Created is true only when the bind minted a new broker run; a reuse-only
+// binding such as the pi host's reports the existing run with created false.
+type MessageBindResult struct {
+	BrokerURL  string
+	RunID      string
+	RunToken   string
+	Generation string
+	Created    bool
+}
+
 // PeerRecord is one peers `list` entry: the tool's projection of the broker's
 // SessionInfo. There is no name key — Label is the display name, so the list is
 // also the rename's read path — and last_seen is deliberately not part of the

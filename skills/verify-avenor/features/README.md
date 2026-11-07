@@ -14,6 +14,7 @@ state named in each file is the acceptance bar for that feature.
 | Broker feed | [feed-broker.md](feed-broker.md) | `avenor feed broker` → poo feed NDJSON |
 | Messaging tools | [messaging.md](messaging.md) | `avenor_message` (six actions) + `avenor_peers` (list/rename/last) from a host session and its children |
 | Child message CLI | [message-cli.md](message-cli.md) | `avenor message --action tell|ask|reply|withdraw` as a broker child |
+| Owner message bind | [message-bind.md](message-bind.md) | owner-only `message_bind` over the stable control socket → credentials + typed refusals |
 | Pi completion notices | [pi-completions.md](pi-completions.md) | real `pi --mode rpc` host + `avenor` supervisor + `pi` children → footer `avenor` status and `avenor-completion` messages |
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
 | Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |

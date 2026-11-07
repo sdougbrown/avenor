@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/internal/admission"
 	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/backendlaunch"
@@ -808,6 +809,11 @@ type Supervisor struct {
 	// It is the only transport the supervisor closes, and it never outlives
 	// the broker.
 	messaging messaging.Transport
+	// messageBinds is the one authority on which broker run each bound
+	// conversation (host + native session pair) acts as.
+	messageBindMu  sync.Mutex
+	messageBinds   map[messageBindKey]string
+	mintBoundRunID func() string
 	// parentLink is the broker hierarchy this supervisor participates in, nil
 	// when no parent broker is configured. parentLinkStop cancels its
 	// re-registration loop on shutdown, before the claim is retracted.
@@ -906,6 +912,8 @@ func NewSupervisor(cfg Config) *Supervisor {
 		sup.brokerURLErr = fmt.Errorf("broker parent URL: %w", err)
 	}
 	if sup.startBroker(cfg.BrokerAddr) {
+		sup.messageBinds = make(map[messageBindKey]string)
+		sup.mintBoundRunID = func() string { return uuid.New().String() }
 		// Register the supervisor run eagerly so sub-agents can target it for
 		// asks before the host performs any outbound broker call. Without this,
 		// a child asking its parent first would fail "to run not found".

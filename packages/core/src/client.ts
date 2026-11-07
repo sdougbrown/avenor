@@ -239,6 +239,19 @@ export interface MessagePreflightResult {
   generation: string
 }
 
+export interface MessageBindParams {
+  host: string
+  session_id: string
+}
+
+export interface MessageBindResult {
+  broker_url: string
+  run_id: string
+  run_token: string
+  generation: string
+  created: boolean
+}
+
 export interface ResumeParams {
   run_id: string
   target: string
@@ -892,6 +905,10 @@ export class Client {
 
   async messagePreflight(): Promise<MessagePreflightResult> {
     return this.call('message_preflight') as Promise<MessagePreflightResult>
+  }
+
+  async messageBind(params: MessageBindParams): Promise<MessageBindResult> {
+    return this.call('message_bind', params) as Promise<MessageBindResult>
   }
 
   async resume(params: ResumeParams): Promise<ResumeResult> {

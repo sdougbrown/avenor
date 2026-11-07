@@ -131,6 +131,12 @@ type StableHandler interface {
 	SessionLast(runtimeID string) (broker.LastAgentMessage, bool, error)
 	SessionLastSet(caller messaging.Caller, runtimeID, finalOutput, stopReason string, truncated bool) error
 
+	// MessageBind binds one native host conversation to exactly one
+	// broker-owned run and returns that run's messaging credentials. It is an
+	// owner-only bootstrap verb: it grants messaging credentials and never
+	// attaches a receiver.
+	MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error)
+
 	// TreeBudgetStatus reports tree-budget diagnostics. A supervisor without an
 	// active budget returns a degraded status map with its reason.
 	TreeBudgetStatus() any
@@ -1788,6 +1794,22 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32000, err.Error(), messageErrorData(err, "", ""))
 		}
 		return success(req.ID, newMessagePreflightResult(res))
+	case "message_bind":
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		var p MessageBindParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		res, err := s.stableHandler.MessageBind(messaging.Caller{Kind: messaging.CallerOwner, RunID: messaging.SupervisorRunID}, p.request())
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
+		}
+		return success(req.ID, newMessageBindResult(res))
 	case "resume":
 		if s.stableHandler == nil {
 			return failure(req.ID, -32601, "method not found", nil)

@@ -1787,3 +1787,36 @@ describe('Client.call RpcError', () => {
   })
 })
 
+describe('Client.messageBind', () => {
+  let server: net.Server
+
+  afterEach(() => {
+    server?.close()
+  })
+
+  it('binds one native conversation to its broker-owned run', async () => {
+    const socketPath = tempSocketPath()
+    const bound = {
+      broker_url: 'http://127.0.0.1:7300',
+      run_id: 'b3f2b90d-8f5e-4a6f-9a44-2f1b0d17c9ab',
+      run_token: 'run-token',
+      generation: 'gen_7',
+      created: true,
+    }
+
+    server = await startMockServer(socketPath, (req, sock) => {
+      expect(req.method).toBe('message_bind')
+      expect(req.params).toEqual({ host: 'opencode', session_id: 'ses_1' })
+      sock.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: bound }) + '\n')
+    })
+
+    const client = await dial(socketPath)
+    try {
+      const result = await client.messageBind({ host: 'opencode', session_id: 'ses_1' })
+      expect(result).toEqual(bound)
+    } finally {
+      client.close()
+    }
+  })
+})
+

@@ -400,6 +400,37 @@ These typed messaging methods delegate to the supervisor's in-process transport 
 
 `resume`, `session_rename`, `session_last` and `session_last_set` report what an authority decided rather than what a send did, so their `error.data` carries `code` alone: no `outcome` and no `wire_code` are reported for them.
 
+#### `message_bind`
+
+Maps one native conversation — a host plus its native session id — to exactly one broker-owned run and returns that run's messaging credentials. It is the owner-gated verb a trusted host adapter calls once per conversation; there is no CLI for it.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"message_bind","params":{"host":"pi","session_id":"sess_1"}}
+```
+
+Success:
+
+```json
+{"jsonrpc":"2.0","id":1,"result":{"broker_url":"http://127.0.0.1:39039","run_id":"supervisor","run_token":"…","generation":"…","created":false}}
+```
+
+- `host` — the native host the conversation belongs to. `pi` reuses the supervisor's own run: one conversation binds to the supervisor singleton, a second pi session is refused, and a lost supervisor run fails closed rather than reminting. `opencode` mints one run per conversation, reclaiming and reminting when the broker has confirmed a bound run dead. Any other host is refused.
+- `session_id` — the native session id: 1–200 bytes forming one safe filesystem path component, with no control or formatting characters.
+- `created` — whether the bind minted a new run. The pi host reuses the supervisor's existing run, so it reports `false`.
+
+While a bound run remains available, repeat binds of the same `(host, session_id)` — including after the owner reconnects and re-authenticates — return the same `run_id` and `run_token`.
+
+Failures are `-32000` with a typed `error.data.code`:
+
+| `data.code` | When |
+|---|---|
+| `refused` | A bind conflict or an unavailable broker run (e.g. `host pi already binds session "…"; one conversation per supervisor singleton`) |
+| `invalid-request` | Unserved host (`message_bind does not serve host "claude"`) or an invalid session id |
+
+A connection without the owner grant is refused with `-32010` (`permission_denied`) and no `data`; the server's owner gate rejects it before the handler runs, so `-32010` is the only wire outcome for a non-owner caller. (The handler also carries a `not_permitted` refusal for non-owner callers, but the gate makes that arm unreachable on the wire.) Like `resume` and `session_*`, `error.data` carries the typed `code` alone — no `outcome`, no `wire_code`.
+
+For an authenticated owner, a missing stable handler (one-shot mode) returns `-32601` (`method not found`).
+
 #### `message_receive`, `message_peers`, `message_preflight`
 
 The read-only half of the typed messaging surface. They are ungated, like `status` and `result`, and answer the same snake_case DTOs (`messages`, `peers`, `protocol`/`generation`). `message_receive` is a blocking verb with the same rules as `message_wait`: a negative `timeout_ms` is `-32602`, a value above the ceiling is clamped to it, and the receive runs off the connection's read loop under the shared per-connection slot budget.
@@ -470,9 +501,9 @@ The control server is constructed with an immutable owner capability that the ow
 
 ### Gated methods
 
-Fourteen methods require a connection's owner grant. A call from a connection without one fails with `-32010` (`permission_denied`) before the handler runs:
+Fifteen methods require a connection's owner grant. A call from a connection without one fails with `-32010` (`permission_denied`) before the handler runs:
 
-`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `spawn_mcp`, `shutdown`, `message_send`, `message_wait`, `message_reply`, `message_withdraw`, `resume`, `session_rename`, `session_last_set`.
+`cancel`, `prompt`, `interrupt_and_prompt`, `answer_permission`, `spawn`, `spawn_mcp`, `shutdown`, `message_send`, `message_wait`, `message_reply`, `message_withdraw`, `resume`, `session_rename`, `session_last_set`, `message_bind`.
 
 ### Ungated methods
 

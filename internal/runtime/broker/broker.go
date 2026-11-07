@@ -2352,6 +2352,26 @@ func (b *Broker) Reachable(runID string) bool {
 	return st.peerUnavailableLocked(time.Now()) == ""
 }
 
+// OwnedReachableToken reports the token of a run this broker minted whose
+// peer identity is neither retired nor expired. It is the non-minting lookup
+// a bind boundary answers credentials from: a record minted by another writer
+// reads as unavailable. Ownership, lease and token are read under one lock
+// hold.
+func (b *Broker) OwnedReachableToken(runID string) (string, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	st, ok := b.runs[runID]
+	if !ok || !b.ownsRecord(st) {
+		return "", false
+	}
+	st.Mu.Lock()
+	defer st.Mu.Unlock()
+	if st.peerUnavailableLocked(time.Now()) != "" {
+		return "", false
+	}
+	return st.Token, true
+}
+
 // GetRun returns runID's record, including the tombstone a retired or expired
 // peer leaves behind. Whether that identity may still be reached is a separate
 // question, asked at the boundary that routes to it
@@ -2409,6 +2429,24 @@ func (b *Broker) CreateRun(runID, name string) (string, error) {
 // (SetIdentity), not the process: a successor that comes back under the same
 // identity adopts its predecessor's records instead of refusing them.
 func (b *Broker) EnsureRun(runID, name string) (string, bool, error) {
+	return b.ensureRun(runID, name, false)
+}
+
+// EnsurePeerRun registers a peer-kind run under runID if one does not already
+// exist, minted and owned exactly as EnsureRun mints one, with its lease
+// running from creation. An existing run keeps its credential and its kind;
+// the ownership rule is EnsureRun's, shared through one mint path. The lease
+// is what backs a conversation this supervisor binds: a record whose consumer
+// stops answering is expired, tombstoned and reaped by the broker's own peer
+// lifecycle instead of living forever.
+func (b *Broker) EnsurePeerRun(runID string) (string, bool, error) {
+	return b.ensureRun(runID, "", true)
+}
+
+// ensureRun is the one mint path behind EnsureRun and EnsurePeerRun: the
+// caller names the record kind, and the adoption rule and the broker lock are
+// written once.
+func (b *Broker) ensureRun(runID, name string, peer bool) (string, bool, error) {
 	b.mu.Lock()
 	if st, exists := b.runs[runID]; exists {
 		token := st.Token
@@ -2420,6 +2458,10 @@ func (b *Broker) EnsureRun(runID, name string) (string, bool, error) {
 		return token, false, nil
 	}
 	st := b.newRunState(runID, name)
+	if peer {
+		st.peer = true
+		st.renewPeerLeaseLocked(time.Now())
+	}
 	b.runs[runID] = st
 	token := st.Token
 	b.mu.Unlock()
