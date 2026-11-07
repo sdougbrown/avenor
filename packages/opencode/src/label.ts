@@ -1,5 +1,11 @@
 import { execFile } from 'node:child_process'
 import * as nodePath from 'node:path'
+import {
+  MAX_SESSION_NAME_RUNES,
+  RESERVED_SESSION_REFERENCES,
+  boundedRunes,
+  stripDisallowedSessionNameRunes,
+} from '@dougbots/avenor-core'
 
 /**
  * The work-derived default display label for a bound conversation: the base
@@ -14,15 +20,6 @@ import * as nodePath from 'node:path'
 // two conventional names as the default ones instead and carries any other
 // branch in the label.
 const DEFAULT_BRANCH_NAMES = new Set(['main', 'master'])
-
-// The references resolution answers before any label is read: a label spelled
-// as one of them could never be reached by name, and the broker refuses it as
-// a session name.
-const RESERVED_REFERENCES = new Set(['self', 'supervisor'])
-
-// The session display-name limit: 1-64 runes with no control, format, line-
-// or paragraph-separator characters.
-export const MAX_NAME_RUNES = 64
 
 const GIT_TIMEOUT_MS = 5_000
 
@@ -40,25 +37,19 @@ function defaultGitReader(dir: string, args: string[]): Promise<string> {
 /**
  * Turn a derived label into one the session name rule accepts: runes no
  * identifier may hold are dropped, path separators and whitespace runs become
- * a single separator, and the result is truncated to the 64-rune name limit
- * without splitting a rune, then trimmed of separators.
+ * a single separator, and the result is truncated to the name limit without
+ * splitting a rune, then trimmed of separators.
  */
 export function sanitizeSessionLabel(label: string): string {
-  const stripped = label.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
+  const stripped = stripDisallowedSessionNameRunes(label)
   const separated = stripped.replace(/[/\\\s]+/gu, '-')
   const collapsed = separated.replace(/-{2,}/g, '-')
-  const truncated = truncateRunes(collapsed, MAX_NAME_RUNES)
+  const truncated = boundedRunes(collapsed, MAX_SESSION_NAME_RUNES)
   return truncated.replace(/^-+|-+$/g, '')
 }
 
-/** Cut label to at most limit runes without splitting one. */
-export function truncateRunes(label: string, limit: number): string {
-  const runes = Array.from(label)
-  return runes.length > limit ? runes.slice(0, limit).join('') : label
-}
-
 function labelUsable(label: string): boolean {
-  return label.length > 0 && !RESERVED_REFERENCES.has(label)
+  return label.length > 0 && label.length <= MAX_SESSION_NAME_RUNES && !RESERVED_SESSION_REFERENCES.has(label)
 }
 
 /**

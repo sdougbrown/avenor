@@ -20,6 +20,7 @@ import workflowConformance from '../../../schemas/workflow_route.conformance.jso
 import resultFixture from '../../../schemas/message_route.result.json'
 import { peersDetails, resultOutput } from '../../core/src/message.js'
 import type { AvenorCoreOptions } from './core.js'
+import * as labelModule from './label.js'
 import { createV2EventHandler, v2Host } from './v2.js'
 
 type ToolArgs = Record<string, unknown>
@@ -302,7 +303,12 @@ mock.module('./process.js', () => ({
 }))
 /** The derived default label; each test sees the label this returns. */
 const sessionLabelMock = mock(async (_dir?: string) => 'avenor@feat')
+// Snapshot-and-spread like the core mock above: defensive, since this Bun
+// already keeps exports the factory omits reachable (the passing suffix tests
+// are the evidence) — pinning the real module keeps that true regardless of
+// mock merge semantics.
 mock.module('./label.js', () => ({
+  ...labelModule,
   sessionLabel: sessionLabelMock,
 }))
 const originalFetch = globalThis.fetch
@@ -1726,6 +1732,46 @@ describe('AvenorPlugin', () => {
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
     await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
     expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat-3' })
+  })
+
+  it('keeps the unsuffixed base when every suffix variant is taken', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: [
+          { run_id: 'r0', label: 'avenor@feat' },
+          ...[2, 3, 4, 5, 6, 7, 8, 9].map(n => ({ run_id: `r${n}`, label: `avenor@feat-${n}` })),
+        ],
+      }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // Nothing invented past -9: the ambiguity is kept, not named around.
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+  })
+
+  it('fits a suffixed label inside the name rule for a limit-length base', async () => {
+    const base = 'a'.repeat(64)
+    sessionLabelMock.mockImplementation(async () => base)
+    providerFactory = () => makeProvider({
+      peers: async () => ({ peers: [{ run_id: 'r0', label: base }] }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // The base is cut to leave room for the suffix, so the published label
+    // stays within the 64-rune rule.
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'a'.repeat(62) + '-2' })
+    expect(Array.from(postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string)).toHaveLength(64)
   })
 
   it('publishes the plain base when the taken-label read fails', async () => {

@@ -184,12 +184,15 @@ export function extractTurnText(messages: unknown[]): { text: string; stopReason
   }
 }
 
+/** Cut text to at most limit code points without splitting one. */
+export function boundedRunes(text: string, limit: number): string {
+  const runes = Array.from(text)
+  return runes.length <= limit ? text : runes.slice(0, limit).join('')
+}
+
 /** Bound a published turn at the same rune count the Go recorder uses. */
 export function boundFinalOutput(text: string): string {
-  const runes = Array.from(text)
-  return runes.length <= MAX_FINAL_OUTPUT_RUNES
-    ? text
-    : runes.slice(0, MAX_FINAL_OUTPUT_RUNES).join('')
+  return boundedRunes(text, MAX_FINAL_OUTPUT_RUNES)
 }
 
 /** Extract the reply body from a wait result payload, as askclient.RenderReply does. */

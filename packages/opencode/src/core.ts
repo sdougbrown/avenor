@@ -4,7 +4,7 @@ import { tool } from '@opencode-ai/plugin'
 import * as readline from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
 import { spawnAvenorProcess as defaultSpawnProcess, runAvenorCommand as defaultRunCommand } from './process.js'
-import { sessionLabel, MAX_NAME_RUNES, truncateRunes } from './label.js'
+import { sessionLabel } from './label.js'
 import {
   formatAnswerPermissionOutput,
   formatEventsOutput,
@@ -40,6 +40,8 @@ import {
   postBroker,
   publishHarnessName,
   publishLastTurn,
+  boundedRunes,
+  MAX_SESSION_NAME_RUNES,
   resultTool,
   sanitize,
   type MessageProvider,
@@ -1682,7 +1684,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
    */
   function pickConversationLabel(base: string, taken: Set<string> | undefined): string {
     if (!taken || !taken.has(base)) return base
-    let stem = truncateRunes(base, MAX_NAME_RUNES - MAX_LABEL_SUFFIX_TEXT.length)
+    let stem = boundedRunes(base, MAX_SESSION_NAME_RUNES - MAX_LABEL_SUFFIX_TEXT.length)
     // A dash at the cut boundary would double with the appended separator.
     stem = stem.replace(/-+$/, '')
     if (stem !== '') {

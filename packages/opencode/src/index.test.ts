@@ -578,6 +578,13 @@ describe('sessionLabel', () => {
     expect(await sessionLabel(undefined, git({}))).toBe('')
   })
 
+  test('falls back to the directory base name when the repo top level is a reserved reference', async () => {
+    // A repo named `self` with an ordinary working directory yields the
+    // directory's own base name, not nothing.
+    const label = await sessionLabel('/repos/self/work', git({ 'rev-parse --show-toplevel': '/repos/self', 'branch --show-current': 'main' }))
+    expect(label).toBe('work')
+  })
+
   test('yields nothing for a reserved reference rather than a name the broker refuses', async () => {
     // Both the derived repo name and the basename fallback hit the exclusion.
     expect(await sessionLabel('/home/me/self', git({ 'rev-parse --show-toplevel': '/home/me/self', 'branch --show-current': 'main' }))).toBe('')
