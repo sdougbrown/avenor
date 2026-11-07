@@ -113,7 +113,7 @@ proves the host legs:
 3. **A child's ask to the host.** Spawn a child with `prompt` = `Perform these steps in order. 1) Call avenor_message with action "ask", target "supervisor", message "ping", timeout_ms 120000. 2) Write the tool result to "$SCRATCH/child-ask.json". 3) Reply with the single word OK.`, then prompt the host: `A child will send you an inbound ask. When it appears, reply to it with the single word pong using the tool and arguments the ask instructs.` The host's inbound steer carries the ask's `reply_to`; once it answers, the child's ask returns `replied` with `reply: "pong"` (read it from the child's `events.log` `result.details` — the child's own JSON copy is whatever text its model chose to write). `not-sent` here means the child posted a versioned message id without the broker's generation.
 4. Promptly after step 1, while the Pi runtime is still parked (the default parked timeout is 30 minutes), call `avenor_message` with action `resume`, target `host-child-c`, message `Reply with the single word AGAIN and nothing else.` Record the returned `outcome: resumed`, new public `run_id`, `-followup` label, and new `sentinel_file`/`on_event`. Call `avenor_result` for that new run and confirm its output is `AGAIN`. Compare its `runtime_id` and `session_id` with step 1: both stay the same, although the public run id and per-turn artifact paths differ. Read both sentinels and event files to prove the original turn remains intact and the new turn completed separately. Do not shut down the supervisor between turns.
 5. After the resumed turn ends, call `avenor_message` with action `tell`, targeting the resumed public run id, message `ping` — a tool error says the run is done and advises using action `resume` to continue it. (A tool error carries no `details` on this surface; the sentence is the observable.)
-6. `Call avenor_peers with action "rename", name "host-renamed-supervisor"` then `Call avenor_peers` — the rename returns `renamed {run_id: "supervisor", label, previous_label: "supervisor"}` and the next list shows the new label with `kind: "supervisor"`.
+6. `Call avenor_peers with action "rename", name "host-renamed-supervisor"` then `Call avenor_peers` — the rename returns `renamed {run_id: "supervisor", label, previous_label}`, where `previous_label` is the supervisor's work-derived label (a non-empty label that is not the run id `supervisor`), and the next list shows the new label with `kind: "supervisor"`.
 7. `Call avenor_workflow with action "cancel", workflow_id "wf-does-not-exist", actor "verify", reason "verify"` — the tool is registered on the host surface and answers a tool error whose text is `rpc error [-32000]: workflow not found: wf-does-not-exist`.
 
 Start a control-stream tail before the rename (`./avenor control --socket
@@ -166,8 +166,8 @@ prose:
   the supervisor run rather than the public child run. Compare `runtime_id` in
   the results to prove the parked runtime was reused.
 - `control-tail.ndjson`: `session.renamed` with `runtime_id`, `label`,
-  `previous_label` (`supervisor` for a supervisor rename, the child's `rt_N` for
-  a self rename).
+  `previous_label` (the supervisor's work-derived label for a supervisor
+  rename, the child's `rt_N` for a self rename).
 - `$AVENOR_HOME/sockets/*.sock`: shut the supervisor down through the control
   plane (`avenor control --socket <sock> shutdown graceful`) and close the
   host's stdin.

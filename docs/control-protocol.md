@@ -379,7 +379,7 @@ Returns all active and recently-completed child runtimes with status summaries. 
 
 #### `session_rename`
 
-`session_rename` renames one run's display name. Params: `{session_id, name}`. `name` is 1-64 runes with no control or formatting characters. It is owner-gated and applies the same one-authority rule as `POST /rename`:
+`session_rename` renames one run's display name. Params: `{session_id, name}`. `name` is 1-64 runes with no control or formatting characters, and is refused if it names a reserved reference (`self` or `supervisor`). It is owner-gated and applies the same one-authority rule as `POST /rename`:
 
 - an owner caller may rename only the supervisor session (`session_id` omitted, `"supervisor"`, or the supervisor's current display name);
 - a broker-authenticated caller may rename only itself.

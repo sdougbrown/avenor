@@ -4,10 +4,36 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
+
+// TestReservedNamesAreRefusedByBothLabelWriters pins the one name rule on the
+// two broker writers: a harness name and a rename both refuse a reserved
+// reference, because resolution answers those before it reads a label.
+func TestReservedNamesAreRefusedByBothLabelWriters(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Stop()
+	for _, name := range []string{messaging.ReservedSelfAlias, messaging.SupervisorRunID} {
+		token, _, err := b.EnsureRun("rt_r", "label")
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, body := postAuthBroker(t, b.Addr(), "/session_name", "rt_r", token, map[string]any{"name": name})
+		if status != http.StatusBadRequest || !strings.Contains(body["error"].(string), messaging.SessionNameRuleMessage(name)) {
+			t.Fatalf("harness name %q = %d %v, want 400 with the name rule", name, status, body)
+		}
+		status, body = postAuthBroker(t, b.Addr(), "/rename", "rt_r", token, map[string]any{"name": name})
+		if status != http.StatusBadRequest || !strings.Contains(body["error"].(string), messaging.SessionNameRuleMessage(name)) {
+			t.Fatalf("rename to %q = %d %v, want 400 with the name rule", name, status, body)
+		}
+	}
+}
 
 func TestHarnessNameIsWhatPeersSee(t *testing.T) {
 	b := New("")

@@ -637,7 +637,7 @@ const (
 	actionWithdraw     = "withdraw"
 	actionControlReply = "control_reply"
 
-	aliasSelf = "self"
+	aliasSelf = messaging.ReservedSelfAlias
 
 	// peersListOutcomeKey is the outcome matrix's key for the peers list
 	// action, whose one non-clean outcome is an incomplete listing.

@@ -52,7 +52,9 @@ request bodies.
 
 1. In Pi, call `avenor_peers`. Capture a complete listing containing
    `pi-scout` and `claude-scout` with distinct run IDs. Before any spawn,
-   confirm that using central peer tools did not start a local supervisor.
+   confirm that using central peer tools did not start a local supervisor
+   (a supervisor entry, if one appears, carries the run id `supervisor`; its
+   display label is work-derived, not `supervisor`).
    Rename the idle Pi session through the session API and capture a peer listing
    with the new name and the same run ID before starting another model turn.
    Clear the name and capture the resulting listing as well.

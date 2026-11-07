@@ -138,6 +138,11 @@ type Config struct {
 	// the bound address. Empty advertises the bound address. A value that is not
 	// a reachable http or https base URL fails startup.
 	BrokerAdvertiseURL string
+
+	// WorkingDir is the directory the supervisor derives its default display
+	// label from when it registers its own run. Empty uses the process
+	// working directory.
+	WorkingDir string
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
@@ -2351,6 +2356,29 @@ func (s *Supervisor) parentRunClaims() []messaging.RunClaim {
 	return s.broker.ParentRunClaims()
 }
 
+// supervisorRunLabel picks the display label the supervisor run registers
+// under: the work-derived default for Config.WorkingDir (the process working
+// directory when unset), collision-suffixed and validated by pickSessionLabel.
+// The run id stays supervisor either way.
+func (s *Supervisor) supervisorRunLabel() string {
+	workingDir, err := s.workingDir()
+	if err != nil {
+		return pickSessionLabel("", s.labelHeldByAnotherRun)
+	}
+	return pickSessionLabel(DefaultSessionLabel(workingDir), s.labelHeldByAnotherRun)
+}
+
+// labelHeldByAnotherRun reports whether any run other than the supervisor's
+// own already wears label.
+func (s *Supervisor) labelHeldByAnotherRun(label string) bool {
+	for _, runID := range s.broker.MatchLabel(label) {
+		if runID != messaging.SupervisorRunID {
+			return true
+		}
+	}
+	return false
+}
+
 // registerBrokerRun ensures the supervisor has its own run registered in the
 // broker for authentication. Returns the run ID and token.
 func (s *Supervisor) registerBrokerRun() (string, string) {
@@ -2368,7 +2396,7 @@ func (s *Supervisor) registerBrokerRun() (string, string) {
 	// is not adoptable: its credential belongs to whoever posted it, so the
 	// supervisor runs without a broker identity of its own rather than under one
 	// that writer chose.
-	token, _, err := s.broker.EnsureRun(messaging.SupervisorRunID, "supervisor")
+	token, _, err := s.broker.EnsureRun(messaging.SupervisorRunID, s.supervisorRunLabel())
 	if err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: supervisor run %s not adopted: %v; the supervisor sends no broker asks\n", messaging.SupervisorRunID, err)
 		return "", ""
@@ -6656,16 +6684,27 @@ type directRunExecutor struct{ sup *Supervisor }
 // the spawn fails, when the lease is no longer held, or on supervisor
 // shutdown — it never outlives the runtime.
 
+// workingDir resolves the directory the supervisor works in: the configured
+// one when set, otherwise the process working directory. The display label and
+// a workflow attempt's default spawn directory both read it, so the two cannot
+// answer the same question differently.
+func (s *Supervisor) workingDir() (string, error) {
+	if s.config.WorkingDir != "" {
+		return s.config.WorkingDir, nil
+	}
+	return os.Getwd()
+}
+
 // attemptSpawnDir resolves the spawn directory for one workflow attempt:
 // the dispatch-resolved working directory when the template declares one,
-// else the supervisor process's working directory (the pre-existing
-// behavior for templates without a working_directory declaration). A
-// declared directory must exist at dispatch time — the resolved value comes
-// from immutable instance params, but the directory itself may be created
-// after instantiation.
-func attemptSpawnDir(ec workflow.ExecutorContext) (string, error) {
+// else the supervisor's own working directory (the pre-existing behavior for
+// templates without a working_directory declaration). A declared directory
+// must exist at dispatch time — the resolved value comes from immutable
+// instance params, but the directory itself may be created after
+// instantiation.
+func (s *Supervisor) attemptSpawnDir(ec workflow.ExecutorContext) (string, error) {
 	if ec.WorkingDirectory == "" {
-		if cwd, err := os.Getwd(); err == nil {
+		if cwd, err := s.workingDir(); err == nil {
 			return cwd, nil
 		}
 		return ".", nil
@@ -6701,7 +6740,7 @@ func (e *directRunExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorCo
 		params.Timeout = ec.Action.Run.Timeout
 	}
 	params.LaunchWrapper = ec.LaunchWrapper
-	dir, err := attemptSpawnDir(ec)
+	dir, err := e.sup.attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the
 		// manager; record termination before returning so the attempt is
@@ -6763,7 +6802,7 @@ func (e *loopExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Timeout = ec.Action.Loop.Timeout
 	}
 	params.LaunchWrapper = ec.LaunchWrapper
-	dir, err := attemptSpawnDir(ec)
+	dir, err := e.sup.attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the
 		// manager; record termination before returning so the attempt is
@@ -6827,7 +6866,7 @@ func (e *teamExecutor) Dispatch(ctx context.Context, ec workflow.ExecutorContext
 		params.Timeout = ec.Action.Team.Timeout
 	}
 	params.LaunchWrapper = ec.LaunchWrapper
-	dir, err := attemptSpawnDir(ec)
+	dir, err := e.sup.attemptSpawnDir(ec)
 	if err != nil {
 		// Pre-start failure: the attempt was already started durably by the
 		// manager; record termination before returning so the attempt is

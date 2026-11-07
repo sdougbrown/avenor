@@ -36,6 +36,18 @@ display label.
 | Supervisor | `supervisor` | Eagerly at supervisor start, before any child exists. |
 | Spawned child | its runtime ID (`rt_N`) | Before the child's backend starts, so it can poll and reply. |
 
+The supervisor's display label is not its run id: it is derived from the
+supervisor's working directory (the base name of the git top-level, plus
+`@<branch>` when the checked-out branch is not `main` or `master` and HEAD
+is not detached), sanitized to the session-name rule, truncated to 64 runes,
+and suffixed `-2`…`-9` when another run already holds it. When the
+derivation yields nothing usable the label falls back to the working
+directory's base name, then to the literal label `session`; the reserved
+references (the empty reference, `self`, `supervisor`) are never used as
+labels. The supervisor's resolved label follows one precedence: the
+harness's session name, then an explicit label, then the work-derived
+default, then the run id.
+
 A spawned `pi` child asks through its inherited broker credentials. That path
 sends `to_run_id` after resolving a label through the broker's visible peers,
 the same ladder the host's message tool ask uses, but it never resolves a
@@ -65,9 +77,10 @@ that broker holds no record of the bound run, so its child starts without one.
 The supervisor reclaims a bound run the broker reports dead and mints a
 replacement on the next bind.
 
-The pi extension supplies it too, as `supervisor`, for host-mode spawns that
-reach this process's singleton supervisor: omit `supervisor_id` or supply the
-singleton's own socket. The supervisor registers that run eagerly, so the note
+The pi extension supplies it too, as `supervisor` — the run id, not the
+display label — for host-mode spawns that reach this process's singleton
+supervisor: omit `supervisor_id` or supply the singleton's own socket. The
+supervisor registers that run eagerly, so the note
 reaches the child without the spawner writing the address into the brief.
 
 Spawns to a non-local supervisor omit the field because the host polls only its
