@@ -4,6 +4,7 @@ import { tool } from '@opencode-ai/plugin'
 import * as readline from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
 import { spawnAvenorProcess as defaultSpawnProcess, runAvenorCommand as defaultRunCommand } from './process.js'
+import { sessionLabel } from './label.js'
 import {
   formatAnswerPermissionOutput,
   formatEventsOutput,
@@ -39,6 +40,8 @@ import {
   postBroker,
   publishHarnessName,
   publishLastTurn,
+  boundedRunes,
+  MAX_SESSION_NAME_RUNES,
   resultTool,
   sanitize,
   type MessageProvider,
@@ -137,6 +140,8 @@ export interface AvenorCoreOptions {
     signal?: AbortSignal,
     stdin?: string,
   ) => Promise<{ code: number | null; stdout: string; stderr: string }>
+  /** Derive a session's default display label; defaults to the git-based rule in ./label.js. */
+  sessionLabel?: (dir: string | undefined) => Promise<string>
 }
 
 type MonitorStopReason = 'permission-routed' | 'shutdown' | 'abort' | 'result'
@@ -469,6 +474,7 @@ export function stepEndedInfo(
  */
 export type AvenorCore = Hooks & {
   onSessionIdle(sessionID: string): Promise<void>
+  onSessionAppeared(sessionID: string, directory?: string): Promise<void>
   onSessionRenamed(sessionID: string, title: string | undefined): Promise<void>
   onMessageUpdated(info: Record<string, unknown>): Promise<void>
   onPermissionAsk(permission: PermissionAsk): Promise<void>
@@ -481,6 +487,7 @@ export type AvenorCore = Hooks & {
 export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = {}): AvenorCore {
   const spawnAvenorProcess = options.spawnProcess ?? defaultSpawnProcess
   const runAvenorCommand = options.runCommand ?? defaultRunCommand
+  const deriveSessionLabel = options.sessionLabel ?? sessionLabel
   const trackedRuns = new Map<string, TrackedRun>()
   const activeMonitors = new Map<string, ActiveMonitor>()
   const sessionIdToRunId = new Map<string, string>()
@@ -1583,6 +1590,16 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
   // under an older version answers with a name the human has already replaced,
   // so its answer is dropped instead of published over the newer one.
   const titleVersions = new Map<string, number>()
+  // The sessions whose default-label derivation was already attempted, marked
+  // before the git reads start: a later appearance re-runs them never — not
+  // when the derivation named the session, and not when it found nothing to
+  // name (a repository spelled like a reserved reference, for instance).
+  const derivationAttempts = new Set<string>()
+  // The chain the default-label work queues onto — the same shape the title
+  // publishes use: one derive → read-taken → pick → publish at a time, so two
+  // conversations appearing together cannot read the same taken-set and name
+  // themselves alike; each pick runs after the previous conversation's publish.
+  let labelPublishChain: Promise<void> = Promise.resolve()
 
   function titleVersion(sessionId: string): number {
     return titleVersions.get(sessionId) ?? 0
@@ -1656,6 +1673,100 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     await publishSessionTitle(sessionID, title)
   }
 
+  // The highest -N collision suffix a conversation default label carries, and
+  // that suffix spelled out: the room a truncation must leave for one.
+  const MAX_LABEL_SUFFIX = 9
+  const MAX_LABEL_SUFFIX_TEXT = '-9'
+
+  /**
+   * The label a conversation publishes for its derived base: the base itself
+   * when no peer holds it, then the base-2 … base-9 suffixed variants, the
+   * base cut to leave room for the longest suffix once suffixing starts. When
+   * every variant is taken, or the peers read returned no information, the
+   * unsuffixed base is kept rather than a name invented.
+   */
+  function pickConversationLabel(base: string, taken: Set<string> | undefined): string {
+    if (!taken || !taken.has(base)) return base
+    let stem = boundedRunes(base, MAX_SESSION_NAME_RUNES - MAX_LABEL_SUFFIX_TEXT.length)
+    // A dash at the cut boundary would double with the appended separator.
+    stem = stem.replace(/-+$/, '')
+    if (stem !== '') {
+      for (let n = 2; n <= MAX_LABEL_SUFFIX; n++) {
+        const candidate = `${stem}-${n}`
+        if (!taken.has(candidate)) return candidate
+      }
+    }
+    return base
+  }
+
+  /**
+   * The labels the broker already holds, read through the conversation's own
+   * bound identity — the same read a bound session's peers list serves. A read
+   * that fails, or comes back marked incomplete, is no information: the caller
+   * keeps the unsuffixed base rather than guessing at unlisted labels.
+   */
+  async function takenSessionLabels(sessionId: string): Promise<Set<string> | undefined> {
+    const provider = conversationProviders.get(sessionId)
+    if (!provider) return undefined
+    try {
+      const listing = await provider.peers()
+      if (listing.detail !== undefined) return undefined
+      const taken = new Set<string>()
+      for (const peer of listing.peers) {
+        if (peer.label) taken.add(peer.label)
+      }
+      return taken
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Bind a conversation the moment the host shows it: the session's created
+   * event, or the session's first turn when the plugin loaded after the
+   * session already existed. Binding gives the conversation its run, feed and
+   * name before its first messaging call, and an already-bound session takes
+   * no second identity. A conversation no human has named is named from the
+   * directory the appearing event carries, uniquely among the labels the
+   * broker holds: a native title — remembered from an earlier rename or read
+   * at bind time — always outranks the derived label, and a later rename
+   * outranks a published default. Safe to run without awaiting: the caller
+   * keeps the event pump moving while the bind and the git reads behind the
+   * label proceed here.
+   */
+  const onSessionAppeared = async (sessionID: string, directory?: string): Promise<void> => {
+    try {
+      await bindConversation(sessionID)
+    } catch (error) {
+      console.error(`[avenor] conversation bind failed for session ${sessionID}:`, error instanceof Error ? error.message : error)
+      return
+    }
+    if (directory === undefined || typeof sessionTitles.get(sessionID) === 'string') return
+    if (derivationAttempts.has(sessionID)) return
+    derivationAttempts.add(sessionID)
+    // Queued behind any earlier conversation's naming work, so the taken-set
+    // read sees what the previous publish landed.
+    const naming = labelPublishChain.then(async () => {
+      // The bind's own title read resolves while git runs: the version captured
+      // here gates the publish on a native name arriving during the derivation.
+      const version = titleVersion(sessionID)
+      const label = await deriveSessionLabel(directory)
+      if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
+      if (label === '') return
+      // The bound conversation's own credential reads the labels the broker
+      // already holds, so a second conversation in the same work takes the next
+      // free suffixed variant. The gate runs again after the read: a native
+      // title landing during it must not be overwritten either.
+      const taken = await takenSessionLabels(sessionID)
+      if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
+      await publishSessionTitle(sessionID, pickConversationLabel(label, taken))
+    })
+    // A failed naming step must not hold later conversations' labels: the
+    // chain keeps a resolved tail while the caller still sees the rejection.
+    labelPublishChain = naming.catch(() => {})
+    await naming
+  }
+
   /**
    * The V2 step event carries only the session and message IDs, so the settled
    * assistant message is read here and projected onto the same info shape the
@@ -1709,6 +1820,11 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
         event as { type: 'session.idle'; properties: { sessionID: string } }
       ).properties
 
+      // The V1 generation has no created event, so the turn's end is where a
+      // session first appears: it binds here through the same handler. The
+      // event carries no directory, so the derived default label is simply not
+      // published on this generation — a native title still publishes at bind.
+      await onSessionAppeared(sessionID)
       await onSessionIdle(sessionID)
     },
 
@@ -2123,9 +2239,13 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
 
   return {
     ...hooks,
-    // Handlers the V2 adapter registers through its own domains; the hooks
-    // above are the V1 spellings of the same behavior.
+    // Handlers the V2 adapter registers through its own domains. The hooks
+    // above carry the same behavior for the V1 generation, except where the
+    // generations differ: V1 has no created event, so its hook binds on the
+    // idle that ends a turn, and with no directory available the derived
+    // default label is never published there.
     onSessionIdle,
+    onSessionAppeared,
     onSessionRenamed,
     onMessageUpdated,
     onPermissionAsk,

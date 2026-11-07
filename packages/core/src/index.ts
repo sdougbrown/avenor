@@ -88,6 +88,7 @@ export {
   normalizeTurnStopReason,
   extractTurnText,
   boundFinalOutput,
+  boundedRunes,
 } from './messaging-text.js'
 export type { MessageOutcome } from './messaging-text.js'
 export {
@@ -99,6 +100,9 @@ export {
   peersDetails,
   renderPeerList,
   resultOutput,
+  MAX_SESSION_NAME_RUNES,
+  RESERVED_SESSION_REFERENCES,
+  stripDisallowedSessionNameRunes,
 } from './message.js'
 export type { MessageInput, PeersInput, PeersRouterResult } from './message.js'
 export { messageTool, createMessageTool } from './tools/message.js'
