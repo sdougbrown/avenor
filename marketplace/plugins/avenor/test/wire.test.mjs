@@ -1,6 +1,7 @@
 // Unit tests for the peer layer's wire helpers (node --test; see
 // test/addresses.test.mjs for the run command). The shapes mirror
-// packages/core/src/messaging-text.ts and packages/pi/src/subagent-broker.ts,
+// packages/core/src/messaging-text.ts, packages/core/src/broker-http.ts
+// and packages/pi/src/subagent-broker.ts,
 // so these keep a mod, a pi child and a Go child on the same wire.
 
 import { test } from 'node:test'

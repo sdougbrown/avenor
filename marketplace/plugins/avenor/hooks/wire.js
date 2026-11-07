@@ -2,8 +2,9 @@
 // (docs/messaging.md): the message-id minter, the /send envelope, the queued
 // agent_message payload, the reply extraction and the ask failure sentences.
 // The shapes mirror packages/core/src/messaging-text.ts (newMsgID,
-// extractReplyMessage, renderAskFailure, quote) and
-// packages/pi/src/subagent-broker.ts (buildAgentMessage, parseControlMessage),
+// extractReplyMessage, renderAskFailure, quote),
+// packages/core/src/broker-http.ts (buildAgentMessage) and
+// packages/pi/src/subagent-broker.ts (parseControlMessage),
 // so a mod, a pi child and a Go child all put the same bytes on the wire. The
 // parsed row's `expectsReply` field mirrors pi's `InboundAsk.expects_reply`,
 // and it alone decides whether a frame invites a reply.
