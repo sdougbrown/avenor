@@ -1774,6 +1774,27 @@ describe('AvenorPlugin', () => {
     expect(Array.from(postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string)).toHaveLength(64)
   })
 
+  it('strips the dash a cut leaves at the stem boundary before appending the suffix', async () => {
+    // A 64-rune base whose 62nd rune is a dash: the truncation to 62 ends on
+    // that dash, and appending would double it — the strip before the suffix
+    // is the branch under test.
+    const base = 'a'.repeat(61) + '-' + 'bc'
+    sessionLabelMock.mockImplementation(async () => base)
+    providerFactory = () => makeProvider({
+      peers: async () => ({ peers: [{ run_id: 'r0', label: base }] }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'a'.repeat(61) + '-2' })
+    expect((postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string).includes('--')).toBe(false)
+    expect(Array.from(postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string).length).toBeLessThanOrEqual(64)
+  })
+
   it('publishes the plain base when the taken-label read fails', async () => {
     providerFactory = () => makeProvider({
       peers: async () => {
