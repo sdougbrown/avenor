@@ -20,7 +20,7 @@ import workflowConformance from '../../../schemas/workflow_route.conformance.jso
 import resultFixture from '../../../schemas/message_route.result.json'
 import { peersDetails, resultOutput } from '../../core/src/message.js'
 import type { AvenorCoreOptions } from './core.js'
-import { v2Host } from './v2.js'
+import { createV2EventHandler, v2Host } from './v2.js'
 
 type ToolArgs = Record<string, unknown>
 type ToolOutput = Record<string, unknown>
@@ -300,6 +300,16 @@ mock.module('./process.js', () => ({
   spawnAvenorProcess: spawnProcessMock,
   runAvenorCommand: runCommandMock,
 }))
+/** The derived default label; each test sees the label this returns. */
+const sessionLabelMock = mock(async (_dir?: string) => 'avenor@feat')
+// The seams every test core starts through: the process seams keep real
+// processes out of the run, and the label seam keeps the derivation stubbed
+// without touching the module registry other test files read.
+const coreOptions: AvenorCoreOptions = {
+  spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'],
+  runCommand: runCommandMock,
+  sessionLabel: sessionLabelMock,
+}
 const originalFetch = globalThis.fetch
 
 function makeClient(promptAsync = mock(async (_args: PromptArgs) => {})) {
@@ -396,6 +406,8 @@ beforeEach(() => {
   spawnProcessMock.mockClear()
   runCommandMock.mockClear()
   runCommandMock.mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }))
+  sessionLabelMock.mockClear()
+  sessionLabelMock.mockImplementation(async (_dir?: string) => 'avenor@feat')
   resultToolMock.mockClear()
   shutdownToolMock.mockClear()
   killToolMock.mockClear()
@@ -1404,7 +1416,7 @@ describe('AvenorPlugin', () => {
           context: async () => [],
         },
       } as never),
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as { tool: Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }> }
     await hooks.tool.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
@@ -1562,6 +1574,334 @@ describe('AvenorPlugin', () => {
     expect(messageBindMock).toHaveBeenCalledTimes(2)
   })
 
+  it('binds a session when it appears and names it from its directory', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 'session-1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the derived name to publish')
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(messageBindMock.mock.calls[0]?.[0]).toMatchObject({ host: 'opencode', session_id: 'session-1' })
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+
+    // The first turn after creation reaches an already-bound session: no
+    // second identity, no second consumer, no republished name.
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
+    await flush()
+    await flushMicrotasks()
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+
+    // The first-turn messaging bind is the same cached identity.
+    await (core.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('binds on the first turn when the creation was missed', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
+    await waitFor(() => messageBindMock.mock.calls.length === 1, 'the first-turn bind')
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    // No directory rode the turn event, so nothing is derived or named.
+    expect(sessionLabelMock).not.toHaveBeenCalled()
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toEqual([])
+  })
+
+  it('keeps a remembered native title over the derived label', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    // A rename before the bind is remembered as the native title.
+    await (core as unknown as { event: (input: { event: unknown }) => Promise<void> }).event({
+      event: { type: 'session.renamed', properties: { sessionID: 'session-1', title: 'Chosen Name' } },
+    })
+    await onEvent({ type: 'session.created', data: { sessionID: 'session-1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the native title to publish')
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'Chosen Name' })
+    // A human-named session never consults the derivation.
+    expect(sessionLabelMock).not.toHaveBeenCalled()
+  })
+
+  it('never lets the derived label replace a title that lands during the derivation', async () => {
+    const reads: Array<(title: string | undefined) => void> = []
+    const core = createAvenorCore(
+      {
+        promptAsync: async () => {},
+        getMessage: async () => undefined,
+        getSessionTitle: () => new Promise<string | undefined>(resolve => reads.push(resolve)),
+      },
+      coreOptions,
+    )
+    // The derivation is held open while the bind's own title read answers.
+    let resolveLabel: (label: string) => void = () => {}
+    sessionLabelMock.mockImplementation(() => new Promise<string>(resolve => { resolveLabel = resolve }))
+    const appearance = (core as unknown as {
+      onSessionAppeared: (sessionID: string, directory?: string) => Promise<void>
+    }).onSessionAppeared('session-1', '/repo/avenor')
+    await waitFor(() => sessionLabelMock.mock.calls.length === 1, 'the derivation to start')
+
+    // The bind's title read lands while git runs: the native name publishes
+    // first and is what the broker must keep.
+    reads.shift()?.('Native Name')
+    await flush()
+    await flushMicrotasks()
+    resolveLabel('avenor@feat')
+    await appearance
+    const publishes = postBrokerCalls.filter(call => call.path === '/session_name')
+    expect(publishes).toHaveLength(1)
+    expect(publishes[0]?.body).toEqual({ name: 'Native Name' })
+  })
+
+  it('derives a label at most once per session, even when the derivation yields nothing', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => sessionLabelMock.mock.calls.length === 1, 'the first derivation')
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 's1' } })
+    await flush()
+    await flushMicrotasks()
+    expect(sessionLabelMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+
+    // A derivation that names nothing is remembered as attempted too: a
+    // repository spelled like a reserved reference costs one git run, not two
+    // per turn.
+    sessionLabelMock.mockImplementation(async () => '')
+    await onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/repo/self' } } })
+    await waitFor(() => sessionLabelMock.mock.calls.length === 2, 'the empty derivation')
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 's2' } })
+    await flush()
+    await flushMicrotasks()
+    expect(sessionLabelMock).toHaveBeenCalledTimes(2)
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+  })
+
+  it('gives two conversations in the same work distinct default labels', async () => {
+    // The peers read reports the labels already published, as the broker does:
+    // each conversation reads with its own credential before naming itself.
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: postBrokerCalls
+          .filter(call => call.path === '/session_name')
+          .map(call => ({ run_id: String(call.env.runId), label: String((call.body as Record<string, unknown>).name) })),
+      }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 1, 'the first label to publish')
+    await onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 2, 'the second label to publish')
+    expect(postBrokerCalls.filter(call => call.path === '/session_name').map(call => call.body.name))
+      .toEqual(['avenor@feat', 'avenor@feat-2'])
+  })
+
+  it('takes the next free suffix when earlier ones are held', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: [
+          { run_id: 'r1', label: 'avenor@feat' },
+          { run_id: 'r2', label: 'avenor@feat-2' },
+        ],
+      }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat-3' })
+  })
+
+  it('keeps the unsuffixed base when every suffix variant is taken', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: [
+          { run_id: 'r0', label: 'avenor@feat' },
+          ...[2, 3, 4, 5, 6, 7, 8, 9].map(n => ({ run_id: `r${n}`, label: `avenor@feat-${n}` })),
+        ],
+      }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // Nothing invented past -9: the ambiguity is kept, not named around.
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+  })
+
+  it('fits a suffixed label inside the name rule for a limit-length base', async () => {
+    const base = 'a'.repeat(64)
+    sessionLabelMock.mockImplementation(async () => base)
+    providerFactory = () => makeProvider({
+      peers: async () => ({ peers: [{ run_id: 'r0', label: base }] }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // The base is cut to leave room for the suffix, so the published label
+    // stays within the 64-rune rule.
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'a'.repeat(62) + '-2' })
+    expect(Array.from(postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string)).toHaveLength(64)
+  })
+
+  it('strips the dash a cut leaves at the stem boundary before appending the suffix', async () => {
+    // A 64-rune base whose 62nd rune is a dash: the truncation to 62 ends on
+    // that dash, and appending would double it — the strip before the suffix
+    // is the branch under test.
+    const base = 'a'.repeat(61) + '-' + 'bc'
+    sessionLabelMock.mockImplementation(async () => base)
+    providerFactory = () => makeProvider({
+      peers: async () => ({ peers: [{ run_id: 'r0', label: base }] }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'a'.repeat(61) + '-2' })
+    expect((postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string).includes('--')).toBe(false)
+    expect(Array.from(postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string).length).toBeLessThanOrEqual(64)
+  })
+
+  it('publishes the plain base when the taken-label read fails', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => {
+        throw new Error('broker down')
+      },
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // A failed read is no information: the unsuffixed base is kept, not skipped.
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+  })
+
+  it('treats a partial peers listing as no information', async () => {
+    providerFactory = () => makeProvider({
+      peers: async () => ({
+        peers: [{ run_id: 'r1', label: 'avenor@feat' }],
+        detail: 'listing incomplete: transport error',
+      }),
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // Peers plus an error is no information: the unsuffixed base publishes
+    // exactly once rather than a guess at the unlisted labels.
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+  })
+
+  it('gives two sessions appearing concurrently distinct labels', async () => {
+    // The peers read snapshots at call time and answers late, so two reads
+    // running concurrently would both capture an empty set and publish alike;
+    // the naming chain must keep the second read behind the first publish.
+    providerFactory = () => makeProvider({
+      peers: () => {
+        const snapshot = postBrokerCalls
+          .filter(call => call.path === '/session_name')
+          .map(call => ({ run_id: String(call.env.runId), label: String((call.body as Record<string, unknown>).name) }))
+        return new Promise(resolve => setTimeout(() => resolve({ peers: snapshot }), 0))
+      },
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    // Nothing serializes the two handlers before the naming chain does.
+    await Promise.all([
+      onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } }),
+      onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/repo/avenor' } } }),
+    ])
+    await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 2, 'both labels to publish')
+    const names = postBrokerCalls
+      .filter(call => call.path === '/session_name')
+      .map(call => call.body.name as string)
+      .sort()
+    expect(names).toEqual(['avenor@feat', 'avenor@feat-2'])
+  })
+
+  it('restarts a bound conversation\'s feed when its execution succeeds', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
+    await waitFor(() => spawnProcessMock.mock.calls.length === 1, 'the first-turn consumer to start')
+    const child = spawnProcessMock.mock.results[0]?.value as any
+    child.emit('exit', 0, null)
+    child.emit('close', 0, null)
+    await flush()
+
+    // Turn end on this generation is the feed-restart trigger: the bind is
+    // re-answered and a fresh consumer starts.
+    await onEvent({ type: 'session.execution.succeeded', data: { sessionID: 'session-1' } })
+    expect(messageBindMock).toHaveBeenCalledTimes(2)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a failed bind on a created session from rejecting the event', async () => {
+    messageBindMock.mockImplementation(async () => {
+      throw new Error('broker down')
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await expect(onEvent({
+      type: 'session.created',
+      data: { sessionID: 'session-1', location: { directory: '/repo/avenor' } },
+    })).resolves.toBeUndefined()
+    await flush()
+    // Without a bind the session gains no consumer and no name, and the
+    // fire-and-forget handling rejects nothing to the pump.
+    expect(spawnProcessMock).not.toHaveBeenCalled()
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toEqual([])
+  })
+
   it('waits for the old consumer to close before a replacement claims the inbox', async () => {
     const hooks = await AvenorPlugin(makeCtx() as any)
     await (hooks.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
@@ -1620,7 +1960,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -1672,7 +2012,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -1720,7 +2060,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -2112,7 +2452,7 @@ describe('AvenorPlugin', () => {
         getMessage: async () => undefined,
         getSessionTitle: () => new Promise<string | undefined>(resolve => reads.push(resolve)),
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -2225,7 +2565,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const first = {
       messagePreflight: async () => ({ generation: 'gen-1' }),
@@ -2292,7 +2632,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -2343,7 +2683,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const first = {
       messagePreflight: async () => ({ generation: 'gen-1' }),

@@ -1,7 +1,18 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import * as nodeChildProcess from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 
 import plugin, { createV2EventHandler, evaluatePermissionAsk, permissionAskFromEvent, setupAvenor, stepEndedInfo, toV2ToolResult, v2Host, v2ToolEntry } from './index.js'
+import { sanitizeSessionLabel, sessionLabel } from './label.js'
+
+// The git reader's contract — resolve '' on any error or timeout, never
+// reject — is what makes the once-per-session attempt mark safe, so the real
+// reader is exercised through a mocked execFile: a callback invoked with an
+// error must land as an empty answer, not a rejection.
+const execFileMock = mock((_file: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
+  callback(new Error('git missing'), '')
+})
+mock.module('node:child_process', () => ({ ...nodeChildProcess, execFile: execFileMock }))
 
 function makeV2Ctx() {
   const added: Array<Record<string, any>> = []
@@ -178,6 +189,7 @@ describe('createV2EventHandler', () => {
   test('a throwing handler does not stop later events', async () => {
     const handled: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionAppeared: async () => {},
       onSessionRenamed: async () => {},
       onMessageUpdated: async () => {},
       onSessionIdle: () => { handled.push('idle'); throw new Error('idle boom') },
@@ -191,6 +203,7 @@ describe('createV2EventHandler', () => {
 
   test('routes idle and step.ended onto the core handlers', async () => {    const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionAppeared: async () => {},
       onSessionRenamed: async () => {},
       onMessageUpdated: async () => {},
       onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
@@ -205,6 +218,7 @@ describe('createV2EventHandler', () => {
   test('drops incomplete events without calling the core handlers', async () => {
     const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionAppeared: async (sessionID) => { calls.push(`appeared:${sessionID}`) },
       onSessionRenamed: async () => {},
       onMessageUpdated: async () => {},
       onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
@@ -214,12 +228,15 @@ describe('createV2EventHandler', () => {
     await onEvent({ type: 'session.step.ended', data: { sessionID: 's1' } })
     await onEvent({ type: 'session.step.ended', data: { assistantMessageID: 'm1' } })
     await onEvent({ type: 'session.idle' })
+    await onEvent({ type: 'session.created', data: {} })
+    await onEvent({ type: 'session.execution.succeeded', data: {} })
     expect(calls).toEqual([])
   })
 
   test('routes rename, update and message events from the V2 data field', async () => {
     const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionAppeared: async () => {},
       onSessionRenamed: async (sessionID, title) => { calls.push(`renamed:${sessionID}:${title}`) },
       onMessageUpdated: async (info) => { calls.push(`message:${String(info.id)}`) },
       onSessionIdle: async () => {},
@@ -231,6 +248,41 @@ describe('createV2EventHandler', () => {
     // The V2 domain carries the same fields under `data`, not `properties`, so
     // a wrong extraction field leaves every one of these unrouted.
     expect(calls).toEqual(['renamed:s1:My Title', 'renamed:s2:Other Title', 'message:m1'])
+  })
+
+  test('routes a created session with its directory and a turn start without one', async () => {
+    const calls: Array<[string, string, string | undefined]> = []
+    const onEvent = createV2EventHandler({
+      onSessionAppeared: async (sessionID, directory) => { calls.push(['appeared', sessionID, directory]) },
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
+      onSessionIdle: async () => {},
+      onStepEnded: async () => {},
+    })
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/dir' } } })
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 's2' } })
+    // The appearance handling is fire-and-forget, so the handlers run after
+    // the pump has moved on; a macrotask tick drains their microtasks.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // The first turn is the reconcile for a plugin that loaded after the
+    // session appeared, so it binds with no directory to derive a name from.
+    expect(calls).toEqual([['appeared', 's1', '/repo/dir'], ['appeared', 's2', undefined]])
+  })
+
+  test('routes a successful execution onto the idle handler that restarts a feed', async () => {
+    const calls: string[] = []
+    const onEvent = createV2EventHandler({
+      onSessionAppeared: async () => {},
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
+      onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
+      onStepEnded: async () => {},
+    })
+    await onEvent({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
+    // Unknown events reach no handler at all.
+    await onEvent({ type: 'project.updated', data: { id: 'p1' } })
+    await onEvent({ type: 'session.usage.updated', data: { sessionID: 's1' } })
+    expect(calls).toEqual(['idle:s1'])
   })
 })
 
@@ -499,5 +551,96 @@ describe('toV2ToolResult', () => {
       { type: 'text', text: 'ok' },
       { type: 'file', uri: 'data:image/png;base64,AAA', mime: 'image/png', name: 'pic.png' },
     ])
+  })
+})
+
+describe('sessionLabel', () => {
+  const git = (answers: Record<string, string>) => async (_dir: string, args: string[]) => answers[args.join(' ')] ?? ''
+
+  test('derives the repo base name and carries a non-default branch', async () => {
+    const label = await sessionLabel('/repo', git({ 'rev-parse --show-toplevel': '/repo', 'branch --show-current': 'feat/561' }))
+    expect(label).toBe('repo@feat-561')
+  })
+
+  test('omits the conventional default branch names', async () => {
+    for (const branch of ['main', 'master']) {
+      const label = await sessionLabel('/repo', git({ 'rev-parse --show-toplevel': '/repo', 'branch --show-current': branch }))
+      expect(label).toBe('repo')
+    }
+  })
+
+  test('falls back to the directory base name when git fails', async () => {
+    const label = await sessionLabel('/home/me/avenor', git({}))
+    expect(label).toBe('avenor')
+  })
+
+  test('yields nothing without a directory', async () => {
+    expect(await sessionLabel(undefined, git({}))).toBe('')
+  })
+
+  test('falls back to the directory base name when the repo top level is a reserved reference', async () => {
+    // A repo named `self` with an ordinary working directory yields the
+    // directory's own base name, not nothing.
+    const label = await sessionLabel('/repos/self/work', git({ 'rev-parse --show-toplevel': '/repos/self', 'branch --show-current': 'main' }))
+    expect(label).toBe('work')
+  })
+
+  test('yields nothing for a reserved reference rather than a name the broker refuses', async () => {
+    // Both the derived repo name and the basename fallback hit the exclusion.
+    expect(await sessionLabel('/home/me/self', git({ 'rev-parse --show-toplevel': '/home/me/self', 'branch --show-current': 'main' }))).toBe('')
+    expect(await sessionLabel('/home/me/self', git({}))).toBe('')
+  })
+
+  test('sanitizes separators and collapsing whitespace', async () => {
+    expect(sanitizeSessionLabel('my repo\\dir name')).toBe('my-repo-dir-name')
+    expect(sanitizeSessionLabel('--dashes--in--a--row--')).toBe('dashes-in-a-row')
+    expect(sanitizeSessionLabel('a\u0000b')).toBe('ab')
+  })
+
+  test('accepts a 64-rune label containing an astral rune and never passes a longer one whole', async () => {
+    // 63 BMP runes plus one supplementary rune: 64 code points but 65 UTF-16
+    // code units, so a code-unit length check would refuse it.
+    const fits = await sessionLabel('/' + 'a'.repeat(63) + '𝄞', git({}))
+    expect(fits).toBe('a'.repeat(63) + '𝄞')
+    // A 65-rune name is beyond the broker's limit, so the derivation must not
+    // return it whole.
+    const tooLong = await sessionLabel('/' + 'a'.repeat(64) + '𝄞', git({}))
+    expect(Array.from(tooLong).length).toBeLessThanOrEqual(64)
+    expect(tooLong).not.toBe('a'.repeat(64) + '𝄞')
+  })
+
+  test('truncates to 64 runes without splitting a surrogate pair', async () => {
+    // 63 BMP runes plus one supplementary rune: 64 runes but 65 code units, so
+    // a code-unit slice would cut the pair in two.
+    const label = sanitizeSessionLabel('a'.repeat(63) + '𝄞' + '-tail')
+    expect(label).toBe('a'.repeat(63) + '𝄞')
+  })
+})
+
+describe('defaultGitReader', () => {
+  beforeEach(() => {
+    execFileMock.mockImplementation((_file: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
+      callback(new Error('git missing'), '')
+    })
+  })
+
+  afterEach(() => {
+    execFileMock.mockClear()
+  })
+
+  test('resolves an empty label when git errors, never rejecting', async () => {
+    // An error falls through to the directory base name; nothing here may
+    // reject, or the once-per-session attempt would leave a bound conversation
+    // unnamed forever.
+    await expect(sessionLabel('/repo/avenor')).resolves.toBe('avenor')
+  })
+
+  test('resolves an empty label when git is killed by its timeout', async () => {
+    execFileMock.mockImplementation((_file: string, _args: string[], options: unknown, callback: (error: Error | null, stdout: string) => void) => {
+      // The reader bounds each git call at five seconds.
+      expect((options as { timeout?: number }).timeout).toBe(5000)
+      callback(Object.assign(new Error('command failed'), { killed: true, signal: 'SIGTERM' }), '')
+    })
+    await expect(sessionLabel('/repo/avenor')).resolves.toBe('avenor')
   })
 })

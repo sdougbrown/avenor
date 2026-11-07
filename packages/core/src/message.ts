@@ -488,6 +488,23 @@ function outcomeText(
   }
 }
 
+/** The session display-name limit, in code points: the 1-64 rule the broker's
+ * name writers share. */
+export const MAX_SESSION_NAME_RUNES = 64
+
+/** The references resolution answers before any label is read: the self alias
+ * resolveTarget substitutes, and the supervisor session's own run id. A label
+ * spelled as either could never be reached by name, and the broker refuses
+ * both as session names. */
+export const RESERVED_SESSION_REFERENCES: ReadonlySet<string> = new Set(['self', 'supervisor'])
+
+/** Remove the runes no session name may hold: control, format, line- and
+ * paragraph-separator characters, so a stored value cannot render as
+ * something it is not. */
+export function stripDisallowedSessionNameRunes(name: string): string {
+  return name.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
+}
+
 async function resolveTarget(provider: MessageProvider, ref: string) {
   const target = ref === 'self' ? provider.caller().runId : ref
   let resolution

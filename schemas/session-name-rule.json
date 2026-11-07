@@ -1,0 +1,236 @@
+{
+  "version": 1,
+  "description": "Shared conformance fixture for the one session display-name rule. This is NOT a wire schema: it pins the rule values and case tables that both the Go side (messaging.ValidSessionName and messaging.StripDisallowedIdentifierRunes in internal/messaging, the label sanitation in internal/stable) and the TypeScript side (the label pipeline in packages/opencode/src/label.ts plus the core rune helpers it imports) must reproduce, so a change on either side that the other does not follow fails a test instead of leaving conversations silently unnamed. 'cases' holds names the rule accepts or refuses; 'disallowedRunes' marks the cases whose input holds runes no identifier may hold, which is what the strip path must remove. 'sanitizeCases' holds inputs mapped to the exact label the derivation must produce. Non-ascii runes are spelled as escapes so the fixture stays diffable.",
+  "limit": 64,
+  "reservedReferences": [
+    "self",
+    "supervisor"
+  ],
+  "cases": [
+    {
+      "name": "plain ascii",
+      "input": "avenor",
+      "valid": true,
+      "disallowedRunes": false
+    },
+    {
+      "name": "limit-length ascii",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": true,
+      "disallowedRunes": false
+    },
+    {
+      "name": "one rune past the limit",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "valid": false,
+      "disallowedRunes": false
+    },
+    {
+      "name": "astral runes at the limit still count as 64 runes",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83c\udf82\ud83c\udf82\ud83c\udf82\ud83c\udf82",
+      "valid": true,
+      "disallowedRunes": false
+    },
+    {
+      "name": "limit-length plus one astral rune counts as 65 runes",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83c\udf82",
+      "valid": false,
+      "disallowedRunes": false
+    },
+    {
+      "name": "astral rune outside the bmp",
+      "input": "\ud83c\udfae-lab",
+      "valid": true,
+      "disallowedRunes": false
+    },
+    {
+      "name": "empty reference",
+      "input": "",
+      "valid": false,
+      "disallowedRunes": false
+    },
+    {
+      "name": "self alias is reserved",
+      "input": "self",
+      "valid": false,
+      "disallowedRunes": false
+    },
+    {
+      "name": "supervisor run id is reserved",
+      "input": "supervisor",
+      "valid": false,
+      "disallowedRunes": false
+    },
+    {
+      "name": "reserved match is exact",
+      "input": "Self",
+      "valid": true,
+      "disallowedRunes": false
+    },
+    {
+      "name": "tab control rune",
+      "input": "avenor\tlab",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "newline control rune",
+      "input": "avenor\nlab",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "nul control rune",
+      "input": "avenor\u0000lab",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "zero-width joiner format rune",
+      "input": "avenor\u200dlab",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "zero-width space format rune",
+      "input": "avenor\u200blab",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "byte order mark format rune",
+      "input": "\ufeffavenor",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "soft hyphen format rune",
+      "input": "avenor\u00adlab",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "line separator rune",
+      "input": "avenor\u2028lab",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "paragraph separator rune",
+      "input": "avenor\u2029lab",
+      "valid": false,
+      "disallowedRunes": true
+    },
+    {
+      "name": "space is allowed",
+      "input": "avenor lab",
+      "valid": true,
+      "disallowedRunes": false
+    },
+    {
+      "name": "ideographic space is allowed",
+      "input": "avenor\u3000lab",
+      "valid": true,
+      "disallowedRunes": false
+    },
+    {
+      "name": "hyphens and digits",
+      "input": "avenor-561-onappear",
+      "valid": true,
+      "disallowedRunes": false
+    },
+    {
+      "name": "non-ascii letters",
+      "input": "\u30a2\u30d9\u30ca\u30fc",
+      "valid": true,
+      "disallowedRunes": false
+    }
+  ],
+  "sanitizeCases": [
+    {
+      "name": "clean input is its own label",
+      "input": "avenor",
+      "label": "avenor"
+    },
+    {
+      "name": "space becomes a separator",
+      "input": "my repo",
+      "label": "my-repo"
+    },
+    {
+      "name": "space run collapses to one separator",
+      "input": "my   repo",
+      "label": "my-repo"
+    },
+    {
+      "name": "path separator becomes a separator",
+      "input": "my/repo",
+      "label": "my-repo"
+    },
+    {
+      "name": "windows path separator becomes a separator",
+      "input": "my\\repo",
+      "label": "my-repo"
+    },
+    {
+      "name": "mixed separators collapse",
+      "input": "my / repo",
+      "label": "my-repo"
+    },
+    {
+      "name": "separator run collapses",
+      "input": "my--repo",
+      "label": "my-repo"
+    },
+    {
+      "name": "leading and trailing separators trim",
+      "input": "-my-repo-",
+      "label": "my-repo"
+    },
+    {
+      "name": "surrounding whitespace trims",
+      "input": "  spaced  out  ",
+      "label": "spaced-out"
+    },
+    {
+      "name": "nul control rune drops",
+      "input": "my\u0000repo",
+      "label": "myrepo"
+    },
+    {
+      "name": "tab control rune drops rather than maps",
+      "input": "my\trepo",
+      "label": "myrepo"
+    },
+    {
+      "name": "zero-width space format rune drops",
+      "input": "my\u200brepo",
+      "label": "myrepo"
+    },
+    {
+      "name": "astral rune survives",
+      "input": "\ud83c\udfae lab",
+      "label": "\ud83c\udfae-lab"
+    },
+    {
+      "name": "non-ascii letters keep their separator",
+      "input": "\u30a2\u30d9\u30ca\u30fc \u30e9\u30dc",
+      "label": "\u30a2\u30d9\u30ca\u30fc-\u30e9\u30dc"
+    },
+    {
+      "name": "truncates to the limit",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "truncation then trims the separator at the cut",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbb",
+      "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "truncation keeps whole astral runes",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83c\udf82\ud83c\udf82",
+      "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83c\udf82"
+    }
+  ]
+}
