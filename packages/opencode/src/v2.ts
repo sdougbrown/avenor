@@ -181,12 +181,17 @@ export function createV2EventHandler(
       // reconciles a plugin that loaded after the session already existed.
       // Every later turn start reaches the handler too — deliberate, not a
       // missed dedup: the bind is idempotent, so a repeat event takes no
-      // second identity.
+      // second identity. The handling is fire-and-forget: a bind or git read
+      // held open must never hold this pump — turn publishing, renames and
+      // feed restarts keep moving — so the floating promise carries its own
+      // containment here.
       if (event.type === 'session.created' || event.type === 'session.execution.started') {
         const data = event.data as { sessionID?: unknown; location?: { directory?: unknown } } | undefined
         if (typeof data?.sessionID === 'string') {
           const directory = typeof data.location?.directory === 'string' ? data.location.directory : undefined
-          await core.onSessionAppeared(data.sessionID, directory)
+          void core.onSessionAppeared(data.sessionID, directory).catch(error => {
+            console.error('[avenor] session appearance handling failed:', error instanceof Error ? error.message : error)
+          })
         }
         return
       }

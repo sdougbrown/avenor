@@ -251,6 +251,9 @@ describe('createV2EventHandler', () => {
     })
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/dir' } } })
     await onEvent({ type: 'session.execution.started', data: { sessionID: 's2' } })
+    // The appearance handling is fire-and-forget, so the handlers run after
+    // the pump has moved on; a macrotask tick drains their microtasks.
+    await new Promise(resolve => setTimeout(resolve, 0))
     // The first turn is the reconcile for a plugin that loaded after the
     // session appeared, so it binds with no directory to derive a name from.
     expect(calls).toEqual([['appeared', 's1', '/repo/dir'], ['appeared', 's2', undefined]])

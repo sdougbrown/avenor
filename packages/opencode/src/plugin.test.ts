@@ -1597,7 +1597,21 @@ describe('AvenorPlugin', () => {
     expect(spawnProcessMock).toHaveBeenCalledTimes(1)
   })
 
-  it('reconciles a missed creation on the first turn and keeps the native title', async () => {
+  it('binds on the first turn when the creation was missed', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
+    await waitFor(() => messageBindMock.mock.calls.length === 1, 'the first-turn bind')
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    // No directory rode the turn event, so nothing is derived or named.
+    expect(sessionLabelMock).not.toHaveBeenCalled()
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toEqual([])
+  })
+
+  it('keeps a remembered native title over the derived label', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
       { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
@@ -1607,12 +1621,69 @@ describe('AvenorPlugin', () => {
     await (core as unknown as { event: (input: { event: unknown }) => Promise<void> }).event({
       event: { type: 'session.renamed', properties: { sessionID: 'session-1', title: 'Chosen Name' } },
     })
-    await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
+    await onEvent({ type: 'session.created', data: { sessionID: 'session-1', location: { directory: '/repo/avenor' } } })
     await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the native title to publish')
     expect(messageBindMock).toHaveBeenCalledTimes(1)
     expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'Chosen Name' })
     // A human-named session never consults the derivation.
     expect(sessionLabelMock).not.toHaveBeenCalled()
+  })
+
+  it('never lets the derived label replace a title that lands during the derivation', async () => {
+    const reads: Array<(title: string | undefined) => void> = []
+    const core = createAvenorCore(
+      {
+        promptAsync: async () => {},
+        getMessage: async () => undefined,
+        getSessionTitle: () => new Promise<string | undefined>(resolve => reads.push(resolve)),
+      },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    // The derivation is held open while the bind's own title read answers.
+    let resolveLabel: (label: string) => void = () => {}
+    sessionLabelMock.mockImplementation(() => new Promise<string>(resolve => { resolveLabel = resolve }))
+    const appearance = (core as unknown as {
+      onSessionAppeared: (sessionID: string, directory?: string) => Promise<void>
+    }).onSessionAppeared('session-1', '/repo/avenor')
+    await waitFor(() => sessionLabelMock.mock.calls.length === 1, 'the derivation to start')
+
+    // The bind's title read lands while git runs: the native name publishes
+    // first and is what the broker must keep.
+    reads.shift()?.('Native Name')
+    await flush()
+    await flushMicrotasks()
+    resolveLabel('avenor@feat')
+    await appearance
+    const publishes = postBrokerCalls.filter(call => call.path === '/session_name')
+    expect(publishes).toHaveLength(1)
+    expect(publishes[0]?.body).toEqual({ name: 'Native Name' })
+  })
+
+  it('derives a label at most once per session, even when the derivation yields nothing', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => sessionLabelMock.mock.calls.length === 1, 'the first derivation')
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 's1' } })
+    await flush()
+    await flushMicrotasks()
+    expect(sessionLabelMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+
+    // A derivation that names nothing is remembered as attempted too: a
+    // repository spelled like a reserved reference costs one git run, not two
+    // per turn.
+    sessionLabelMock.mockImplementation(async () => '')
+    await onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/repo/self' } } })
+    await waitFor(() => sessionLabelMock.mock.calls.length === 2, 'the empty derivation')
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 's2' } })
+    await flush()
+    await flushMicrotasks()
+    expect(sessionLabelMock).toHaveBeenCalledTimes(2)
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
   })
 
   it('restarts a bound conversation\'s feed when its execution succeeds', async () => {
@@ -1622,7 +1693,7 @@ describe('AvenorPlugin', () => {
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
-    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    await waitFor(() => spawnProcessMock.mock.calls.length === 1, 'the first-turn consumer to start')
     const child = spawnProcessMock.mock.results[0]?.value as any
     child.emit('exit', 0, null)
     child.emit('close', 0, null)
@@ -1648,7 +1719,9 @@ describe('AvenorPlugin', () => {
       type: 'session.created',
       data: { sessionID: 'session-1', location: { directory: '/repo/avenor' } },
     })).resolves.toBeUndefined()
-    // Without a bind the session gains no consumer and no name.
+    await flush()
+    // Without a bind the session gains no consumer and no name, and the
+    // fire-and-forget handling rejects nothing to the pump.
     expect(spawnProcessMock).not.toHaveBeenCalled()
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toEqual([])
   })
