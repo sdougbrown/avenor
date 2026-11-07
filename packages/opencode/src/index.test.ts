@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { tool } from '@opencode-ai/plugin'
 
 import plugin, { createV2EventHandler, evaluatePermissionAsk, permissionAskFromEvent, setupAvenor, stepEndedInfo, toV2ToolResult, v2Host, v2ToolEntry } from './index.js'
+import { sanitizeSessionLabel, sessionLabel } from './label.js'
 
 function makeV2Ctx() {
   const added: Array<Record<string, any>> = []
@@ -178,6 +179,7 @@ describe('createV2EventHandler', () => {
   test('a throwing handler does not stop later events', async () => {
     const handled: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionAppeared: async () => {},
       onSessionRenamed: async () => {},
       onMessageUpdated: async () => {},
       onSessionIdle: () => { handled.push('idle'); throw new Error('idle boom') },
@@ -191,6 +193,7 @@ describe('createV2EventHandler', () => {
 
   test('routes idle and step.ended onto the core handlers', async () => {    const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionAppeared: async () => {},
       onSessionRenamed: async () => {},
       onMessageUpdated: async () => {},
       onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
@@ -205,6 +208,7 @@ describe('createV2EventHandler', () => {
   test('drops incomplete events without calling the core handlers', async () => {
     const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionAppeared: async (sessionID) => { calls.push(`appeared:${sessionID}`) },
       onSessionRenamed: async () => {},
       onMessageUpdated: async () => {},
       onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
@@ -214,12 +218,15 @@ describe('createV2EventHandler', () => {
     await onEvent({ type: 'session.step.ended', data: { sessionID: 's1' } })
     await onEvent({ type: 'session.step.ended', data: { assistantMessageID: 'm1' } })
     await onEvent({ type: 'session.idle' })
+    await onEvent({ type: 'session.created', data: {} })
+    await onEvent({ type: 'session.execution.succeeded', data: {} })
     expect(calls).toEqual([])
   })
 
   test('routes rename, update and message events from the V2 data field', async () => {
     const calls: string[] = []
     const onEvent = createV2EventHandler({
+      onSessionAppeared: async () => {},
       onSessionRenamed: async (sessionID, title) => { calls.push(`renamed:${sessionID}:${title}`) },
       onMessageUpdated: async (info) => { calls.push(`message:${String(info.id)}`) },
       onSessionIdle: async () => {},
@@ -231,6 +238,38 @@ describe('createV2EventHandler', () => {
     // The V2 domain carries the same fields under `data`, not `properties`, so
     // a wrong extraction field leaves every one of these unrouted.
     expect(calls).toEqual(['renamed:s1:My Title', 'renamed:s2:Other Title', 'message:m1'])
+  })
+
+  test('routes a created session with its directory and a turn start without one', async () => {
+    const calls: Array<[string, string, string | undefined]> = []
+    const onEvent = createV2EventHandler({
+      onSessionAppeared: async (sessionID, directory) => { calls.push(['appeared', sessionID, directory]) },
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
+      onSessionIdle: async () => {},
+      onStepEnded: async () => {},
+    })
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/dir' } } })
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 's2' } })
+    // The first turn is the reconcile for a plugin that loaded after the
+    // session appeared, so it binds with no directory to derive a name from.
+    expect(calls).toEqual([['appeared', 's1', '/repo/dir'], ['appeared', 's2', undefined]])
+  })
+
+  test('routes a successful execution onto the idle handler that restarts a feed', async () => {
+    const calls: string[] = []
+    const onEvent = createV2EventHandler({
+      onSessionAppeared: async () => {},
+      onSessionRenamed: async () => {},
+      onMessageUpdated: async () => {},
+      onSessionIdle: async (sessionID) => { calls.push(`idle:${sessionID}`) },
+      onStepEnded: async () => {},
+    })
+    await onEvent({ type: 'session.execution.succeeded', data: { sessionID: 's1' } })
+    // Unknown events reach no handler at all.
+    await onEvent({ type: 'project.updated', data: { id: 'p1' } })
+    await onEvent({ type: 'session.usage.updated', data: { sessionID: 's1' } })
+    expect(calls).toEqual(['idle:s1'])
   })
 })
 
@@ -499,5 +538,48 @@ describe('toV2ToolResult', () => {
       { type: 'text', text: 'ok' },
       { type: 'file', uri: 'data:image/png;base64,AAA', mime: 'image/png', name: 'pic.png' },
     ])
+  })
+})
+
+describe('sessionLabel', () => {
+  const git = (answers: Record<string, string>) => async (_dir: string, args: string[]) => answers[args.join(' ')] ?? ''
+
+  test('derives the repo base name and carries a non-default branch', async () => {
+    const label = await sessionLabel('/repo', git({ 'rev-parse --show-toplevel': '/repo', 'branch --show-current': 'feat/561' }))
+    expect(label).toBe('repo@feat-561')
+  })
+
+  test('omits the conventional default branch names', async () => {
+    for (const branch of ['main', 'master']) {
+      const label = await sessionLabel('/repo', git({ 'rev-parse --show-toplevel': '/repo', 'branch --show-current': branch }))
+      expect(label).toBe('repo')
+    }
+  })
+
+  test('falls back to the directory base name when git fails', async () => {
+    const label = await sessionLabel('/home/me/avenor', git({}))
+    expect(label).toBe('avenor')
+  })
+
+  test('yields nothing without a directory', async () => {
+    expect(await sessionLabel(undefined, git({}))).toBe('')
+  })
+
+  test('yields nothing for a reserved reference rather than a name the broker refuses', async () => {
+    // Both the derived repo name and the basename fallback hit the exclusion.
+    expect(await sessionLabel('/home/me/self', git({ 'rev-parse --show-toplevel': '/home/me/self', 'branch --show-current': 'main' }))).toBe('')
+    expect(await sessionLabel('/home/me/self', git({}))).toBe('')
+  })
+
+  test('sanitizes separators and collapsing whitespace', async () => {
+    expect(sanitizeSessionLabel('my repo\\dir name')).toBe('my-repo-dir-name')
+    expect(sanitizeSessionLabel('--dashes--in--a--row--')).toBe('dashes-in-a-row')
+    expect(sanitizeSessionLabel('a\u0000b')).toBe('ab')
+  })
+
+  test('truncates to 64 runes without splitting one', async () => {
+    const label = sanitizeSessionLabel('☃'.repeat(70) + '-tail')
+    expect(Array.from(label)).toHaveLength(64)
+    expect(label.startsWith('☃')).toBe(true)
   })
 })

@@ -20,7 +20,7 @@ import workflowConformance from '../../../schemas/workflow_route.conformance.jso
 import resultFixture from '../../../schemas/message_route.result.json'
 import { peersDetails, resultOutput } from '../../core/src/message.js'
 import type { AvenorCoreOptions } from './core.js'
-import { v2Host } from './v2.js'
+import { createV2EventHandler, v2Host } from './v2.js'
 
 type ToolArgs = Record<string, unknown>
 type ToolOutput = Record<string, unknown>
@@ -300,6 +300,11 @@ mock.module('./process.js', () => ({
   spawnAvenorProcess: spawnProcessMock,
   runAvenorCommand: runCommandMock,
 }))
+/** The derived default label; each test sees the label this returns. */
+const sessionLabelMock = mock(async (_dir?: string) => 'avenor@feat')
+mock.module('./label.js', () => ({
+  sessionLabel: sessionLabelMock,
+}))
 const originalFetch = globalThis.fetch
 
 function makeClient(promptAsync = mock(async (_args: PromptArgs) => {})) {
@@ -396,6 +401,8 @@ beforeEach(() => {
   spawnProcessMock.mockClear()
   runCommandMock.mockClear()
   runCommandMock.mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }))
+  sessionLabelMock.mockClear()
+  sessionLabelMock.mockImplementation(async (_dir?: string) => 'avenor@feat')
   resultToolMock.mockClear()
   shutdownToolMock.mockClear()
   killToolMock.mockClear()
@@ -1560,6 +1567,90 @@ describe('AvenorPlugin', () => {
     // A dead consumer is re-answered from the owner bind, which re-reads the
     // credentials instead of reusing the cached ones blindly.
     expect(messageBindMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('binds a session when it appears and names it from its directory', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 'session-1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the derived name to publish')
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(messageBindMock.mock.calls[0]?.[0]).toMatchObject({ host: 'opencode', session_id: 'session-1' })
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+
+    // The first turn after creation reaches an already-bound session: no
+    // second identity, no second consumer, no republished name.
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
+    await flush()
+    await flushMicrotasks()
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
+
+    // The first-turn messaging bind is the same cached identity.
+    await (core.tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('reconciles a missed creation on the first turn and keeps the native title', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    // A rename before the bind is remembered as the native title.
+    await (core as unknown as { event: (input: { event: unknown }) => Promise<void> }).event({
+      event: { type: 'session.renamed', properties: { sessionID: 'session-1', title: 'Chosen Name' } },
+    })
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the native title to publish')
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'Chosen Name' })
+    // A human-named session never consults the derivation.
+    expect(sessionLabelMock).not.toHaveBeenCalled()
+  })
+
+  it('restarts a bound conversation\'s feed when its execution succeeds', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
+    expect(spawnProcessMock).toHaveBeenCalledTimes(1)
+    const child = spawnProcessMock.mock.results[0]?.value as any
+    child.emit('exit', 0, null)
+    child.emit('close', 0, null)
+    await flush()
+
+    // Turn end on this generation is the feed-restart trigger: the bind is
+    // re-answered and a fresh consumer starts.
+    await onEvent({ type: 'session.execution.succeeded', data: { sessionID: 'session-1' } })
+    expect(messageBindMock).toHaveBeenCalledTimes(2)
+    expect(spawnProcessMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a failed bind on a created session from rejecting the event', async () => {
+    messageBindMock.mockImplementation(async () => {
+      throw new Error('broker down')
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+    )
+    const onEvent = createV2EventHandler(core)
+    await expect(onEvent({
+      type: 'session.created',
+      data: { sessionID: 'session-1', location: { directory: '/repo/avenor' } },
+    })).resolves.toBeUndefined()
+    // Without a bind the session gains no consumer and no name.
+    expect(spawnProcessMock).not.toHaveBeenCalled()
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toEqual([])
   })
 
   it('waits for the old consumer to close before a replacement claims the inbox', async () => {

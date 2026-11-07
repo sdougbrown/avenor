@@ -4,6 +4,7 @@ import { tool } from '@opencode-ai/plugin'
 import * as readline from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
 import { spawnAvenorProcess as defaultSpawnProcess, runAvenorCommand as defaultRunCommand } from './process.js'
+import { sessionLabel } from './label.js'
 import {
   formatAnswerPermissionOutput,
   formatEventsOutput,
@@ -469,6 +470,7 @@ export function stepEndedInfo(
  */
 export type AvenorCore = Hooks & {
   onSessionIdle(sessionID: string): Promise<void>
+  onSessionAppeared(sessionID: string, directory?: string): Promise<void>
   onSessionRenamed(sessionID: string, title: string | undefined): Promise<void>
   onMessageUpdated(info: Record<string, unknown>): Promise<void>
   onPermissionAsk(permission: PermissionAsk): Promise<void>
@@ -1657,6 +1659,28 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
   }
 
   /**
+   * Bind a conversation the moment the host shows it: the session's created
+   * event, or the session's first turn when the plugin loaded after the
+   * session already existed. Binding gives the conversation its run, feed and
+   * name before its first messaging call, and an already-bound session takes
+   * no second identity. A conversation no human has named is named from the
+   * directory the appearing event carries: a native title — remembered from an
+   * earlier rename or read at bind time — always outranks the derived label,
+   * and a later rename outranks a published default.
+   */
+  const onSessionAppeared = async (sessionID: string, directory?: string): Promise<void> => {
+    try {
+      await bindConversation(sessionID)
+    } catch (error) {
+      console.error(`[avenor] conversation bind failed for session ${sessionID}:`, error instanceof Error ? error.message : error)
+      return
+    }
+    if (directory === undefined || typeof sessionTitles.get(sessionID) === 'string') return
+    const label = await sessionLabel(directory)
+    if (label !== '') await publishSessionTitle(sessionID, label)
+  }
+
+  /**
    * The V2 step event carries only the session and message IDs, so the settled
    * assistant message is read here and projected onto the same info shape the
    * V1 message.updated event carried.
@@ -2126,6 +2150,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     // Handlers the V2 adapter registers through its own domains; the hooks
     // above are the V1 spellings of the same behavior.
     onSessionIdle,
+    onSessionAppeared,
     onSessionRenamed,
     onMessageUpdated,
     onPermissionAsk,

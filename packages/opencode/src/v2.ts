@@ -173,10 +173,23 @@ type V2Event = { type: string; data?: unknown }
  * monitors and publish turns.
  */
 export function createV2EventHandler(
-  core: Pick<AvenorCore, 'onSessionIdle' | 'onSessionRenamed' | 'onMessageUpdated' | 'onStepEnded'>,
+  core: Pick<AvenorCore, 'onSessionIdle' | 'onSessionAppeared' | 'onSessionRenamed' | 'onMessageUpdated' | 'onStepEnded'>,
 ) {
   return async (event: V2Event): Promise<void> => {
     try {
+      // A session appears when the host reports its creation; the first turn
+      // reconciles a plugin that loaded after the session already existed.
+      // Every later turn start reaches the handler too — deliberate, not a
+      // missed dedup: the bind is idempotent, so a repeat event takes no
+      // second identity.
+      if (event.type === 'session.created' || event.type === 'session.execution.started') {
+        const data = event.data as { sessionID?: unknown; location?: { directory?: unknown } } | undefined
+        if (typeof data?.sessionID === 'string') {
+          const directory = typeof data.location?.directory === 'string' ? data.location.directory : undefined
+          await core.onSessionAppeared(data.sessionID, directory)
+        }
+        return
+      }
       if (event.type === 'session.idle') {
         const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID
         if (sessionID) await core.onSessionIdle(sessionID)
@@ -208,6 +221,13 @@ export function createV2EventHandler(
         if (data?.sessionID && data?.assistantMessageID) {
           await core.onStepEnded(data.sessionID, data.assistantMessageID)
         }
+        return
+      }
+      // Turn end on the hosts that report the execution lifecycle; the idle
+      // mapping above stays for the generations that still emit it.
+      if (event.type === 'session.execution.succeeded') {
+        const sessionID = (event.data as { sessionID?: string } | undefined)?.sessionID
+        if (sessionID) await core.onSessionIdle(sessionID)
       }
     } catch (error) {
       console.error('[avenor] event handling failed:', error instanceof Error ? error.message : error)
