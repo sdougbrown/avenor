@@ -48,11 +48,13 @@ export function sanitizeSessionLabel(label: string): string {
   return truncated.replace(/^-+|-+$/g, '')
 }
 
-function labelUsable(label: string): boolean {
+export function labelUsable(label: string): boolean {
   // The name rule counts runes (code points), so the limit check must too: a
   // code-unit length would refuse a limit-length label holding an astral rune.
   const runes = Array.from(label).length
-  return runes > 0 && runes <= MAX_SESSION_NAME_RUNES && !RESERVED_SESSION_REFERENCES.has(label)
+  // A name is unusable when stripping it changes it: it held a rune no
+  // identifier may hold, the same class ValidSessionName refuses.
+  return runes > 0 && runes <= MAX_SESSION_NAME_RUNES && !RESERVED_SESSION_REFERENCES.has(label) && stripDisallowedSessionNameRunes(label) === label
 }
 
 /**
