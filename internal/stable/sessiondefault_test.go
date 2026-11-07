@@ -13,7 +13,7 @@ import (
 
 // gitRepoWithBranch creates a git repository with the named branch checked
 // out and returns its path. No commit is made: the label derivation reads
-// only the .git layout and HEAD.
+// only the checked-out branch and the top-level path.
 func gitRepoWithBranch(t *testing.T, branch string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -24,22 +24,16 @@ func gitRepoWithBranch(t *testing.T, branch string) string {
 	return dir
 }
 
-// writeFakeGitDir plants a .git directory whose only content is a HEAD file,
-// enough for the label derivation's git layout reads.
-func writeFakeGitDir(t *testing.T, dir, head string) string {
+// gitCommit records one empty seed commit, so the repository has a HEAD a
+// checkout can detach from.
+func gitCommit(t *testing.T, dir string) {
 	t.Helper()
-	gitDir := filepath.Join(dir, ".git")
-	if err := os.MkdirAll(gitDir, 0o755); err != nil {
-		t.Fatalf("mkdir .git: %v", err)
+	out, err := exec.Command("git", "-C", dir, "-c", "user.email=test@example.com",
+		"-c", "user.name=test", "commit", "--allow-empty", "-q", "-m", "seed").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git commit: %v: %s", err, out)
 	}
-	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte(head), 0o644); err != nil {
-		t.Fatalf("write HEAD: %v", err)
-	}
-	return dir
 }
-
-// detachedHead is a HEAD line that names a commit, not a branch.
-const detachedHead = "0123456789abcdef0123456789abcdef01234567\n"
 
 func TestSupervisorRegistersWorkDerivedLabel(t *testing.T) {
 	repo := gitRepoWithBranch(t, "feature/derived-name")
@@ -83,6 +77,147 @@ func TestSupervisorUsesProcessWorkingDirWithoutConfig(t *testing.T) {
 	}
 	if label == messaging.SupervisorRunID {
 		t.Fatalf("supervisor display name is the run id %q", label)
+	}
+}
+
+// TestSupervisorRegisteredLabelSuffixesOnBrokerCollision drives the real
+// collision seam: another run on the supervisor's own broker wears the label
+// the working directory derives, and the pick must suffix — through
+// broker.MatchLabel and the own-run exclusion, not a fake predicate.
+func TestSupervisorRegisteredLabelSuffixesOnBrokerCollision(t *testing.T) {
+	repo := gitRepoWithBranch(t, "feature/shared")
+	sup := newTestSupervisor(t, Config{WorkingDir: repo})
+	base := filepath.Base(repo) + "@feature-shared"
+	// No collision at registration: the supervisor wears the derived label.
+	if got := sup.broker.DisplayName(messaging.SupervisorRunID); got != base {
+		t.Fatalf("supervisor display name = %q, want %q", got, base)
+	}
+	// Another run takes the label; the broker now resolves it to both runs.
+	if _, _, err := sup.broker.EnsureRun("rt_peer", base); err != nil {
+		t.Fatalf("seed peer run: %v", err)
+	}
+	matches := sup.broker.MatchLabel(base)
+	if len(matches) != 2 || matches[0] != "rt_peer" || matches[1] != messaging.SupervisorRunID {
+		t.Fatalf("MatchLabel(%q) = %v, want rt_peer and the supervisor run", base, matches)
+	}
+	// The pick seam excludes the supervisor's own run, so the label a supervisor
+	// registering in this broker now would take is the first free suffix.
+	if !sup.labelHeldByAnotherRun(base) {
+		t.Fatal("labelHeldByAnotherRun = false, want the peer's label held")
+	}
+	if got := pickSessionLabel(DefaultSessionLabel(repo), sup.labelHeldByAnotherRun); got != base+"-2" {
+		t.Fatalf("label under broker collision = %q, want %q", got, base+"-2")
+	}
+}
+
+// TestDefaultSessionLabelSubdirCarriesRootName pins the usual supervisor
+// launch layout: the working directory sits below the repository root, and
+// the label names the root and its branch.
+func TestDefaultSessionLabelSubdirCarriesRootName(t *testing.T) {
+	repo := gitRepoWithBranch(t, "feature/derived-name")
+	sub := filepath.Join(repo, "sub", "dir")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	want := filepath.Base(repo) + "@feature-derived-name"
+	if got := DefaultSessionLabel(sub); got != want {
+		t.Fatalf("label = %q, want %q", got, want)
+	}
+}
+
+// TestDefaultSessionLabelDropsZeroWidthSpaceFromBranch pins the rune rule on
+// a real branch name: the zero-width space is dropped and the label passes
+// the name rule with the @branch suffix intact.
+func TestDefaultSessionLabelDropsZeroWidthSpaceFromBranch(t *testing.T) {
+	repo := gitRepoWithBranch(t, "feat/\u200bwide")
+	label := DefaultSessionLabel(repo)
+	want := filepath.Base(repo) + "@feat-wide"
+	if label != want {
+		t.Fatalf("label = %q, want %q", label, want)
+	}
+	if !messaging.ValidSessionName(label) {
+		t.Fatalf("label %q fails the session name rule", label)
+	}
+}
+
+func TestDefaultSessionLabelSanitizesBranchName(t *testing.T) {
+	repo := gitRepoWithBranch(t, "feat/deep/name")
+	want := filepath.Base(repo) + "@feat-deep-name"
+	if got := DefaultSessionLabel(repo); got != want {
+		t.Fatalf("label = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultSessionLabelTruncatesToTheNameLimit(t *testing.T) {
+	repo := gitRepoWithBranch(t, strings.Repeat("b", 80))
+	prefix := filepath.Base(repo) + "@"
+	want := prefix + strings.Repeat("b", messaging.MaxSessionNameRunes-len([]rune(prefix)))
+	if got := DefaultSessionLabel(repo); got != want {
+		t.Fatalf("label = %q, want %q", got, want)
+	}
+	if got := []rune(DefaultSessionLabel(repo)); len(got) != messaging.MaxSessionNameRunes {
+		t.Fatalf("label carries %d runes, want %d", len(got), messaging.MaxSessionNameRunes)
+	}
+}
+
+func TestDefaultSessionLabelDetachedHeadOmitsBranch(t *testing.T) {
+	repo := gitRepoWithBranch(t, "feature/derived-name")
+	gitCommit(t, repo)
+	out, err := exec.Command("git", "-C", repo, "checkout", "-q", "--detach", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git checkout --detach: %v: %s", err, out)
+	}
+	want := filepath.Base(repo)
+	if got := DefaultSessionLabel(repo); got != want {
+		t.Fatalf("label = %q, want %q", got, want)
+	}
+}
+
+// TestDefaultSessionLabelWorktreeCarriesWorktreeName pins the linked-worktree
+// layout: the top-level is the worktree checkout and the branch is its own.
+func TestDefaultSessionLabelWorktreeCarriesWorktreeName(t *testing.T) {
+	repo := gitRepoWithBranch(t, "main")
+	gitCommit(t, repo)
+	worktree := filepath.Join(t.TempDir(), "linked-checkout")
+	out, err := exec.Command("git", "-C", repo, "worktree", "add", "-q", "-b",
+		"feature/linked", worktree).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+	want := "linked-checkout" + "@feature-linked"
+	if got := DefaultSessionLabel(worktree); got != want {
+		t.Fatalf("label = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultSessionLabelNonRepoFallsBackToDirBase(t *testing.T) {
+	dir := t.TempDir()
+	if got := DefaultSessionLabel(dir); got != filepath.Base(dir) {
+		t.Fatalf("label = %q, want %q", got, filepath.Base(dir))
+	}
+}
+
+func TestDefaultSessionLabelNeverSupervisor(t *testing.T) {
+	repo := gitRepoWithBranch(t, "main")
+	// The repository root itself is named supervisor: the derived label would
+	// read as the run id, so the caller keeps its fallback label.
+	root := filepath.Join(filepath.Dir(repo), "supervisor")
+	if err := os.Rename(repo, root); err != nil {
+		t.Fatalf("rename repo root: %v", err)
+	}
+	if got := DefaultSessionLabel(root); got != "" {
+		t.Fatalf("label = %q, want the caller to keep its fallback label", got)
+	}
+}
+
+func TestDefaultSessionLabelExcludesReservedReferences(t *testing.T) {
+	repo := gitRepoWithBranch(t, "main")
+	root := filepath.Join(filepath.Dir(repo), "self")
+	if err := os.Rename(repo, root); err != nil {
+		t.Fatalf("rename repo root: %v", err)
+	}
+	if got := DefaultSessionLabel(root); got != "" {
+		t.Fatalf("label = %q, want the caller to keep its fallback label", got)
 	}
 }
 
@@ -159,87 +294,5 @@ func TestPickSessionLabelNeverReturnsAReservedReference(t *testing.T) {
 	}
 	if got := pickSessionLabel("", takenLabels()); got != fallbackSessionLabel {
 		t.Fatalf("label for an empty base = %q, want %q", got, fallbackSessionLabel)
-	}
-}
-
-func TestDefaultSessionLabelExcludesReservedReferences(t *testing.T) {
-	// A repository whose every derived candidate is a reserved reference yields
-	// no default label, so the caller keeps its fallback.
-	repo := writeFakeGitDir(t, filepath.Join(t.TempDir(), "self"), "ref: refs/heads/main\n")
-	if got := DefaultSessionLabel(repo); got != "" {
-		t.Fatalf("label = %q, want the caller to keep its fallback label", got)
-	}
-}
-
-func TestDefaultSessionLabelDetachedHeadOmitsBranch(t *testing.T) {
-	repo := writeFakeGitDir(t, t.TempDir(), detachedHead)
-	want := filepath.Base(repo)
-	if got := DefaultSessionLabel(repo); got != want {
-		t.Fatalf("label = %q, want %q", got, want)
-	}
-}
-
-func TestDefaultSessionLabelRepoOnDefaultBranchOmitsBranch(t *testing.T) {
-	repo := writeFakeGitDir(t, t.TempDir(), "ref: refs/heads/master\n")
-	want := filepath.Base(repo)
-	if got := DefaultSessionLabel(repo); got != want {
-		t.Fatalf("label = %q, want %q", got, want)
-	}
-}
-
-func TestDefaultSessionLabelWorktreeGitFile(t *testing.T) {
-	main := writeFakeGitDir(t, t.TempDir(), "ref: refs/heads/main\n")
-	gitDir := filepath.Join(main, ".git", "worktrees", "linked")
-	if err := os.MkdirAll(gitDir, 0o755); err != nil {
-		t.Fatalf("mkdir worktree git dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/feature/linked\n"), 0o644); err != nil {
-		t.Fatalf("write worktree HEAD: %v", err)
-	}
-	worktree := filepath.Join(t.TempDir(), "linked-checkout")
-	if err := os.MkdirAll(worktree, 0o755); err != nil {
-		t.Fatalf("mkdir worktree: %v", err)
-	}
-	gitFile := "gitdir: " + gitDir + "\n"
-	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte(gitFile), 0o644); err != nil {
-		t.Fatalf("write .git file: %v", err)
-	}
-	want := filepath.Base(worktree) + "@feature-linked"
-	if got := DefaultSessionLabel(worktree); got != want {
-		t.Fatalf("label = %q, want %q", got, want)
-	}
-}
-
-func TestDefaultSessionLabelNonRepoFallsBackToDirBase(t *testing.T) {
-	dir := t.TempDir()
-	if got := DefaultSessionLabel(dir); got != filepath.Base(dir) {
-		t.Fatalf("label = %q, want %q", got, filepath.Base(dir))
-	}
-}
-
-func TestDefaultSessionLabelSanitizesBranchName(t *testing.T) {
-	repo := writeFakeGitDir(t, t.TempDir(), "ref: refs/heads/feat/my work\n")
-	want := filepath.Base(repo) + "@feat-my-work"
-	if got := DefaultSessionLabel(repo); got != want {
-		t.Fatalf("label = %q, want %q", got, want)
-	}
-}
-
-func TestDefaultSessionLabelTruncatesToTheNameLimit(t *testing.T) {
-	base := strings.Repeat("r", 49)
-	repo := writeFakeGitDir(t, filepath.Join(t.TempDir(), base), "ref: refs/heads/"+strings.Repeat("b", 13)+" tail\n")
-	want := base + "@" + strings.Repeat("b", 13)
-	if got := DefaultSessionLabel(repo); got != want {
-		t.Fatalf("label = %q, want %q", got, want)
-	}
-	if got := []rune(DefaultSessionLabel(repo)); len(got) > messaging.MaxSessionNameRunes {
-		t.Fatalf("label carries %d runes", len(got))
-	}
-}
-
-func TestDefaultSessionLabelNeverSupervisor(t *testing.T) {
-	repo := writeFakeGitDir(t, filepath.Join(t.TempDir(), "supervisor"), "ref: refs/heads/main\n")
-	if got := DefaultSessionLabel(repo); got != "" {
-		t.Fatalf("label = %q, want the caller to keep its fallback label", got)
 	}
 }

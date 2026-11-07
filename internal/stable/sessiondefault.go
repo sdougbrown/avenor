@@ -1,19 +1,23 @@
 package stable
 
 import (
-	"os"
+	"context"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 )
 
-// defaultBranchNames are the branch names a session label does not carry:
-// a checkout of the default branch adds nothing the repository name alone
-// does not already say.
+// defaultBranchNames are the branch names a session label does not carry.
+// The repository's real default branch would mean resolving origin/HEAD — a
+// config or network read on every derivation — so the derivation treats the
+// two conventional names as the default ones instead and carries any other
+// branch in the label.
 var defaultBranchNames = map[string]bool{"main": true, "master": true}
 
 // fallbackSessionLabel is the display label a supervisor registers under when
@@ -31,15 +35,15 @@ const (
 
 // DefaultSessionLabel derives the default display label for a session working
 // in dir: the base name of the git top-level, plus "@<branch>" when the
-// checked-out branch is not the repository's default one and HEAD is not
-// detached. The label is sanitized to a valid session name — runes no
-// identifier may hold are dropped, path separators and whitespace become
-// separators, repeats collapse, and the result is truncated to the 64-rune
-// name limit — so it passes messaging.ValidSessionName. When the derivation
-// yields nothing usable, the sanitized base name of dir is used, and when
-// even that fails the label is empty: the caller keeps its fallback label.
-// No reserved reference — the empty reference, the self alias, the supervisor
-// run id — is ever returned, so a derived label is always reachable by name.
+// checked-out branch is not one of the conventional default names. The label
+// is sanitized to a valid session name — runes no identifier may hold are
+// dropped, path separators and whitespace become separators, repeats collapse,
+// and the result is truncated to the 64-rune name limit — so it passes
+// messaging.ValidSessionName. When the derivation yields nothing usable, the
+// sanitized base name of dir is used, and when even that fails the label is
+// empty: the caller keeps its fallback label. No reserved reference — the
+// empty reference, the self alias, the supervisor run id — is ever returned,
+// so a derived label is always reachable by name.
 func DefaultSessionLabel(dir string) string {
 	if label := sanitizeSessionLabel(derivedWorkLabel(dir)); labelUsable(label) {
 		return label
@@ -109,17 +113,38 @@ func truncateSessionLabel(label string, limit int) string {
 }
 
 // derivedWorkLabel names the work dir carries: the git top-level's base name,
-// plus the branch when it is not the default one.
+// plus the checked-out branch when it is not one of the conventional default
+// names. Both answers come from git itself, so GIT_DIR, GIT_WORK_TREE, bare
+// checkouts, linked worktrees and symlinked repositories resolve exactly as
+// git sees them; a missing or unreadable repository yields no name at all.
 func derivedWorkLabel(dir string) string {
-	toplevel, branch, ok := gitWorkRoot(dir)
-	if !ok {
+	toplevel := gitOutput(dir, "rev-parse", "--show-toplevel")
+	if toplevel == "" {
 		return ""
 	}
 	label := filepath.Base(toplevel)
-	if branch != "" && !defaultBranchNames[branch] {
+	if branch := gitOutput(dir, "branch", "--show-current"); branch != "" && !defaultBranchNames[branch] {
 		label += "@" + branch
 	}
 	return label
+}
+
+// gitTimeout bounds each git invocation the label derivation makes, so a
+// wedged git binary can delay run registration by at most this long.
+const gitTimeout = 5 * time.Second
+
+// gitOutput runs git with args in dir and returns its trimmed standard output,
+// or "" when git is missing, fails, or exceeds gitTimeout. It is the
+// derivation's own instance of the git exec helper shape the other packages
+// run their probes through.
+func gitOutput(dir string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // sanitizeSessionLabel turns a derived label into one that can pass
@@ -140,70 +165,4 @@ func sanitizeSessionLabel(label string) string {
 		label = strings.ReplaceAll(label, "--", "-")
 	}
 	return strings.Trim(truncateSessionLabel(label, messaging.MaxSessionNameRunes), "-")
-}
-
-// gitWorkRoot resolves the git working tree dir belongs to: walking up from
-// dir for the first .git entry, a directory for a plain checkout and a file
-// pointing at the worktree's git directory for a linked worktree. The branch
-// is the one .git/HEAD (or the git-directory target's HEAD) names; a detached
-// HEAD, or a HEAD that names no branch, yields no branch.
-func gitWorkRoot(dir string) (toplevel, branch string, ok bool) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", "", false
-	}
-	for {
-		gitPath := filepath.Join(abs, ".git")
-		gitDir := ""
-		if info, err := os.Stat(gitPath); err == nil {
-			if info.IsDir() {
-				gitDir = gitPath
-			} else if target := gitDirTarget(gitPath); target != "" {
-				gitDir = target
-			}
-		}
-		if gitDir != "" {
-			return abs, headBranch(gitDir), true
-		}
-		parent := filepath.Dir(abs)
-		if parent == abs {
-			return "", "", false
-		}
-		abs = parent
-	}
-}
-
-// gitDirTarget reads a worktree's .git file, whose "gitdir: <path>" line
-// points at the git directory the worktree's HEAD lives in.
-func gitDirTarget(gitFile string) string {
-	data, err := os.ReadFile(gitFile)
-	if err != nil {
-		return ""
-	}
-	line := strings.TrimSpace(string(data))
-	target, found := strings.CutPrefix(line, "gitdir:")
-	if !found {
-		return ""
-	}
-	target = strings.TrimSpace(target)
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(gitFile), target)
-	}
-	return target
-}
-
-// headBranch reads the branch refs/heads/<branch> a git directory's HEAD
-// names. A detached HEAD, or any HEAD that does not name a branch, yields no
-// branch.
-func headBranch(gitDir string) string {
-	data, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
-	if err != nil {
-		return ""
-	}
-	line := strings.TrimSpace(string(data))
-	branch, ok := strings.CutPrefix(line, "ref: refs/heads/")
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(branch)
 }
