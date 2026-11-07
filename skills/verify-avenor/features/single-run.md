@@ -112,6 +112,20 @@ names before signalling — a bare `kill -0` also succeeds for a recycled pid, a
 a `$!` captured from a `setsid` launcher can name a shell that already exited.
 The pid file is gone after the sentinel appears.
 
+## mini-swe-agent backend
+
+Install mini-swe-agent v2 as `mini` and configure its model and credentials. Use a scratch directory and a model available to mini:
+
+```sh
+SCRATCH=$(mktemp -d /tmp/avenor-verify.XXXXXX)
+./avenor run --backend mini-swe-agent --model "$MINI_MODEL" \
+  --prompt 'Create a file named answer.txt containing OK, then submit the task.' \
+  --dir "$SCRATCH" --on-event "$SCRATCH/events.ndjson" \
+  --sentinel-file "$SCRATCH/done.env" --timeout 120s --label verify-mini
+```
+
+**Proof:** `answer.txt` contains `OK`, the sentinel contains `DONE` and `STOP_REASON=end_turn`, and the event log contains `session.start` and `session.end`. Mini may submit an empty final answer, so a result file is not guaranteed. Mini executes shell commands without Avenor approval; use an isolated scratch directory and environment.
+
 ## Claude backend: OSC 7501 status reports
 
 On its default PTY launcher the `claude` backend answers Claude Code's OSC 7501
