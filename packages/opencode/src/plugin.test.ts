@@ -20,7 +20,6 @@ import workflowConformance from '../../../schemas/workflow_route.conformance.jso
 import resultFixture from '../../../schemas/message_route.result.json'
 import { peersDetails, resultOutput } from '../../core/src/message.js'
 import type { AvenorCoreOptions } from './core.js'
-import * as labelModule from './label.js'
 import { createV2EventHandler, v2Host } from './v2.js'
 
 type ToolArgs = Record<string, unknown>
@@ -303,14 +302,14 @@ mock.module('./process.js', () => ({
 }))
 /** The derived default label; each test sees the label this returns. */
 const sessionLabelMock = mock(async (_dir?: string) => 'avenor@feat')
-// Snapshot-and-spread like the core mock above: defensive, since this Bun
-// already keeps exports the factory omits reachable (the passing suffix tests
-// are the evidence) — pinning the real module keeps that true regardless of
-// mock merge semantics.
-mock.module('./label.js', () => ({
-  ...labelModule,
+// The seams every test core starts through: the process seams keep real
+// processes out of the run, and the label seam keeps the derivation stubbed
+// without touching the module registry other test files read.
+const coreOptions: AvenorCoreOptions = {
+  spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'],
+  runCommand: runCommandMock,
   sessionLabel: sessionLabelMock,
-}))
+}
 const originalFetch = globalThis.fetch
 
 function makeClient(promptAsync = mock(async (_args: PromptArgs) => {})) {
@@ -1417,7 +1416,7 @@ describe('AvenorPlugin', () => {
           context: async () => [],
         },
       } as never),
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as { tool: Record<string, { execute: (args: unknown, ctx: unknown) => Promise<unknown> }> }
     await hooks.tool.avenor_peers.execute({ action: 'list' }, toolContext('session-1'))
@@ -1578,7 +1577,7 @@ describe('AvenorPlugin', () => {
   it('binds a session when it appears and names it from its directory', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 'session-1', location: { directory: '/repo/avenor' } } })
@@ -1606,7 +1605,7 @@ describe('AvenorPlugin', () => {
   it('binds on the first turn when the creation was missed', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
@@ -1620,7 +1619,7 @@ describe('AvenorPlugin', () => {
   it('keeps a remembered native title over the derived label', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     // A rename before the bind is remembered as the native title.
@@ -1643,7 +1642,7 @@ describe('AvenorPlugin', () => {
         getMessage: async () => undefined,
         getSessionTitle: () => new Promise<string | undefined>(resolve => reads.push(resolve)),
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     // The derivation is held open while the bind's own title read answers.
     let resolveLabel: (label: string) => void = () => {}
@@ -1668,7 +1667,7 @@ describe('AvenorPlugin', () => {
   it('derives a label at most once per session, even when the derivation yields nothing', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
@@ -1704,7 +1703,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
@@ -1726,7 +1725,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
@@ -1745,7 +1744,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
@@ -1763,7 +1762,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
@@ -1785,7 +1784,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
@@ -1803,7 +1802,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
@@ -1822,7 +1821,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
@@ -1847,7 +1846,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     // Nothing serializes the two handlers before the naming chain does.
@@ -1866,7 +1865,7 @@ describe('AvenorPlugin', () => {
   it('restarts a bound conversation\'s feed when its execution succeeds', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.execution.started', data: { sessionID: 'session-1' } })
@@ -1889,7 +1888,7 @@ describe('AvenorPlugin', () => {
     })
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const onEvent = createV2EventHandler(core)
     await expect(onEvent({
@@ -1961,7 +1960,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -2013,7 +2012,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -2061,7 +2060,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -2453,7 +2452,7 @@ describe('AvenorPlugin', () => {
         getMessage: async () => undefined,
         getSessionTitle: () => new Promise<string | undefined>(resolve => reads.push(resolve)),
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -2566,7 +2565,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const first = {
       messagePreflight: async () => ({ generation: 'gen-1' }),
@@ -2633,7 +2632,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const hooks = core as unknown as {
       event?: (input: { event: unknown }) => Promise<void>
@@ -2684,7 +2683,7 @@ describe('AvenorPlugin', () => {
         },
         getMessage: async () => undefined,
       },
-      { spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'], runCommand: runCommandMock },
+      coreOptions,
     )
     const first = {
       messagePreflight: async () => ({ generation: 'gen-1' }),

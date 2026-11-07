@@ -49,7 +49,10 @@ export function sanitizeSessionLabel(label: string): string {
 }
 
 function labelUsable(label: string): boolean {
-  return label.length > 0 && label.length <= MAX_SESSION_NAME_RUNES && !RESERVED_SESSION_REFERENCES.has(label)
+  // The name rule counts runes (code points), so the limit check must too: a
+  // code-unit length would refuse a limit-length label holding an astral rune.
+  const runes = Array.from(label).length
+  return runes > 0 && runes <= MAX_SESSION_NAME_RUNES && !RESERVED_SESSION_REFERENCES.has(label)
 }
 
 /**

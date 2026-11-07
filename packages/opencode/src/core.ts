@@ -140,6 +140,8 @@ export interface AvenorCoreOptions {
     signal?: AbortSignal,
     stdin?: string,
   ) => Promise<{ code: number | null; stdout: string; stderr: string }>
+  /** Derive a session's default display label; defaults to the git-based rule in ./label.js. */
+  sessionLabel?: (dir: string | undefined) => Promise<string>
 }
 
 type MonitorStopReason = 'permission-routed' | 'shutdown' | 'abort' | 'result'
@@ -485,6 +487,7 @@ export type AvenorCore = Hooks & {
 export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = {}): AvenorCore {
   const spawnAvenorProcess = options.spawnProcess ?? defaultSpawnProcess
   const runAvenorCommand = options.runCommand ?? defaultRunCommand
+  const deriveSessionLabel = options.sessionLabel ?? sessionLabel
   const trackedRuns = new Map<string, TrackedRun>()
   const activeMonitors = new Map<string, ActiveMonitor>()
   const sessionIdToRunId = new Map<string, string>()
@@ -1747,7 +1750,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       // The bind's own title read resolves while git runs: the version captured
       // here gates the publish on a native name arriving during the derivation.
       const version = titleVersion(sessionID)
-      const label = await sessionLabel(directory)
+      const label = await deriveSessionLabel(directory)
       if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
       if (label === '') return
       // The bound conversation's own credential reads the labels the broker

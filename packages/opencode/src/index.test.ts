@@ -597,6 +597,18 @@ describe('sessionLabel', () => {
     expect(sanitizeSessionLabel('a\u0000b')).toBe('ab')
   })
 
+  test('accepts a 64-rune label containing an astral rune and never passes a longer one whole', async () => {
+    // 63 BMP runes plus one supplementary rune: 64 code points but 65 UTF-16
+    // code units, so a code-unit length check would refuse it.
+    const fits = await sessionLabel('/' + 'a'.repeat(63) + '𝄞', git({}))
+    expect(fits).toBe('a'.repeat(63) + '𝄞')
+    // A 65-rune name is beyond the broker's limit, so the derivation must not
+    // return it whole.
+    const tooLong = await sessionLabel('/' + 'a'.repeat(64) + '𝄞', git({}))
+    expect(Array.from(tooLong).length).toBeLessThanOrEqual(64)
+    expect(tooLong).not.toBe('a'.repeat(64) + '𝄞')
+  })
+
   test('truncates to 64 runes without splitting a surrogate pair', async () => {
     // 63 BMP runes plus one supplementary rune: 64 runes but 65 code units, so
     // a code-unit slice would cut the pair in two.
