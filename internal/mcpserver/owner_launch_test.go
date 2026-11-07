@@ -189,7 +189,10 @@ func TestMCPAutostartAuthenticatedAttachment(t *testing.T) {
 	// below has a recipient.
 	sendAndVerifyDelivery(t, cl, "hello supervisor")
 
-	// The recipient is the supervisor's run, registered under its name.
+	// The recipient is the supervisor's run. Its label is derived from the
+	// working directory, so the assertion is the label rule itself: whatever
+	// directory the test runs in, a registered label must be a valid session
+	// name and never the run id it belongs to.
 	peers, err := cl.MessagePeers(messaging.PeersRequest{Generation: controlGeneration(t, cl)})
 	if err != nil {
 		t.Fatalf("message_peers: %v", err)
@@ -200,9 +203,17 @@ func TestMCPAutostartAuthenticatedAttachment(t *testing.T) {
 		if len(entry.Session) > 0 {
 			_ = json.Unmarshal(entry.Session, &session)
 		}
-		if session["run_id"] == "supervisor" && session["label"] != "" {
-			found = true
+		if session["run_id"] != "supervisor" {
+			continue
 		}
+		label, _ := session["label"].(string)
+		if !messaging.ValidSessionName(label) {
+			t.Fatalf("supervisor label = %q, want a valid session name", label)
+		}
+		if label == messaging.SupervisorRunID {
+			t.Fatalf("supervisor label = %q, want a label distinct from the run id", label)
+		}
+		found = true
 	}
 	if !found {
 		t.Fatalf("supervisor run missing from peers: %v", peers)
