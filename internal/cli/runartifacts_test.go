@@ -112,6 +112,9 @@ func TestRunArtifacts(t *testing.T) {
 			wantResult: "the reply",
 			wantRESULT: true,
 		},
+		// The timeout deadline is generous on purpose: the case is about an
+		// unsettled turn, not about a fast timeout, so the deadline must end
+		// the held turn, not race session setup for the result-file clear.
 		{name: "unsettled timeout publishes no file", timeout: true, turns: []scriptedTurn{turn("half an answer", "", "")}, wantCode: 124},
 		{name: "progress timeout publishes no file", progress: true, turns: []scriptedTurn{turn("half an answer", "", "")}, wantCode: 124},
 		{
@@ -196,11 +199,13 @@ func TestRunArtifacts(t *testing.T) {
 					return nil, errors.New("no provider")
 				}
 			}
+			var promptStarted chan struct{}
 			if tt.timeout || tt.progress {
 				// Hold the first turn open so the deadline, not the reply, ends it.
 				release := make(chan struct{})
 				t.Cleanup(func() { close(release) })
-				provider.promptStarted = make(chan struct{}, 1)
+				promptStarted = make(chan struct{}, 1)
+				provider.promptStarted = promptStarted
 				provider.release = release
 			}
 			// The sentinel lands only after the answer is whole, and the pid file
@@ -220,7 +225,7 @@ func TestRunArtifacts(t *testing.T) {
 				args[0], args[1] = "--prompt-file", filepath.Join(dir, "missing.txt")
 			}
 			if tt.timeout {
-				args = append(args, "--timeout", "100ms")
+				args = append(args, "--timeout", "5s")
 			}
 			if tt.progress {
 				args = append(args, "--progress-timeout", "100ms")
@@ -234,6 +239,20 @@ func TestRunArtifacts(t *testing.T) {
 			}
 
 			code, stderr := runForTest(t, args...)
+			if tt.timeout {
+				// The prompt started proves the result-file clear (which runs
+				// just before the first prompt) happened, so the no-file
+				// assertion below has its precondition. If the deadline ever
+				// beats setup again, fail loudly instead of flaking: a
+				// run whose session never starts leaves the seeded answer
+				// alone, which is documented behaviour, not this case's
+				// contract.
+				select {
+				case <-promptStarted:
+				default:
+					t.Fatalf("deadline beat session setup: the result-file clear never ran, so the no-file assertion has no precondition")
+				}
+			}
 			if code != tt.wantCode {
 				t.Fatalf("run() = %d, want %d; stderr=%s", code, tt.wantCode, stderr)
 			}
