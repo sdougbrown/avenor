@@ -346,6 +346,8 @@ their value types: integers are numbers and durations are Go duration strings,
 such as `30s`. Command `input_rules` describe relationships between supplied
 flags. The CLI checks those rules and required flags before running a handler;
 missing required flags report `missing required flag --<name>`.
+The rules do not cover every validation: handlers also check configuration,
+environment variables, and some flag relationships.
 
 ## avenor message
 
