@@ -38,10 +38,25 @@ import (
 )
 
 const (
-	itestTimeout = 10 * time.Second
 	// Decider limits as callers experience them.
 	itestDeciderCap = 3
 )
+
+// itestTimeout is the budget an itest gets to settle. It scales under CI
+// exactly the way the JS package's scaleMs does: runner load can starve
+// the async turn waits these budgets ride on, so under a CI environment
+// the base is multiplied by 5. A longer budget cannot turn a failing
+// predicate green — the turn still has to settle for the test to pass —
+// so a masked flake costs a full CI round-trip while a longer budget
+// only slows genuine failures.
+var itestTimeout = scaleITestTimeout(10 * time.Second)
+
+func scaleITestTimeout(d time.Duration) time.Duration {
+	if os.Getenv("CI") != "" {
+		return 5 * d
+	}
+	return d
+}
 
 // stage2Provider starts a session and parks it: the run stays running until the
 // supervisor cancels it, so the run-store tests never race a completion.
