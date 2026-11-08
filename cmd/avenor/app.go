@@ -384,6 +384,9 @@ func app() *clicontract.App {
 							{Name: "max-retries", Kind: clicontract.Int, Usage: "maximum retry attempts on transient failure"},
 							{Name: "launch-wrapper", Kind: clicontract.Repeat, Usage: "opaque argv prefix in front of the backend command; repeatable, each use adds one element"},
 						},
+						InputRules: []*clicontract.Rule{
+							clicontract.EnabledOn("prompt-file", clicontract.Or(clicontract.Not(clicontract.Truthy("prompt-file")), clicontract.Not(clicontract.Truthy("prompt"))), "--prompt and --prompt-file are mutually exclusive"),
+						},
 						Handle: handleControlSpawn,
 					},
 					{

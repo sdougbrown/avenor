@@ -36,7 +36,7 @@ func messageCommand() *clicontract.Command {
 			{Name: "asks-dir", Kind: clicontract.String, Usage: "directory of feed ask records"},
 		},
 		InputRules: []*clicontract.Rule{
-			clicontract.RequiresOn("message", clicontract.Not(clicontract.Truthy("message-stdin")), "--message and --message-stdin are mutually exclusive"),
+			clicontract.EnabledOn("message", clicontract.Not(clicontract.Truthy("message-stdin")), "--message and --message-stdin are mutually exclusive"),
 		},
 		Handle: handleMessage,
 	}

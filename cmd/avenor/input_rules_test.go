@@ -10,16 +10,19 @@ import (
 	umpire "github.com/umpire-tools/umpire-go"
 )
 
+type inputRuleCommand struct {
+	Flags       map[string]any              `json:"flags"`
+	Rules       []any                       `json:"input_rules"`
+	Subcommands map[string]inputRuleCommand `json:"subcommands"`
+}
+
 func TestCommandInputRulesMatchParsing(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runDeclared([]string{"schema"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("schema exit = %d: %s", code, stderr.String())
 	}
 	var schema struct {
-		Commands map[string]struct {
-			Flags map[string]any `json:"flags"`
-			Rules []any          `json:"input_rules"`
-		} `json:"commands"`
+		Commands map[string]inputRuleCommand `json:"commands"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &schema); err != nil {
 		t.Fatal(err)
@@ -30,6 +33,12 @@ func TestCommandInputRulesMatchParsing(t *testing.T) {
 		input         map[string]any
 		valid         bool
 	}{
+		{"message inline", "message", []string{"--action=tell", "--message=text"}, map[string]any{"message": "text"}, true},
+		{"message false stdin", "message", []string{"--action=tell", "--message=text", "--message-stdin=false"}, map[string]any{"message": "text", "message-stdin": false}, true},
+		{"message true stdin", "message", []string{"--action=tell", "--message=text", "--message-stdin"}, map[string]any{"message": "text", "message-stdin": true}, false},
+		{"message empty inline", "message", []string{"--action=tell", "--message=", "--message-stdin"}, map[string]any{"message": "", "message-stdin": true}, false},
+		{"message stdin alone", "message", []string{"--action=tell", "--message-stdin"}, map[string]any{"message-stdin": true}, true},
+		{"message neither", "message", []string{"--action=tell"}, map[string]any{}, true},
 		{"mcp conflicting auth", "mcp", []string{"--auth-token=x", "--auth-token-file=y"}, map[string]any{"auth-token": "x", "auth-token-file": "y"}, false},
 		{"mcp empty token", "mcp", []string{"--auth-token=", "--auth-token-file=y"}, map[string]any{"auth-token": "", "auth-token-file": "y"}, true},
 		{"mcp empty file", "mcp", []string{"--auth-token=x", "--auth-token-file="}, map[string]any{"auth-token": "x", "auth-token-file": ""}, true},
@@ -44,9 +53,24 @@ func TestCommandInputRulesMatchParsing(t *testing.T) {
 		{"verify empty file", "verify", []string{"--roster-entry=x", "--roster-file="}, map[string]any{"roster-entry": "x", "roster-file": ""}, false},
 		{"verify entry and file", "verify", []string{"--roster-entry=x", "--roster-file=y"}, map[string]any{"roster-entry": "x", "roster-file": "y"}, true},
 		{"verify file alone", "verify", []string{"--roster-file=y"}, map[string]any{"roster-file": "y"}, true},
+		{"spawn both", "control spawn", []string{"--prompt=hello", "--prompt-file=prompt.txt"}, map[string]any{"prompt": "hello", "prompt-file": "prompt.txt"}, false},
+		{"spawn empty prompt", "control spawn", []string{"--prompt=", "--prompt-file=prompt.txt"}, map[string]any{"prompt": "", "prompt-file": "prompt.txt"}, true},
+		{"spawn empty file", "control spawn", []string{"--prompt=hello", "--prompt-file="}, map[string]any{"prompt": "hello", "prompt-file": ""}, true},
+		{"spawn prompt alone", "control spawn", []string{"--prompt=hello"}, map[string]any{"prompt": "hello"}, true},
+		{"spawn file alone", "control spawn", []string{"--prompt-file=prompt.txt"}, map[string]any{"prompt-file": "prompt.txt"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			command := schema.Commands[tc.command]
+			path := strings.Fields(tc.command)
+			command, ok := schema.Commands[path[0]]
+			if !ok {
+				t.Fatalf("command %q is missing from schema", path[0])
+			}
+			for _, name := range path[1:] {
+				command, ok = command.Subcommands[name]
+				if !ok {
+					t.Fatalf("subcommand %q is missing from schema", name)
+				}
+			}
 			if len(command.Rules) == 0 {
 				t.Fatal("command has no input rules")
 			}
@@ -75,7 +99,7 @@ func TestCommandInputRulesMatchParsing(t *testing.T) {
 			if valid != tc.valid {
 				t.Errorf("schema accepts = %v, want %v", valid, tc.valid)
 			}
-			_, err = clicontract.Parse(app(), append([]string{tc.command}, tc.args...))
+			_, err = clicontract.Parse(app(), append(path, tc.args...))
 			if (err == nil) != tc.valid {
 				t.Errorf("parse error = %v, want valid %v", err, tc.valid)
 			}
