@@ -38,7 +38,13 @@ import (
 )
 
 const (
-	itestTimeout = 10 * time.Second
+	// itestWaitCap is the hang guard for the event- and state-driven
+	// waits in these files. The waits run on the run's own signal — turn
+	// settle, event arrival, status transition — so a slow-but-healthy
+	// settle under CI load just takes its time. The cap only detects a
+	// signal that never arrives, and does so with the per-wait Fatalf
+	// below, in a minute, instead of the package test timeout.
+	itestWaitCap = 60 * time.Second
 	// Decider limits as callers experience them.
 	itestDeciderCap = 3
 )
@@ -181,7 +187,7 @@ func (l *itestEventLog) find(pred func(events.Event) bool) (events.Event, bool) 
 // waitFor blocks until an event matching pred has been recorded.
 func (l *itestEventLog) waitFor(t *testing.T, what string, pred func(events.Event) bool) events.Event {
 	t.Helper()
-	deadline := time.After(itestTimeout)
+	deadline := time.After(itestWaitCap)
 	for {
 		l.mu.Lock()
 		changed := l.changed
@@ -205,14 +211,14 @@ func (l *itestEventLog) waitFor(t *testing.T, what string, pred func(events.Even
 	}
 }
 
-// itestRecv bounds a channel receive by the test timeout so a silent sender
+// itestRecv bounds a channel receive by the hang cap so a silent sender
 // cannot hang the suite.
 func itestRecv[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(itestTimeout):
+	case <-time.After(itestWaitCap):
 		t.Fatalf("timed out waiting for %s", what)
 		var zero T
 		return zero
@@ -467,7 +473,7 @@ func (h *itestHarness) requireIdleEnd(rtID, status, stopReason string, exitCode 
 // settling have no wake-up channel of their own.
 func (h *itestHarness) awaitStatus(rtID, want string) itestView {
 	h.t.Helper()
-	deadline := time.Now().Add(itestTimeout)
+	deadline := time.Now().Add(itestWaitCap)
 	for {
 		v := h.view(rtID)
 		if v.Status == want {
@@ -482,7 +488,7 @@ func (h *itestHarness) awaitStatus(rtID, want string) itestView {
 
 func (h *itestHarness) awaitCondition(what string, cond func() bool) {
 	h.t.Helper()
-	deadline := time.Now().Add(itestTimeout)
+	deadline := time.Now().Add(itestWaitCap)
 	for !cond() {
 		if time.Now().After(deadline) {
 			h.t.Fatalf("timed out waiting for %s", what)
@@ -507,7 +513,7 @@ func (h *itestHarness) consistentlyFor(window time.Duration, what string, cond f
 
 func (h *itestHarness) waitTurn(rtID string) map[string]any {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), itestTimeout)
+	ctx, cancel := context.WithTimeout(h.t.Context(), itestWaitCap)
 	defer cancel()
 	out, err := h.sup.RuntimeWaitTurn(ctx, rtID, 0)
 	if err != nil {
@@ -1774,7 +1780,7 @@ func (h *itestHarness) rawRuntimeStatus(rtID string) map[string]any {
 // Transitions that follow a settled turn have no wake-up channel of their own.
 func (h *itestHarness) awaitRawStatus(rtID, want string) map[string]any {
 	h.t.Helper()
-	deadline := time.Now().Add(itestTimeout)
+	deadline := time.Now().Add(itestWaitCap)
 	for {
 		raw := h.rawRuntimeStatus(rtID)
 		if status, _ := raw["status"].(string); status == want {
@@ -1792,7 +1798,7 @@ func (h *itestHarness) awaitRawStatus(rtID, want string) map[string]any {
 // done phase. It returns the final raw document.
 func (h *itestHarness) awaitSettledStatus(rtID string) map[string]any {
 	h.t.Helper()
-	deadline := time.Now().Add(itestTimeout)
+	deadline := time.Now().Add(itestWaitCap)
 	for {
 		raw := h.rawRuntimeStatus(rtID)
 		status, _ := raw["status"].(string)
@@ -1811,14 +1817,14 @@ func (h *itestHarness) awaitSettledStatus(rtID string) map[string]any {
 // reports a pending permission, and returns the final raw document.
 func (h *itestHarness) awaitPermissionCleared(rtID string) map[string]any {
 	h.t.Helper()
-	deadline := time.Now().Add(itestTimeout)
+	deadline := time.Now().Add(itestWaitCap)
 	for {
 		raw := h.rawRuntimeStatus(rtID)
 		if pending, _ := raw["pending_permission"].(bool); !pending {
 			return raw
 		}
 		if time.Now().After(deadline) {
-			h.t.Fatalf("runtime %s still reports pending_permission after %s", rtID, itestTimeout)
+			h.t.Fatalf("runtime %s still reports pending_permission after %s", rtID, itestWaitCap)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
