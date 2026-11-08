@@ -37,7 +37,7 @@ func TestSpawnSurvivesConcurrentStatusReaders(t *testing.T) {
 		select {
 		case <-gate.ch:
 		case <-ctx.Done():
-		case <-time.After(itestTimeout):
+		case <-time.After(itestWaitCap):
 			t.Errorf("gate was never opened: no reader sighted the published row of the direct spawn")
 		}
 	}
