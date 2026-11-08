@@ -104,6 +104,9 @@ func app() *clicontract.App {
 					{Name: "roster-file", Kind: clicontract.String, Usage: "path to roster config to validate (standalone or as fallback for loop/team)"},
 					{Name: "roster-entry", Kind: clicontract.String, Usage: "roster entry name to look up (requires --roster-file)"},
 				},
+				InputRules: []*clicontract.Rule{
+					clicontract.EnabledOn("roster-entry", clicontract.Or(clicontract.Not(clicontract.Truthy("roster-entry")), clicontract.Truthy("roster-file")), "--roster-entry requires --roster-file"),
+				},
 				Handle: handleVerify,
 			},
 			{
@@ -166,6 +169,10 @@ func app() *clicontract.App {
 					{Name: "max-wait", Kind: clicontract.Duration, Usage: "approximate polling budget for blocking tools (0 disables)", Default: 25 * time.Second},
 					{Name: "allowed-host", Kind: clicontract.Repeat, Usage: "exact tailnet hostname accepted on the HTTP transport (repeatable)"},
 					{Name: "mcp-launch-wrapper-policy", Kind: clicontract.String, Usage: "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else launch-wrapper-policy.json under the avenor config home (XDG_CONFIG_HOME/avenor or ~/.config/avenor)); ignored when attaching to an existing supervisor, though a named file that is missing or malformed still fails"},
+				},
+				InputRules: []*clicontract.Rule{
+					clicontract.EnabledOn("auth-token-file", clicontract.Or(clicontract.Not(clicontract.Truthy("auth-token-file")), clicontract.Not(clicontract.Truthy("auth-token"))), "--auth-token and --auth-token-file cannot both be set"),
+					clicontract.EnabledOn("no-autostart", clicontract.Or(clicontract.Not(clicontract.Truthy("no-autostart")), clicontract.Truthy("supervisor-socket")), "--no-autostart requires --supervisor-socket"),
 				},
 				Handle: handleMCP,
 			},
