@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sdougbrown/cli-contract"
+	umpire "github.com/umpire-tools/umpire-go"
 )
 
 func TestRunDeclaredHelp(t *testing.T) {
@@ -69,5 +72,71 @@ func TestSchemaCommand(t *testing.T) {
 		if _, ok := cmds[name]; !ok {
 			t.Errorf("schema commands missing %q", name)
 		}
+	}
+}
+
+func TestMessageSchemaDeclaresStdinExclusion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runDeclared([]string{"schema"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("schema exit = %d, stderr: %s", code, stderr.String())
+	}
+	var schema struct {
+		Commands map[string]struct {
+			Flags      map[string]any `json:"flags"`
+			InputRules []any          `json:"input_rules"`
+		} `json:"commands"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	command := schema.Commands["message"]
+	if len(command.InputRules) == 0 {
+		t.Fatal("message schema does not declare stdin exclusion")
+	}
+	fields := make(map[string]any, len(command.Flags))
+	for name := range command.Flags {
+		fields[name] = map[string]any{}
+	}
+	parsed, err := umpire.SchemaFromObject(map[string]any{"version": float64(1), "fields": fields, "rules": command.InputRules})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := umpire.NewFromSchema(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		input map[string]any
+		valid bool
+	}{
+		{"inline", []string{"--message=text"}, map[string]any{"message": "text"}, true},
+		{"false stdin", []string{"--message=text", "--message-stdin=false"}, map[string]any{"message": "text", "message-stdin": false}, true},
+		{"true stdin", []string{"--message=text", "--message-stdin"}, map[string]any{"message": "text", "message-stdin": true}, false},
+		{"empty inline", []string{"--message=", "--message-stdin"}, map[string]any{"message": "", "message-stdin": true}, false},
+		{"stdin only", []string{"--message-stdin"}, map[string]any{"message-stdin": true}, true},
+		{"neither", nil, map[string]any{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"message", "--action=tell"}, tc.args...)
+			_, parseErr := clicontract.Parse(app(), args)
+			if (parseErr == nil) != tc.valid {
+				t.Errorf("parse error = %v, want valid %v", parseErr, tc.valid)
+			}
+			status, err := engine.Check(tc.input, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			valid := true
+			for name := range tc.input {
+				if !status[name].Enabled {
+					valid = false
+				}
+			}
+			if valid != tc.valid {
+				t.Errorf("schema accepts input = %v, want %v", valid, tc.valid)
+			}
+		})
 	}
 }

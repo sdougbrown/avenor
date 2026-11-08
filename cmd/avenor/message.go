@@ -35,6 +35,9 @@ func messageCommand() *clicontract.Command {
 			{Name: "timeout-ms", Kind: clicontract.Int, Usage: "wait in milliseconds (maximum 600000)"},
 			{Name: "asks-dir", Kind: clicontract.String, Usage: "directory of feed ask records"},
 		},
+		InputRules: []*clicontract.Rule{
+			clicontract.RequiresOn("message", clicontract.Not(clicontract.Truthy("message-stdin")), "--message and --message-stdin are mutually exclusive"),
+		},
 		Handle: handleMessage,
 	}
 }
@@ -61,8 +64,6 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 	}
 	stdinEnabled := inv.Supplied["message-stdin"] && inv.Bools["message-stdin"]
 	switch {
-	case stdinEnabled && inv.Supplied["message"]:
-		return nil, usageErrorf("avenor message: --message and --message-stdin are mutually exclusive")
 	case stdinEnabled:
 		text, err := readMessageStdin(os.Stdin)
 		if err != nil {
