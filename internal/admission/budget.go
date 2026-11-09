@@ -15,7 +15,6 @@
 package admission
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -428,15 +427,8 @@ func readBudget(f *os.File) (*budgetFile, error) {
 	if len(data) == 0 {
 		return nil, errors.New("admission: budget file is empty")
 	}
-	// Decode only the first JSON value. A failed in-place shrink (the write
-	// lands over a longer file but the truncate never takes effect, #555)
-	// leaves a valid JSON object followed by the tail of the old file; the
-	// first value is the latest valid state, so trailing bytes are ignored
-	// and the next write re-truncates and repairs the file. A first value
-	// that is itself truncated or invalid still fails here, so a partially
-	// written file never parses silently.
 	var bf budgetFile
-	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&bf); err != nil {
+	if err := json.Unmarshal(data, &bf); err != nil {
 		return nil, fmt.Errorf("admission: parse: %w", err)
 	}
 	return &bf, nil

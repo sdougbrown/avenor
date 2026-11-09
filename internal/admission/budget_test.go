@@ -571,22 +571,70 @@ func TestBudgetSurvivesFailedShrinkTruncate(t *testing.T) {
 	unlock(b.f)
 
 	// The file is now a valid JSON object plus stale trailing bytes. The
-	// budget must still read, and a write must re-truncate and repair it.
-	active, cap, _ := b.Status()
-	if active != 0 {
-		t.Fatalf("post-corruption active = %d, want 0", active)
+	// budget must still read the first value, and a write must
+	// re-truncate and repair it. Read the file state directly: Status()
+	// falls back to (0, capacity, rootID) on a read error, so it cannot
+	// confirm the corrupted file actually decodes.
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
 	}
-	if cap != 4 {
-		t.Fatalf("post-corruption capacity = %d, want 4", cap)
+	if _, err := b.f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
 	}
+	raw, err := io.ReadAll(b.f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &struct{}{}); err == nil {
+		t.Fatal("precondition: corrupted file parses strictly, want stale trailing bytes present")
+	}
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	bf, err = readBudget(b.f)
+	if err != nil {
+		t.Fatalf("readBudget after failed shrink = %v, want the first value to decode", err)
+	}
+	if len(bf.Active) != 0 {
+		t.Fatalf("post-corruption active = %d, want 0", len(bf.Active))
+	}
+	if bf.Capacity != 4 {
+		t.Fatalf("post-corruption capacity = %d, want 4", bf.Capacity)
+	}
+	if err := unlock(b.f); err != nil {
+		t.Fatal(err)
+	}
+
 	tok2, err := b.Acquire("holder2")
 	if err != nil {
 		t.Fatalf("Acquire after failed shrink = %v, want the budget usable", err)
 	}
 	b.Release(tok2)
-	active, _, _ = b.Status()
-	if active != 0 {
-		t.Fatalf("post-repair active = %d, want 0", active)
+
+	// After the write re-truncated the file, the stale trailing bytes are
+	// gone: the file must now parse strictly, without any tolerance.
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = io.ReadAll(b.f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	var repaired budgetFile
+	if err := json.Unmarshal(raw, &repaired); err != nil {
+		t.Fatalf("post-repair file does not parse strictly = %v, want the write to clear trailing bytes", err)
+	}
+	if len(repaired.Active) != 0 {
+		t.Fatalf("post-repair active = %d, want 0", len(repaired.Active))
 	}
 }
 
@@ -614,15 +662,22 @@ func TestBudgetFailsOnTruncatedValue(t *testing.T) {
 	if _, err := b.f.Seek(0, io.SeekStart); err != nil {
 		t.Fatal(err)
 	}
-	if data, _ := io.ReadAll(b.f); err == nil && len(data) > 20 {
-		if _, err := b.f.WriteAt(data[:20], 0); err != nil {
-			t.Fatal(err)
-		}
-		if err := b.f.Truncate(20); err != nil {
-			t.Fatal(err)
-		}
+	data, rerr := io.ReadAll(b.f)
+	if rerr != nil {
+		t.Fatal(rerr)
 	}
-	unlock(b.f)
+	if len(data) <= 20 {
+		t.Fatalf("budget file too short to truncate mid-object: %d bytes", len(data))
+	}
+	if _, err := b.f.WriteAt(data[:20], 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.f.Truncate(20); err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(b.f); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := b.Acquire("holder2"); err == nil {
 		t.Fatal("Acquire after mid-object truncate = success, want a parse error")
