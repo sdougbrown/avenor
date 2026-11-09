@@ -1363,6 +1363,9 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			}
 			return success(req.ID, result)
 		}
+		if s.stableHandler == nil {
+			return success(req.ID, s.oneShotSnapshot())
+		}
 		return success(req.ID, s.state.Snapshot())
 	case "subscribe":
 		var p subscribeParams

@@ -45,6 +45,10 @@ func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
 	if status.RunID != "run_1" || status.Status != "running" {
 		t.Fatalf("status = %#v, want run_1 running", status)
 	}
+	unscoped, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 9, Method: "status"}).Result.(Snapshot)
+	if !ok || unscoped.Status != status.Status {
+		t.Fatalf("unscoped status = %#v, want the same status as the scoped call", unscoped)
+	}
 
 	history, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 3, Method: "history", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
 	if !ok {
