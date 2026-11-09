@@ -95,8 +95,8 @@ func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
 	// return to running rather than stay ended.
 	s.PublishEvent(events.Event{Event: "session.start", SessionID: "ses_2"})
 	restarted, _ := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 11, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
-	if restarted["status"] != "running" {
-		t.Fatalf("status after restart = %#v, want running", restarted)
+	if restarted["status"] != "running" || restarted["stop_reason"] != "" || restarted["exit_code"] != 0 {
+		t.Fatalf("status after restart = %#v, want running with the previous attempt cleared", restarted)
 	}
 }
 

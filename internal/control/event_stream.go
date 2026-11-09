@@ -215,6 +215,11 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 			ss.TurnState = "starting"
 			if s.stableHandler == nil && (ss.Status == "" || ss.Status == string(runstate.StatusEnded)) {
 				ss.Status = string(runstate.StatusRunning)
+				ss.StopReason = ""
+				ss.ExitCode = nil
+				ss.FinalOutput = ""
+				ss.FullFinalOutput = ""
+				ss.FinalOutputTruncated = false
 			}
 		case "tool.call", "agent.thought_chunk", "agent.message_chunk":
 			if ss.TurnState == "starting" || ss.TurnState == "" {
@@ -232,7 +237,7 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 			// A retryable attempt failure is not the run's outcome: the loop
 			// publishes another session.start, so report running until the last
 			// allowed attempt settles.
-			if hasExit && runtime.IsRetryableFailure(int(exitCode), reason) && ss.RetryAttempt <= ss.MaxRetries {
+			if hasExit && runtime.IsRetryableFailure(int(exitCode), reason) && ss.RetryAttempt > 0 && ss.RetryAttempt <= ss.MaxRetries {
 				break
 			}
 			ss.Status = string(runstate.StatusEnded)
