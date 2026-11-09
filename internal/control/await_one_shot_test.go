@@ -14,6 +14,12 @@ func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
 	state := NewState("run_1", "demo", 0)
 	s, _ := NewTestServer(state)
 
+	// Before any event the owned run still reports a status a caller can wait on.
+	early, _ := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 10, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
+	if early["status"] != "running" {
+		t.Fatalf("pre-event status = %#v, want running", early)
+	}
+
 	s.PublishEvent(events.Event{Event: "session.start", SessionID: "ses_1"})
 
 	list, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 1, Method: "list"}).Result.([]map[string]any)
@@ -38,16 +44,16 @@ func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
 		}
 	}
 
-	status, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 2, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(Snapshot)
+	status, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 2, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
 	if !ok {
-		t.Fatal("scoped status did not return a snapshot")
+		t.Fatal("scoped status did not return a run entry")
 	}
-	if status.RunID != "run_1" || status.Status != "running" {
-		t.Fatalf("status = %#v, want run_1 running", status)
+	if status["runtime_id"] != "run_1" || status["run_id"] != "run_1" || status["status"] != "running" {
+		t.Fatalf("status = %#v, want the run entry for run_1 running", status)
 	}
 	unscoped, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 9, Method: "status"}).Result.(Snapshot)
-	if !ok || unscoped.Status != status.Status {
-		t.Fatalf("unscoped status = %#v, want the same status as the scoped call", unscoped)
+	if !ok || unscoped.Status != "running" {
+		t.Fatalf("unscoped status = %#v, want running", unscoped)
 	}
 
 	history, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 3, Method: "history", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
@@ -63,9 +69,9 @@ func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
 		"exit_code":    0,
 		"final_output": "done",
 	}})
-	status, _ = s.dispatch(nil, Request{JSONRPC: "2.0", ID: 4, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(Snapshot)
-	if status.Status != "ended" || status.StopReason != "end_turn" {
-		t.Fatalf("terminal status = %#v, want ended/end_turn", status)
+	status, _ = s.dispatch(nil, Request{JSONRPC: "2.0", ID: 4, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
+	if status["status"] != "ended" || status["stop_reason"] != "end_turn" || status["exit_code"] != 0 {
+		t.Fatalf("terminal status = %#v, want ended/end_turn/0", status)
 	}
 	if got := s.state.FinalOutput(); got != "done" {
 		t.Fatalf("final output = %q, want done", got)
@@ -83,6 +89,14 @@ func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
 	resp = s.dispatch(nil, Request{JSONRPC: "2.0", ID: 8, Method: "result", Params: json.RawMessage(`{"runtime_id":"run_other"}`)})
 	if resp.Error == nil || resp.Error.Code != -32000 {
 		t.Fatalf("unknown run result error = %#v, want -32000", resp.Error)
+	}
+
+	// A retry after a settled attempt starts a new session; the status must
+	// return to running rather than stay ended.
+	s.PublishEvent(events.Event{Event: "session.start", SessionID: "ses_2"})
+	restarted, _ := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 11, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
+	if restarted["status"] != "running" {
+		t.Fatalf("status after restart = %#v, want running", restarted)
 	}
 }
 
@@ -103,7 +117,7 @@ func TestSupervisorEventsDoNotWriteOwnedStatus(t *testing.T) {
 	}})
 
 	snap := state.Snapshot()
-	if snap.Status != "" || snap.StopReason != "" || snap.ExitCode != 0 {
+	if snap.Status != "" || snap.StopReason != "" || snap.ExitCode != nil {
 		t.Fatalf("supervisor child events wrote the server snapshot: %#v", snap)
 	}
 }

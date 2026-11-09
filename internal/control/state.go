@@ -27,7 +27,7 @@ type Snapshot struct {
 	// derives them from the events it publishes so a caller can await it.
 	Status     string `json:"status,omitempty"`
 	StopReason string `json:"stop_reason,omitempty"`
-	ExitCode   int    `json:"exit_code,omitempty"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
 	// FinalOutput is a bounded status preview. The complete terminal reply is
 	// retained separately for the explicit result control method.
 	FinalOutput          string `json:"final_output,omitempty"`

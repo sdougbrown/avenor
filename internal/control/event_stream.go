@@ -58,10 +58,6 @@ func eventRuntimeID(ev events.Event) string {
 	return stringField(ev.Fields, "runtime_id")
 }
 
-func eventScopeKey(ev events.Event) string {
-	return eventRuntimeID(ev)
-}
-
 // singleRunID names the one run a server owns when no supervisor supplies
 // runtimes. A supervisor server has no ambient run, so it returns empty.
 func (s *ControlServer) singleRunID() string {
@@ -88,18 +84,30 @@ func (s *ControlServer) oneShotList() []map[string]any {
 	if snap.RunID == "" {
 		return []map[string]any{}
 	}
-	return []map[string]any{{
+	return []map[string]any{s.oneShotEntry(snap)}
+}
+
+// oneShotEntry renders the owned run with the field names a supervisor's list
+// and runtime-scoped status use, so a caller reads one shape from either socket.
+func (s *ControlServer) oneShotEntry(snap Snapshot) map[string]any {
+	exitCode := 0
+	if snap.ExitCode != nil {
+		exitCode = *snap.ExitCode
+	}
+	return map[string]any{
 		"runtime_id":         snap.RunID,
 		"run_id":             snap.RunID,
 		"label":              snap.RunLabel,
 		"session_id":         snap.SessionID,
 		"status":             snap.Status,
+		"stop_reason":        snap.StopReason,
+		"exit_code":          exitCode,
 		"phase":              string(snap.Phase),
 		"phase_label":        snap.PhaseLabel,
 		"started_at":         snap.StartedAt,
 		"pending_permission": snap.PendingPermission,
 		"latest_seq":         snap.LatestSeq,
-	}}
+	}
 }
 
 // eventScope indexes one event under the runtime that owns it. A one-shot
@@ -223,7 +231,8 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 				ss.StopReason = reason
 			}
 			if code, ok := int64Field(event.Fields["exit_code"]); ok {
-				ss.ExitCode = int(code)
+				exitCode := int(code)
+				ss.ExitCode = &exitCode
 			}
 		}
 	})

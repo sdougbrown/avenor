@@ -1326,13 +1326,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			if runtimeID != snap.RunID {
 				return failure(req.ID, -32000, fmt.Sprintf("runtime %q not found", runtimeID), nil)
 			}
-			return success(req.ID, map[string]any{
-				"runtime_id":   snap.RunID,
-				"run_id":       snap.RunID,
-				"status":       snap.Status,
-				"stop_reason":  snap.StopReason,
-				"final_output": s.state.FinalOutput(),
-			})
+			return success(req.ID, map[string]any{"final_output": s.state.FinalOutput()})
 		}
 		// Result is intentionally narrower than status: implementations may
 		// retain a full terminal reply without putting it on status or event
@@ -1355,7 +1349,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 				if rtID != snap.RunID {
 					return failure(req.ID, -32000, fmt.Sprintf("runtime %q not found", rtID), nil)
 				}
-				return success(req.ID, snap)
+				return success(req.ID, s.oneShotEntry(snap))
 			}
 			result, err := s.stableHandler.RuntimeStatus(rtID)
 			if err != nil {
@@ -2323,11 +2317,17 @@ func (s *subscriber) matches(ev events.Event) bool {
 	if s.runtimeID == "" {
 		return true
 	}
-	id := eventRuntimeID(ev)
-	if id == "" {
-		id = s.scopeID
+	return s.eventScope(ev) == s.runtimeID
+}
+
+// eventScope names the runtime an event belongs to for this subscription. A
+// one-shot server publishes events without a runtime id, so they take the
+// scope of the single run the subscriber is following.
+func (s *subscriber) eventScope(ev events.Event) string {
+	if id := eventRuntimeID(ev); id != "" {
+		return id
 	}
-	return id == s.runtimeID
+	return s.scopeID
 }
 
 func (s *subscriber) recordSeqLocked(ev events.Event) bool {
@@ -2335,10 +2335,7 @@ func (s *subscriber) recordSeqLocked(ev events.Event) bool {
 	if !ok {
 		return true
 	}
-	key := eventScopeKey(ev)
-	if key == "" {
-		key = s.scopeID
-	}
+	key := s.eventScope(ev)
 	if last, ok := s.seenSeq[key]; ok && seq <= last {
 		return false
 	}
