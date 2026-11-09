@@ -511,6 +511,8 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   const lastReconcile = optionalScalar(status.last_reconcile)
   if (lastReconcile) lines.push(`Last reconcile: ${lastReconcile}`)
   if (blocked) lines.push(`Capacity blocked: ${selected(blocked, 'source')}${blockedDetail ? ` — ${blockedDetail}` : ''}`)
+  const backoff = optionalScalar(status.dispatch_backoff_until)
+  if (backoff) lines.push(`Dispatch backoff: ${backoff}`)
   const nextPoll = optionalScalar(status.next_poll_at)
   if (nextPoll) lines.push(`Next external poll: ${nextPoll}`)
   lines.push(

@@ -81,11 +81,20 @@ type RunnerStatus struct {
 	Inflight        int
 	CapacityBlocked string // "" | "local" | "tree"
 	CapacityDetail  string
+	// DispatchBackoffUntil is the next retry time of the most recently
+	// failed dispatch; zero when no dispatch error has been seen.
+	DispatchBackoffUntil time.Time
 }
 
 // DefaultAntiEntropy is the cadence at which a leading runner refreshes the
 // host view and reconciles even without change signals.
 const DefaultAntiEntropy = 5 * time.Second
+
+// defaultDispatchBackoffBase is the backoff after a candidate's first
+// consecutive dispatch error; it doubles per consecutive failure, capped at
+// five times the base, so a persistently failing dispatch degrades to a
+// bounded retry cadence instead of a hot loop.
+const defaultDispatchBackoffBase = 30 * time.Second
 
 // outcomeLogHole is the terminal status of a runner whose controller history
 // cannot be replayed.
@@ -112,13 +121,19 @@ type RunnerConfig struct {
 	PollBaseDelay  time.Duration
 	PollJitter     func() float64
 	MaxPollWorkers int
+	// DispatchBackoffBase is the backoff after a candidate's first
+	// consecutive dispatch error; it doubles per consecutive failure,
+	// capped at five times the base. Zero falls back to the package
+	// default (30s).
+	DispatchBackoffBase time.Duration
 }
 
 // dispatchWorkerResult carries one worker's outcome back to the leader loop.
 type dispatchWorkerResult struct {
-	identity workflow.ExecutionIdentity
-	result   DispatchResult
-	err      error
+	identity   workflow.ExecutionIdentity
+	result     DispatchResult
+	err        error
+	ownerEpoch int64 // the leader lease epoch the dispatch ran under
 }
 
 // unreportedEntry tracks the pending-decision count for one identity and the
@@ -127,6 +142,14 @@ type dispatchWorkerResult struct {
 type unreportedEntry struct {
 	count int
 	key   string
+}
+
+// dispatchFailEntry is a candidate's consecutive dispatch-failure state:
+// count is the consecutive error streak and next is the earliest time the
+// candidate may be dispatched again. A successful dispatch clears it.
+type dispatchFailEntry struct {
+	count int
+	next  time.Time
 }
 
 // wakeReason reports which wakeup ended the previous pass. Only a
@@ -179,6 +202,8 @@ type Runner struct {
 	pollBase time.Duration
 	// pollJitter scales backoff delays within bounded bounds.
 	pollJitter func() float64
+	// dispatchBackoff is the base per-candidate dispatch-failure backoff.
+	dispatchBackoff time.Duration
 	// maxPollWorkers bounds concurrent adapter invocations.
 	maxPollWorkers int
 }
@@ -209,25 +234,30 @@ func NewRunner(cfg RunnerConfig) *Runner {
 	if pollBase <= 0 {
 		pollBase = pollBaseDelay
 	}
+	dispatchBackoff := cfg.DispatchBackoffBase
+	if dispatchBackoff <= 0 {
+		dispatchBackoff = defaultDispatchBackoffBase
+	}
 	r := &Runner{
-		deps:           cfg.Deps,
-		store:          cfg.Store,
-		controllerID:   cfg.ControllerID,
-		ownerID:        cfg.OwnerID,
-		now:            now,
-		renewInterval:  cfg.RenewInterval,
-		antiEntropy:    cfg.AntiEntropy,
-		changeCh:       cfg.ChangeCh,
-		capacityCh:     cfg.CapacityCh,
-		ctx:            ctx,
-		cancel:         cancel,
-		done:           make(chan struct{}),
-		results:        make(chan dispatchWorkerResult, 1),
-		pollResults:    make(chan pollWorkerResult, 1),
-		poll:           cfg.Poll,
-		pollBase:       pollBase,
-		pollJitter:     jitter,
-		maxPollWorkers: maxPollWorkers,
+		deps:            cfg.Deps,
+		store:           cfg.Store,
+		controllerID:    cfg.ControllerID,
+		ownerID:         cfg.OwnerID,
+		now:             now,
+		renewInterval:   cfg.RenewInterval,
+		antiEntropy:     cfg.AntiEntropy,
+		changeCh:        cfg.ChangeCh,
+		capacityCh:      cfg.CapacityCh,
+		ctx:             ctx,
+		cancel:          cancel,
+		done:            make(chan struct{}),
+		results:         make(chan dispatchWorkerResult, 1),
+		pollResults:     make(chan pollWorkerResult, 1),
+		poll:            cfg.Poll,
+		pollBase:        pollBase,
+		pollJitter:      jitter,
+		maxPollWorkers:  maxPollWorkers,
+		dispatchBackoff: dispatchBackoff,
 	}
 	go r.loop()
 	return r
@@ -265,6 +295,7 @@ func (r *Runner) clearLeadStatus() {
 		s.Inflight = 0
 		s.CapacityBlocked = ""
 		s.CapacityDetail = ""
+		s.DispatchBackoffUntil = time.Time{}
 	})
 }
 
@@ -350,6 +381,9 @@ type leaderState struct {
 	// unreported tracks decisions handed to workers whose results have not
 	// arrived yet, keyed by execution identity.
 	unreported map[workflow.ExecutionIdentity]unreportedEntry
+	// dispatchFail holds the backoff state of candidates whose most recent
+	// dispatches failed, keyed by execution identity.
+	dispatchFail map[workflow.ExecutionIdentity]dispatchFailEntry
 	// outstanding is the number of workers that have not delivered a result
 	// yet.
 	outstanding int
@@ -375,6 +409,18 @@ func (s *leaderState) decrementUnreported(identity workflow.ExecutionIdentity) {
 	}
 }
 
+// earliestDispatchBackoff is the earliest retry time among candidates
+// held in dispatch backoff, or the zero time when none is.
+func (s *leaderState) earliestDispatchBackoff() time.Time {
+	var earliest time.Time
+	for _, e := range s.dispatchFail {
+		if earliest.IsZero() || e.next.Before(earliest) {
+			earliest = e.next
+		}
+	}
+	return earliest
+}
+
 // release gives up the lease if held.
 func (s *leaderState) release(r *Runner) {
 	if !s.holding {
@@ -387,11 +433,15 @@ func (s *leaderState) release(r *Runner) {
 }
 
 // dropLeadership discards the lease and any capacity block after a
-// leadership loss; the status leadership fields are cleared.
+// leadership loss; the status leadership fields are cleared. The backoff
+// state is dropped with them: another controller may have dispatched the
+// candidates meanwhile, so a stale streak would suppress them on a lease
+// this runner no longer owns, contradicting the cleared status fields.
 func (s *leaderState) dropLeadership(r *Runner) {
 	s.holding = false
 	s.leaseID = ""
 	s.blockedSource = ""
+	s.dispatchFail = map[workflow.ExecutionIdentity]dispatchFailEntry{}
 	r.clearLeadStatus()
 }
 
@@ -409,10 +459,37 @@ func (s *leaderState) clearBlock(r *Runner) {
 // capacity block persists across passes until a capacity-change signal or
 // an anti-entropy pass clears it.
 func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLead bool) {
+	// Only a result from the lease this leader state still owns may touch
+	// the backoff state: after a leadership loss the map was reset, so a
+	// delayed result from the superseded lease would otherwise re-suppress
+	// a candidate for a failure the current lease never made.
+	currentLease := s.holding && res.ownerEpoch == s.ownerEpoch
 	if res.err != nil {
 		log.Printf("workflow controller %s: dispatch %v: %v", r.controllerID, res.identity, res.err)
-		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = "dispatch_error" })
+		// Back the candidate off: its next dispatch is deferred, doubling
+		// per consecutive failure, so a persistently failing dispatch
+		// degrades to a bounded retry cadence instead of a hot loop.
+		if currentLease {
+			e := s.dispatchFail[res.identity]
+			e.count++
+			e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
+			s.dispatchFail[res.identity] = e
+			r.setStatus(func(st *RunnerStatus) {
+				st.LastOutcome = "dispatch_error"
+				st.DispatchBackoffUntil = e.next
+			})
+		}
 		return false
+	}
+	// A delivered result means the dispatch worked; the candidate's
+	// consecutive-failure chain is broken.
+	if currentLease {
+		if _, ok := s.dispatchFail[res.identity]; ok {
+			delete(s.dispatchFail, res.identity)
+			if len(s.dispatchFail) == 0 {
+				r.setStatus(func(st *RunnerStatus) { st.DispatchBackoffUntil = time.Time{} })
+			}
+		}
 	}
 	switch res.result.Kind {
 	case ResultDispatched:
@@ -528,6 +605,29 @@ const (
 	// stepExit leaves the leader loop.
 	stepExit
 )
+
+// dispatchBackoffDelay is the per-candidate dispatch-failure backoff: the
+// base after the first consecutive error, doubling per consecutive
+// failure, capped at five times the base.
+//
+// It deliberately does not reuse PollBackoffDelay: the poll schedule has
+// a different cap and a jitter that de-synchronizes many cursors against
+// one adapter. Dispatch candidates back off per identity, and a shared
+// host failure's retry burst is bounded by the cap, so the lockstep
+// retry is tolerated without the jitter.
+func dispatchBackoffDelay(base time.Duration, count int) time.Duration {
+	if base <= 0 {
+		base = defaultDispatchBackoffBase
+	}
+	d := base
+	for i := 1; i < count && d < 5*base; i++ {
+		d *= 2
+	}
+	if d > 5*base {
+		d = 5 * base
+	}
+	return d
+}
 
 // stopOnLogHole reports whether err means the controller's history cannot be
 // replayed. Such a hole is permanent until the controller's state directory is
@@ -666,6 +766,15 @@ func (r *Runner) preparePass(s *leaderState, rec ControllerRecord, nextRenewDue 
 	if d := nextRenewDue.Sub(r.now()); d < wait {
 		wait = d
 	}
+	// A candidate in dispatch backoff wakes the loop at its retry time
+	// so the backoff does not depend on the anti-entropy cadence. A
+	// past deadline (a stale entry) never shortens the wait: the entry
+	// is pruned on the next pass and the anti-entropy tick covers it.
+	if dl := s.earliestDispatchBackoff(); !dl.IsZero() && dl.After(r.now()) {
+		if d := dl.Sub(r.now()); d < wait {
+			wait = d
+		}
+	}
 	// Poll scheduling shares the pass: due cursors are offered to bounded
 	// workers and the wait folds in the earliest scheduled next poll.
 	if r.poll != nil {
@@ -777,6 +886,45 @@ func (r *Runner) dispatchPass(s *leaderState, rec ControllerRecord, wait time.Du
 	// Seed the in-flight view with decisions handed to workers whose
 	// results have not arrived yet, so a pass never double-dispatches
 	// them.
+	// Prune backoff state for identities that are no longer around: a
+	// failed candidate that leaves the provider view (superseded
+	// activation, completed work, deleted workflow) is never dispatched
+	// again, so its entry would otherwise linger. In-flight (unreported)
+	// identities are kept.
+	if len(s.dispatchFail) > 0 {
+		active := make(map[workflow.ExecutionIdentity]bool, len(candidates)+len(s.unreported))
+		for _, c := range candidates {
+			active[c.Identity] = true
+		}
+		for id := range s.unreported {
+			active[id] = true
+		}
+		for id := range s.dispatchFail {
+			if !active[id] {
+				delete(s.dispatchFail, id)
+			}
+		}
+		// The status field names a held retry time; once no candidate is
+		// held, a stale timestamp would report a backoff that nothing
+		// enforces. The success path clears it the same way.
+		if len(s.dispatchFail) == 0 {
+			r.setStatus(func(st *RunnerStatus) { st.DispatchBackoffUntil = time.Time{} })
+		}
+	}
+	// Candidates whose dispatch failed recently are held in backoff and
+	// must not be dispatched again until their backoff expires.
+	suppressed := 0
+	if len(s.dispatchFail) > 0 {
+		filtered := make([]Candidate, 0, len(candidates))
+		for _, c := range candidates {
+			if e, ok := s.dispatchFail[c.Identity]; ok && r.now().Before(e.next) {
+				suppressed++
+				continue
+			}
+			filtered = append(filtered, c)
+		}
+		candidates = filtered
+	}
 	view := r.buildInflightView(s, inflight)
 	decisions := Select(SelectInput{
 		ControllerID: r.controllerID,
@@ -790,7 +938,14 @@ func (r *Runner) dispatchPass(s *leaderState, rec ControllerRecord, wait time.Du
 		s.LastReconcile = reconciledAt
 		s.Inflight = activeCount(view, r.controllerID)
 		if len(decisions) == 0 && s.CapacityBlocked == "" {
-			s.LastOutcome = "idle"
+			// Claim the backoff label only when suppression is the whole
+			// reason: a non-suppressed candidate held out by in-flight
+			// key contention is not a backoff story.
+			if suppressed > 0 && len(candidates) == 0 {
+				s.LastOutcome = "dispatch_backoff"
+			} else {
+				s.LastOutcome = "idle"
+			}
 		}
 	})
 
@@ -839,6 +994,7 @@ func (r *Runner) loop() {
 		timer:        time.NewTimer(0),
 		unreported:   map[workflow.ExecutionIdentity]unreportedEntry{},
 		pollInFlight: map[string]bool{},
+		dispatchFail: map[workflow.ExecutionIdentity]dispatchFailEntry{},
 	}
 	if !s.timer.Stop() {
 		<-s.timer.C
@@ -898,7 +1054,7 @@ func drainSignal(ch <-chan struct{}) {
 // leader loop; the leader drains the channel before exiting, so a blocking
 // send cannot outlive the runner.
 func (r *Runner) dispatchWorker(d Decision, lease LeaderLease) {
-	res := dispatchWorkerResult{identity: d.Candidate.Identity}
+	res := dispatchWorkerResult{identity: d.Candidate.Identity, ownerEpoch: lease.OwnerEpoch}
 	if r.ctx.Err() == nil {
 		res.result, res.err = r.deps.Dispatch(r.ctx, d, lease)
 	} else {

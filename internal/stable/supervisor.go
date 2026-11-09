@@ -6625,11 +6625,15 @@ func controllerLeaderMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 // runner's status; otherwise they stay nil/0.
 func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity string, runner *workflowcontroller.RunnerStatus, nextPollAt any) map[string]any {
 	var lastReconcile any
+	var dispatchBackoffUntil any
 	inflight := 0
 	var capacityBlocked any
 	if runner != nil {
 		if !runner.LastReconcile.IsZero() {
 			lastReconcile = runner.LastReconcile
+		}
+		if !runner.DispatchBackoffUntil.IsZero() {
+			dispatchBackoffUntil = runner.DispatchBackoffUntil
 		}
 		inflight = runner.Inflight
 		if runner.CapacityBlocked != "" {
@@ -6640,16 +6644,17 @@ func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 		}
 	}
 	return map[string]any{
-		"controller_id":    rec.ControllerID,
-		"desired_state":    string(rec.DesiredState),
-		"max_inflight":     rec.MaxInflight,
-		"revision":         rec.Revision,
-		"owner_epoch":      rec.OwnerEpoch,
-		"leader":           controllerLeaderMap(rec, ownIdentity),
-		"last_reconcile":   lastReconcile,
-		"inflight":         inflight,
-		"capacity_blocked": capacityBlocked,
-		"next_poll_at":     nextPollAt,
+		"controller_id":          rec.ControllerID,
+		"desired_state":          string(rec.DesiredState),
+		"max_inflight":           rec.MaxInflight,
+		"revision":               rec.Revision,
+		"owner_epoch":            rec.OwnerEpoch,
+		"leader":                 controllerLeaderMap(rec, ownIdentity),
+		"last_reconcile":         lastReconcile,
+		"inflight":               inflight,
+		"capacity_blocked":       capacityBlocked,
+		"dispatch_backoff_until": dispatchBackoffUntil,
+		"next_poll_at":           nextPollAt,
 	}
 }
 
