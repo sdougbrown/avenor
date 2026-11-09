@@ -52,8 +52,9 @@ Check rejection in a fresh directory as well:
 ```sh
 REJECT=$(mktemp -d /tmp/avenor-verify-reject.XXXXXX)
 ./avenor run --prompt text --prompt-file "$REJECT/prompt.txt" \
-  --sentinel-file "$REJECT/done.env"
+  --sentinel-file "$REJECT/done.env" 2>"$REJECT/stderr.txt"
 echo "exit=$?"
+grep 'mutually exclusive' "$REJECT/stderr.txt"
 test ! -e "$REJECT/done.env" && echo "no sentinel"
 ```
 

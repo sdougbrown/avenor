@@ -55,7 +55,10 @@ avenor run [flags]
 | `--run-id` | (generated) | Correlation ID for this run; auto-generated if not set |
 | `--permission-claim-timeout` | `0` (disabled) | Optional deadline for a connected control client to answer a permission request. With 0, fallback occurs only after all control clients disconnect |
 
-Flag-syntax errors — an unknown flag, a bad duration or integer value, a missing flag value — exit 2. Validation errors raised after the flags parse (mutually exclusive flags, a missing prompt, an invalid roster or workflow file) exit 1.
+Flag validation errors exit 2. These include unknown flags, malformed values,
+and non-empty `--prompt` and `--prompt-file` together. Errors raised after flag
+parsing exit 1, including a missing prompt, an invalid roster or workflow file,
+or `--loop-file` with `--team-file`.
 
 
 ### Examples
