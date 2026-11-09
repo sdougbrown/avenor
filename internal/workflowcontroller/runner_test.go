@@ -50,8 +50,9 @@ type fakeDeps struct {
 	candsErr    error // returned by Candidates() when non-nil
 	inflightErr error // returned by InFlight() when non-nil
 
-	scripted      []DispatchResult // popped per dispatch; falls back to defaultResult
-	errScript     []error          // popped per dispatch before the result script
+	scripted      []DispatchResult                     // popped per dispatch; falls back to defaultResult
+	errScript     []error                              // popped per dispatch before the result script
+	stickyErrFor  map[workflow.ExecutionIdentity]error // per-candidate: every dispatch of that identity returns the error
 	defaultResult DispatchResult
 
 	park             bool // dispatches return ResultParked with parkSeeds
@@ -120,7 +121,9 @@ func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease
 	d.mu.Lock()
 	d.dispatches = append(d.dispatches, rec)
 	var dispatchErr error
-	if len(d.errScript) > 0 {
+	if sticky, ok := d.stickyErrFor[dec.Candidate.Identity]; ok {
+		dispatchErr = sticky
+	} else if len(d.errScript) > 0 {
 		dispatchErr = d.errScript[0]
 		d.errScript = d.errScript[1:]
 	}
@@ -161,6 +164,37 @@ func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease
 }
 
 // --- test-only accessors ---
+
+// countDispatches counts the dispatches recorded for one candidate
+// identity.
+func (d *fakeDeps) countDispatches(identity workflow.ExecutionIdentity) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, rec := range d.dispatches {
+		if rec.identity == identity {
+			n++
+		}
+	}
+	return n
+}
+
+// dispatchAt returns the timestamp of the n-th (0-indexed) dispatch of
+// the given candidate identity, or the zero time if there are fewer.
+func (d *fakeDeps) dispatchAt(identity workflow.ExecutionIdentity, n int) time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	cnt := 0
+	for _, rec := range d.dispatches {
+		if rec.identity == identity {
+			if cnt == n {
+				return rec.at
+			}
+			cnt++
+		}
+	}
+	return time.Time{}
+}
 
 func (d *fakeDeps) dispatchCount() int {
 	d.mu.Lock()
@@ -225,6 +259,18 @@ func (d *fakeDeps) setErrors(errs ...error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.errScript = errs
+}
+
+// setStickyErrors makes every dispatch of the given candidate identity
+// return err, for tests that need a persistently failing candidate while
+// its siblings must keep dispatching.
+func (d *fakeDeps) setStickyErrors(identity workflow.ExecutionIdentity, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stickyErrFor == nil {
+		d.stickyErrFor = map[workflow.ExecutionIdentity]error{}
+	}
+	d.stickyErrFor[identity] = err
 }
 
 func (d *fakeDeps) setDefaultResult(res DispatchResult) {
@@ -894,6 +940,53 @@ func TestRunnerDispatchErrorBacksOffAndRecovers(t *testing.T) {
 	// expired.
 	if s := r.Status(); !s.DispatchBackoffUntil.IsZero() {
 		t.Fatalf("backoff state not cleared after a successful delivery: next=%v", s.DispatchBackoffUntil)
+	}
+}
+
+// TestRunnerDispatchBackoffIsPerCandidate verifies the map keying: while
+// one failing candidate is held in backoff, a non-failing sibling
+// candidate must keep dispatching on cadence. If the map were keyed too
+// broadly (e.g. by controller identity), one candidate's failure would
+// suppress every candidate for the whole backoff window.
+func TestRunnerDispatchBackoffIsPerCandidate(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	failing := runnerCand("wf1", "start", "a1")
+	sibling := runnerCand("wf2", "start", "b1")
+	deps.setCandidates([]Candidate{failing, sibling})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setStickyErrors(failing.Identity, errors.New("host is down"))
+
+	// Short cadence; a 100ms backoff base makes the hold window
+	// observable on the 20ms pass interval.
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond, nil, nil)
+
+	// The failing candidate's first failure is recorded; the hold window
+	// opens. Capture the retry time while it is the first window, so the
+	// sibling check below compares against the window the buggy keying
+	// would hold the sibling in.
+	var deadline time.Time
+	waitUntil(t, "failing candidate held in backoff", func() bool {
+		if r.Status().DispatchBackoffUntil.IsZero() {
+			return false
+		}
+		deadline = r.Status().DispatchBackoffUntil
+		return true
+	})
+	// The sibling's first dispatch already happened in the first pass
+	// (before any backoff existed); the discriminating evidence is its
+	// SECOND dispatch, which a too-broad keying would suppress until the
+	// hold window ends.
+	waitUntil(t, "sibling re-dispatched while the failing candidate is held", func() bool {
+		return deps.countDispatches(sibling.Identity) >= 2
+	})
+	secondAt := deps.dispatchAt(sibling.Identity, 1)
+	if secondAt.IsZero() {
+		t.Fatalf("sibling was never re-dispatched while the failing candidate was held in backoff")
+	}
+	if !secondAt.Before(deadline) {
+		t.Fatalf("sibling re-dispatched at %v, not before the failing candidate's retry time %v: the backoff suppressed the non-failing candidate (keyed too broadly)", secondAt, deadline)
 	}
 }
 
