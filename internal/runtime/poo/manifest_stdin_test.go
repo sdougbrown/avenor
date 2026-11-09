@@ -104,21 +104,22 @@ func TestMessageManifestStdinDelivery(t *testing.T) {
 		"AVENOR_RUN_ID=child",
 		"AVENOR_BROKER_TOKEN="+child,
 	)
-	callTool := func(t *testing.T, args map[string]any) (string, bool) {
-		t.Helper()
+	// callTool runs one manifest call and reports failures as an error, so a
+	// goroutine caller can forward it and the main goroutine does the failing.
+	callTool := func(args map[string]any) (string, bool, error) {
 		encoded, err := json.Marshal(map[string]any{"name": "avenor_message", "args": args})
 		if err != nil {
-			t.Fatal(err)
+			return "", false, fmt.Errorf("encode %v: %w", args, err)
 		}
 		prepared, err := tool.Prepare(encoded, poo.PrepareEnv{})
 		if err != nil {
-			t.Fatalf("prepare %v: %v", args, err)
+			return "", false, fmt.Errorf("prepare %v: %w", args, err)
 		}
 		res, err := tool.Call(context.Background(), prepared, poo.ToolEnv{Env: env})
 		if err != nil {
-			t.Fatalf("call %v: %v", args, err)
+			return "", false, fmt.Errorf("call %v: %w", args, err)
 		}
-		return res.Text, res.IsError
+		return res.Text, res.IsError, nil
 	}
 	// stdout decodes the call's observation envelope and returns the CLI's
 	// own JSON result.
@@ -165,7 +166,10 @@ func TestMessageManifestStdinDelivery(t *testing.T) {
 	// A tell through the manifest delivers the exact bytes, newlines
 	// included, and nothing about the text exists in the plan's argv.
 	tellText := "line one\nline two\n雪 ❄️\n"
-	text, isErr := callTool(t, map[string]any{"action": "tell", "target": "supervisor", "message": tellText})
+	text, isErr, err := callTool(map[string]any{"action": "tell", "target": "supervisor", "message": tellText})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if isErr {
 		t.Fatalf("tell failed: %s", text)
 	}
@@ -184,11 +188,12 @@ func TestMessageManifestStdinDelivery(t *testing.T) {
 	type callResult struct {
 		text  string
 		isErr bool
+		err   error
 	}
 	done := make(chan callResult, 1)
 	go func() {
-		text, isErr := callTool(t, map[string]any{"action": "ask", "target": "supervisor", "message": askText, "timeout_ms": 30000})
-		done <- callResult{text, isErr}
+		text, isErr, err := callTool(map[string]any{"action": "ask", "target": "supervisor", "message": askText, "timeout_ms": 30000})
+		done <- callResult{text, isErr, err}
 	}()
 	msg = receiveInbound()
 	if got := payloadText(msg.Payload); got != askText {
@@ -199,7 +204,7 @@ func TestMessageManifestStdinDelivery(t *testing.T) {
 		t.Fatalf("reply: %+v %v", reply, err)
 	}
 	got := <-done
-	if got.isErr || !strings.Contains(got.text, "answer text") {
+	if got.err != nil || got.isErr || !strings.Contains(got.text, "answer text") {
 		t.Fatalf("ask: %+v", got)
 	}
 
@@ -220,7 +225,10 @@ func TestMessageManifestStdinDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	replyText := "reply one\nreply two\n"
-	text, isErr = callTool(t, map[string]any{"action": "reply", "reply_to": replyID, "message": replyText})
+	text, isErr, err = callTool(map[string]any{"action": "reply", "reply_to": replyID, "message": replyText})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if isErr {
 		t.Fatalf("reply failed: %s", text)
 	}
@@ -231,7 +239,10 @@ func TestMessageManifestStdinDelivery(t *testing.T) {
 
 	// A timed-out ask closes through a manifest-driven withdraw without any
 	// message text at all: the plan emits no stdin flag for the action.
-	text, isErr = callTool(t, map[string]any{"action": "ask", "target": "supervisor", "message": "timeout ask", "timeout_ms": 10})
+	text, isErr, err = callTool(map[string]any{"action": "ask", "target": "supervisor", "message": "timeout ask", "timeout_ms": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if isErr {
 		t.Fatalf("timeout ask failed: %s", text)
 	}
@@ -243,7 +254,10 @@ func TestMessageManifestStdinDelivery(t *testing.T) {
 	if !ok || timeoutID == "" {
 		t.Fatalf("timeout missing message id: %v", result)
 	}
-	text, isErr = callTool(t, map[string]any{"action": "withdraw", "message_id": timeoutID})
+	text, isErr, err = callTool(map[string]any{"action": "withdraw", "message_id": timeoutID})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if isErr {
 		t.Fatalf("withdraw failed: %s", text)
 	}
