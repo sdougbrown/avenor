@@ -1129,27 +1129,28 @@ func TestRunnerBackoffOutcomeSplit(t *testing.T) {
 	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
 	deps := newFakeDeps(store, "c1")
-	held := runnerCand("wf1", "start", "b1")
 	failing := runnerCand("wf2", "start", "a1")
-	deps.setCandidates([]Candidate{held, failing})
+	held := runnerCand("wf1", "start", "b1")
+	deps.setCandidates([]Candidate{failing})
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
 	deps.setStickyErrors(failing.Identity, errors.New("host is down"))
 
-	// Phase 1: the failing candidate backs off while its sibling dispatches
-	// freely, so the backoff exists before anything is blocked.
+	// Phase 1: the failing candidate backs off while it is the only
+	// candidate, so its streak exists before anything can be contended.
 	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 10*time.Second, nil, nil)
 	waitUntil(t, "failing candidate held in backoff", func() bool { return !r.Status().DispatchBackoffUntil.IsZero() })
 
-	// Phase 2: block every dispatch, so the sibling's next dispatch parks
-	// in-flight and its activation key stays claimed across passes. The
-	// backoff-held candidate is filtered before Select, so it cannot
-	// consume a slot.
+	// Phase 2: block every dispatch before the sibling exists, so its
+	// first and only dispatch parks in-flight and its activation key
+	// stays claimed across passes. The backoff-held candidate is filtered
+	// before Select, so it cannot consume a slot.
 	deps.mu.Lock()
 	deps.block = make(chan struct{})
 	deps.blockAll = true
 	deps.mu.Unlock()
+	deps.setCandidates([]Candidate{failing, held})
 	waitUntil(t, "sibling dispatched into a blocked dispatch", func() bool {
-		return deps.countDispatches(held.Identity) >= 2
+		return deps.countDispatches(held.Identity) >= 1
 	})
 
 	// One suppressed candidate (backoff) and one non-suppressed candidate
@@ -1159,10 +1160,9 @@ func TestRunnerBackoffOutcomeSplit(t *testing.T) {
 		return r.Status().LastOutcome == "idle"
 	})
 
-	// All-suppressed: only the backoff-held candidate remains in the view.
-	deps.mu.Lock()
-	deps.cands = []Candidate{failing}
-	deps.mu.Unlock()
+	// All-suppressed: the sibling leaves the view (it stays unreported, so
+	// the prune retains it) and only the backoff-held candidate remains.
+	deps.setCandidates([]Candidate{failing})
 	waitUntil(t, "outcome dispatch_backoff while every candidate is held", func() bool {
 		return r.Status().LastOutcome == "dispatch_backoff"
 	})
