@@ -471,6 +471,7 @@ describe('Avenor Pi renderers', () => {
       inflight: 2,
       candidate_count: 5,
       capacity_blocked: { source: 'local', detail: 'no runtime slots' },
+      dispatch_backoff_until: '2026-01-01T00:00:07Z',
       next_poll_at: '2026-01-01T00:00:09Z',
     }), collapsed, theme, { action: 'controller_status' }))
     expect(enabled).toBe([
@@ -480,6 +481,7 @@ describe('Avenor Pi renderers', () => {
       'In-flight: 2 of 3',
       'Last reconcile: 2026-01-01T00:00:01Z',
       'Capacity blocked: local — no runtime slots',
+      'Dispatch backoff: 2026-01-01T00:00:07Z',
       'Next external poll: 2026-01-01T00:00:09Z',
       'Guidance: Call avenor_workflow with action "controller_status" and no controller_id to review all controllers.',
     ].join('\n'))
