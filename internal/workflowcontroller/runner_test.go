@@ -31,6 +31,7 @@ type dispatchRecord struct {
 	identity  workflow.ExecutionIdentity
 	lease     LeaderLease
 	renewedAt time.Time // store leader RenewedAt observed at dispatch entry
+	at        time.Time // wall-clock time at dispatch entry
 }
 
 // fakeDeps is a scripted RunnerDeps over a real ControllerStore. Dispatch
@@ -112,7 +113,7 @@ func (d *fakeDeps) ParkedGates(controllerID string) ([]workflow.ParkedGateRef, e
 }
 
 func (d *fakeDeps) Dispatch(ctx context.Context, dec Decision, lease LeaderLease) (DispatchResult, error) {
-	rec := dispatchRecord{identity: dec.Candidate.Identity, lease: lease}
+	rec := dispatchRecord{identity: dec.Candidate.Identity, lease: lease, at: time.Now()}
 	if srec, _, err := d.store.Get(d.controller); err == nil && srec.Leader != nil {
 		rec.renewedAt = srec.Leader.RenewedAt
 	}
@@ -315,17 +316,18 @@ func runnerCandWithKey(wf, node, act, key string) Candidate {
 
 // startRunner constructs a runner with short test cadences and registers its
 // stop as cleanup.
-func startRunner(t *testing.T, store *ControllerStore, deps RunnerDeps, renew, antiEntropy time.Duration, changeCh, capacityCh chan struct{}) *Runner {
+func startRunner(t *testing.T, store *ControllerStore, deps RunnerDeps, renew, antiEntropy, dispatchBackoff time.Duration, changeCh, capacityCh chan struct{}) *Runner {
 	t.Helper()
 	r := NewRunner(RunnerConfig{
-		Deps:          deps,
-		Store:         store,
-		ControllerID:  "c1",
-		OwnerID:       "owner-test",
-		RenewInterval: renew,
-		AntiEntropy:   antiEntropy,
-		ChangeCh:      changeCh,
-		CapacityCh:    capacityCh,
+		Deps:                deps,
+		Store:               store,
+		ControllerID:        "c1",
+		OwnerID:             "owner-test",
+		RenewInterval:       renew,
+		AntiEntropy:         antiEntropy,
+		ChangeCh:            changeCh,
+		CapacityCh:          capacityCh,
+		DispatchBackoffBase: dispatchBackoff,
 	})
 	t.Cleanup(r.Stop)
 	return r
@@ -342,7 +344,7 @@ func TestRunnerRenewsBeforeEveryDispatch(t *testing.T) {
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
 	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
 
-	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 
 	waitUntil(t, "at least three dispatches", func() bool { return deps.dispatchCount() >= 3 })
 	recs := deps.allDispatches()
@@ -377,7 +379,7 @@ func TestRunnerFailedRenewalStopsDispatchAndReacquires(t *testing.T) {
 	deps.blockFirst = 2
 	deps.mu.Unlock()
 
-	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 
 	// Both decisions are handed off under epoch 1 and block in Dispatch.
 	waitUntil(t, "two in-flight dispatches", func() bool { return deps.dispatchCount() >= 2 })
@@ -442,7 +444,7 @@ func TestRunnerStopsOnLogHole(t *testing.T) {
 			if test.holeBeforeStart {
 				holeControllerLog(t, store, "c1")
 			}
-			r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+			r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 			if !test.holeBeforeStart {
 				waitUntil(t, "runner leading", func() bool { return r.Status().Leading })
 				holeControllerLog(t, store, "c1")
@@ -489,7 +491,7 @@ func TestRunnerMaxInflightCountsUnreportedWorkers(t *testing.T) {
 	deps.blockAll = true // every dispatch blocks
 	deps.mu.Unlock()
 
-	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 
 	waitUntil(t, "max_inflight dispatches started", func() bool { return deps.dispatchCount() >= 2 })
 
@@ -629,7 +631,7 @@ func TestRunnerMissedNotificationRecoveredByAntiEntropy(t *testing.T) {
 	deps := newFakeDeps(store, "c1")
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
 
-	r := startRunner(t, store, deps, 20*time.Millisecond, 60*time.Millisecond, nil, nil)
+	r := startRunner(t, store, deps, 20*time.Millisecond, 60*time.Millisecond, 0, nil, nil)
 
 	// The first pass refreshes an empty host view: no candidate, no
 	// dispatch.
@@ -669,7 +671,7 @@ func TestRunnerNotLeaderDropsLeadershipAndReacquires(t *testing.T) {
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
 	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
 
-	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 
 	waitUntil(t, "first dispatch attempted", func() bool { return deps.dispatchCount() >= 1 })
 
@@ -815,17 +817,19 @@ func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
 	deps.mu.Unlock()
 
 	changeCh := make(chan struct{}, 1)
-	r := startRunner(t, store, deps, 10*time.Second, 10*time.Second, changeCh, nil)
+	r := startRunner(t, store, deps, 10*time.Second, 10*time.Second, 10*time.Millisecond, changeCh, nil)
 
 	// The first pass runs on startup; release the held dispatch so it
 	// reports the injected error.
 	waitUntil(t, "first dispatch attempted", func() bool { return deps.dispatchCount() >= 1 })
 	block <- struct{}{}
 	waitUntil(t, "dispatch_error outcome recorded", func() bool {
-		return r.Status().LastOutcome == "dispatch_error"
+		o := r.Status().LastOutcome
+		// dispatch_error is set on the failed worker's result; the
+		// follow-up pass then reports the candidate as held in
+		// backoff, which also proves the error was recorded.
+		return o == "dispatch_error" || o == "dispatch_backoff"
 	})
-	// The failed worker's result wakes a follow-up pass whose dispatch is
-	// held blocked, so the outcome above is stable here.
 	if s := r.Status(); !s.Leading {
 		t.Fatal("runner dropped leadership after a dispatch error")
 	}
@@ -847,6 +851,45 @@ func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
 	}
 }
 
+// TestRunnerDispatchErrorBacksOffAndRecovers proves the per-candidate
+// dispatch-failure backoff: a candidate whose dispatch fails is not
+// re-dispatched until the backoff expires, the backoff doubles per
+// consecutive failure, and a successful delivery clears it so the
+// candidate is dispatched again without delay.
+func TestRunnerDispatchErrorBacksOffAndRecovers(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	// Two consecutive failures, then success.
+	deps.setErrors(errors.New("injected failure one"), errors.New("injected failure two"))
+
+	// Short cadence; a 100ms backoff base makes the schedule observable.
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond, nil, nil)
+
+	// The third delivery succeeds and clears the backoff; the fourth
+	// (same candidate, still ready in this fake) must be allowed again.
+	waitUntil(t, "four dispatches", func() bool { return deps.dispatchCount() >= 4 })
+	recs := deps.allDispatches()
+	// First backoff: the second attempt starts no earlier than ~100ms.
+	if d := recs[1].at.Sub(recs[0].at); d < 80*time.Millisecond {
+		t.Fatalf("second dispatch after %v, want the ~100ms backoff honored", d)
+	}
+	// Doubled backoff: the third attempt starts no earlier than ~300ms.
+	if d := recs[2].at.Sub(recs[1].at); d < 160*time.Millisecond {
+		t.Fatalf("third dispatch after %v, want the ~200ms doubled backoff honored", d)
+	}
+	// The successful third delivery cleared the backoff, so the fourth
+	// attempt is not deferred by it.
+	if d := recs[3].at.Sub(recs[2].at); d > 100*time.Millisecond {
+		t.Fatalf("fourth dispatch after %v, want no backoff after a successful delivery", d)
+	}
+	if s := r.Status(); s.DispatchBackoffUntil.IsZero() {
+		t.Fatal("status never recorded a dispatch backoff retry time")
+	}
+}
+
 // TestRunnerInflightRefreshedDuringCapacityBlock proves a blocked pass
 // refreshes the published in-flight count from the live view: while the
 // capacity block persists, the count tracks the live in-flight set (a worker
@@ -861,7 +904,7 @@ func TestRunnerInflightRefreshedDuringCapacityBlock(t *testing.T) {
 
 	changeCh := make(chan struct{}, 1)
 	capacityCh := make(chan struct{}, 1)
-	r := startRunner(t, store, deps, 20*time.Millisecond, 5*time.Second, changeCh, capacityCh)
+	r := startRunner(t, store, deps, 20*time.Millisecond, 5*time.Second, 0, changeCh, capacityCh)
 
 	// Block on the first pass, then wait for the two blocked workers to
 	// report so the unreported set is empty and the live view is the only
@@ -925,7 +968,7 @@ func TestRunnerUnreportedWorkerHoldsConcurrencyKey(t *testing.T) {
 	deps.blockAll = true // every dispatch blocks
 	deps.mu.Unlock()
 
-	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 
 	// The first candidate is handed to a worker that blocks (has not
 	// reported).
@@ -957,7 +1000,7 @@ func TestRunnerRefreshErrorKeepsRunningAndRecovers(t *testing.T) {
 	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
 	deps.setRefreshError(errors.New("injected refresh failure"))
 
-	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 
 	waitUntil(t, "refresh_error outcome recorded", func() bool {
 		return r.Status().LastOutcome == "refresh_error"
@@ -988,7 +1031,7 @@ func TestRunnerCandidatesErrorKeepsRunningAndRecovers(t *testing.T) {
 	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
 	deps.setCandidatesError(errors.New("injected candidates failure"))
 
-	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 
 	waitUntil(t, "candidates_error outcome recorded", func() bool {
 		return r.Status().LastOutcome == "candidates_error"
@@ -1022,7 +1065,7 @@ func TestRunnerInFlightErrorKeepsRunningAndRecovers(t *testing.T) {
 	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
 	deps.setInFlightError(errors.New("injected in-flight failure"))
 
-	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, nil, nil)
+	r := startRunner(t, store, deps, 20*time.Millisecond, 50*time.Millisecond, 0, nil, nil)
 
 	waitUntil(t, "inflight_error outcome recorded", func() bool {
 		return r.Status().LastOutcome == "inflight_error"
