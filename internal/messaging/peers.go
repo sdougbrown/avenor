@@ -27,6 +27,9 @@ func decodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 				unreadable++
 				continue
 			}
+			// The router owns Self and assigns it from the caller identity, so a
+			// session record carrying `self` cannot inject the marker here.
+			record.Self = false
 		}
 		if peer.RunID != "" {
 			record.RunID = peer.RunID
