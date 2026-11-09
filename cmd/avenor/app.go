@@ -189,7 +189,8 @@ func app() *clicontract.App {
 						Flags: []clicontract.Flag{
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to template JSON file (required)", Required: true},
 						},
-						Handle: handleWorkflowCreate,
+						InputRules: nonEmptyRequiredRules("request-file"),
+						Handle:     handleWorkflowCreate,
 					},
 					{
 						Name:  "instantiate",
@@ -199,7 +200,8 @@ func app() *clicontract.App {
 							{Name: "template-version", Kind: clicontract.String, Usage: "template version (required)", Required: true},
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to instance JSON file (required; {\"metadata\":{...},\"params\":{...}} or {})", Required: true},
 						},
-						Handle: handleWorkflowInstantiate,
+						InputRules: nonEmptyRequiredRules("template-id", "template-version", "request-file"),
+						Handle:     handleWorkflowInstantiate,
 					},
 					{
 						Name:        "status",
@@ -242,7 +244,8 @@ func app() *clicontract.App {
 							{Name: "lease-id", Kind: clicontract.String, Usage: "lease id (required)", Required: true},
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to complete request JSON file (required; must contain owner_token, outcome, outputs, artifacts)", Required: true},
 						},
-						Handle: handleWorkflowComplete,
+						InputRules: nonEmptyRequiredRules("activation-id", "attempt-id", "lease-id", "request-file"),
+						Handle:     handleWorkflowComplete,
 					},
 					{
 						Name:        "gate",
@@ -253,7 +256,8 @@ func app() *clicontract.App {
 							{Name: "operation", Kind: clicontract.String, Usage: "gate operation (required; satisfy, reject, waive, or external_result)", Required: true},
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to gate request JSON file (required)", Required: true},
 						},
-						Handle: handleWorkflowGate,
+						InputRules: nonEmptyRequiredRules("activation-id", "operation", "request-file"),
+						Handle:     handleWorkflowGate,
 					},
 					{
 						Name:        "skip",
@@ -262,7 +266,8 @@ func app() *clicontract.App {
 						Flags: []clicontract.Flag{
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to skip request JSON file (required; must contain actor, reason, evidence_ids)", Required: true},
 						},
-						Handle: handleWorkflowSkip,
+						InputRules: nonEmptyRequiredRules("request-file"),
+						Handle:     handleWorkflowSkip,
 					},
 					{
 						Name:        "cancel",
@@ -272,7 +277,8 @@ func app() *clicontract.App {
 							{Name: "reason", Kind: clicontract.String, Usage: "reason for the cancel (required; recorded on the workflow.canceled event)", Required: true},
 							{Name: "actor", Kind: clicontract.String, Usage: "actor id recorded as the canceling operator", Default: "cli"},
 						},
-						Handle: handleWorkflowCancel,
+						InputRules: nonEmptyRequiredRules("reason"),
+						Handle:     handleWorkflowCancel,
 					},
 					{
 						Name:        "unblock",
@@ -281,7 +287,8 @@ func app() *clicontract.App {
 						Flags: []clicontract.Flag{
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to unblock request JSON file (required; must contain actor, reason)", Required: true},
 						},
-						Handle: handleWorkflowUnblock,
+						InputRules: nonEmptyRequiredRules("request-file"),
+						Handle:     handleWorkflowUnblock,
 					},
 					{
 						Name:        "ready",
@@ -302,7 +309,8 @@ func app() *clicontract.App {
 								Flags: []clicontract.Flag{
 									{Name: "request-file", Kind: clicontract.String, Usage: "path to controller JSON file (required)", Required: true},
 								},
-								Handle: handleWorkflowControllerCreate,
+								InputRules: nonEmptyRequiredRules("request-file"),
+								Handle:     handleWorkflowControllerCreate,
 							},
 							{
 								Name:        "enable",
@@ -317,7 +325,8 @@ func app() *clicontract.App {
 								Flags: []clicontract.Flag{
 									{Name: "reason", Kind: clicontract.String, Usage: "reason for disabling (required)", Required: true},
 								},
-								Handle: handleWorkflowControllerDisable,
+								InputRules: nonEmptyRequiredRules("reason"),
+								Handle:     handleWorkflowControllerDisable,
 							},
 							{
 								Name:        "status",
@@ -442,6 +451,14 @@ func app() *clicontract.App {
 			},
 		},
 	}
+}
+
+func nonEmptyRequiredRules(names ...string) []*clicontract.Rule {
+	rules := make([]*clicontract.Rule, 0, len(names))
+	for _, name := range names {
+		rules = append(rules, clicontract.EnabledOn(name, clicontract.Truthy(name), "--"+name+" must not be empty"))
+	}
+	return rules
 }
 
 // schemaDocument is the shape the schema command writes: the declared

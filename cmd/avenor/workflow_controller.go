@@ -14,9 +14,6 @@ import (
 // file.
 func handleWorkflowControllerCreate(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	requestFile := inv.Flags["request-file"]
-	if requestFile == "" {
-		return nil, usageErrorf("avenor workflow controller create: --request-file is required")
-	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
@@ -51,9 +48,6 @@ func handleWorkflowControllerEnable(ctx context.Context, inv clicontract.Invocat
 // durable audit trail.
 func handleWorkflowControllerDisable(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	reason := inv.Flags["reason"]
-	if reason == "" {
-		return nil, usageErrorf("avenor workflow controller disable: --reason is required")
-	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err

@@ -48,9 +48,6 @@ func workflowRequireKeys(name string, req map[string]any, keys []string) error {
 // handleWorkflowCreate registers a workflow template from a JSON file.
 func handleWorkflowCreate(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	requestFile := inv.Flags["request-file"]
-	if requestFile == "" {
-		return nil, usageErrorf("avenor workflow: create: --request-file is required")
-	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
@@ -72,9 +69,6 @@ func handleWorkflowInstantiate(ctx context.Context, inv clicontract.Invocation, 
 	templateID := inv.Flags["template-id"]
 	templateVersion := inv.Flags["template-version"]
 	requestFile := inv.Flags["request-file"]
-	if templateID == "" || templateVersion == "" || requestFile == "" {
-		return nil, usageErrorf("avenor workflow: instantiate: --template-id, --template-version, and --request-file are required")
-	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
@@ -173,9 +167,6 @@ func handleWorkflowComplete(ctx context.Context, inv clicontract.Invocation, std
 	attemptID := inv.Flags["attempt-id"]
 	leaseID := inv.Flags["lease-id"]
 	requestFile := inv.Flags["request-file"]
-	if activationID == "" || attemptID == "" || leaseID == "" || requestFile == "" {
-		return nil, usageErrorf("avenor workflow: complete: --activation-id, --attempt-id, --lease-id, and --request-file are required")
-	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
@@ -213,9 +204,6 @@ func handleWorkflowGate(ctx context.Context, inv clicontract.Invocation, stderr 
 	activationID := inv.Flags["activation-id"]
 	operation := inv.Flags["operation"]
 	requestFile := inv.Flags["request-file"]
-	if activationID == "" || operation == "" || requestFile == "" {
-		return nil, usageErrorf("avenor workflow: gate: --activation-id, --operation, and --request-file are required")
-	}
 	switch operation {
 	case "satisfy", "reject", "waive", "external_result":
 	default:
@@ -250,9 +238,6 @@ func handleWorkflowGate(ctx context.Context, inv clicontract.Invocation, stderr 
 // evidence_ids, and optionally activation_id.
 func handleWorkflowSkip(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	requestFile := inv.Flags["request-file"]
-	if requestFile == "" {
-		return nil, usageErrorf("avenor workflow: skip: --request-file is required")
-	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
@@ -283,9 +268,6 @@ func handleWorkflowSkip(ctx context.Context, inv clicontract.Invocation, stderr 
 // instance's in-flight attempt runtimes supervisor-side.
 func handleWorkflowCancel(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	reason := inv.Flags["reason"]
-	if reason == "" {
-		return nil, usageErrorf("avenor workflow: cancel: --reason is required")
-	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
@@ -302,9 +284,6 @@ func handleWorkflowCancel(ctx context.Context, inv clicontract.Invocation, stder
 // file carries actor, reason, and optionally activation_id.
 func handleWorkflowUnblock(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	requestFile := inv.Flags["request-file"]
-	if requestFile == "" {
-		return nil, usageErrorf("avenor workflow: unblock: --request-file is required")
-	}
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
