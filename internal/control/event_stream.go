@@ -135,22 +135,13 @@ func (s *ControlServer) SetRunSettled(exitCode int, stopReason string) {
 		ss.ExitCode = &code
 	})
 	if wake {
+		// The outcome is carried by status, stop_reason, and exit_code. Every
+		// terminal phase is done, matching what a supervisor reports for a
+		// completed session; one switch mapping exit codes here would be a third
+		// copy of that vocabulary beside StopReasonForExitCode.
 		s.PublishEvent(events.Event{Event: "agent.status", Fields: map[string]any{
-			"phase": string(settledPhase(exitCode)),
+			"phase": string(runstate.PhaseDone),
 		}})
-	}
-}
-
-func settledPhase(exitCode int) runstate.Phase {
-	switch exitCode {
-	case 0:
-		return runstate.Phase(runstate.StatusDone)
-	case 124:
-		return runstate.Phase(runstate.StatusTimeout)
-	case 130:
-		return runstate.Phase(runstate.StatusKilled)
-	default:
-		return runstate.Phase(runstate.StatusFailed)
 	}
 }
 

@@ -144,6 +144,25 @@ func TestOneShotSetRunSettledPublishesTerminalState(t *testing.T) {
 	if last.Event != "agent.status" {
 		t.Fatalf("last history event = %q, want the settle wake-up", last.Event)
 	}
+	if phase, _ := last.Fields["phase"].(string); phase != "done" {
+		t.Fatalf("settle wake-up phase = %q, want done", phase)
+	}
+}
+
+// A run the event stream already settled needs no wake event; a duplicate
+// agent.status would land in subscriber streams and replay history.
+func TestOneShotSettledRunPublishesNoWakeEvent(t *testing.T) {
+	state := NewState("run_done", "done", 0)
+	s, _ := NewTestServer(state)
+	s.PublishEvent(events.Event{Event: "session.start"})
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "end_turn", "exit_code": 0}})
+	before, _ := s.runtimeHistory("run_done", 0, 10)
+
+	s.SetRunSettled(0, "end_turn")
+	after, _ := s.runtimeHistory("run_done", 0, 10)
+	if len(after) != len(before) {
+		t.Fatalf("history grew from %d to %d after settling an already-settled run", len(before), len(after))
+	}
 }
 
 // A supervisor server ignores settlement: its outcomes belong to runtimes.
