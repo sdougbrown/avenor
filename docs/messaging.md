@@ -97,7 +97,7 @@ forward their asks to the parent.
 {"name":"avenor_message","args":{"action":"reply","reply_to":"MESSAGE_ID","message":"answer"}}
 ```
 
-The `avenor_message` registry entry invokes `avenor message` as the child. See [poo messaging](backends.md#messaging) for the switch, launch checks and credential visibility.
+The `avenor_message` registry entry invokes `avenor message` as the child, with the entry's `message` argument delivered through stdin (`--message-stdin`) so the text stays out of the command's arguments. See [poo messaging](backends.md#messaging) for the switch, launch checks and credential visibility.
 
 ## OpenCode conversations
 
