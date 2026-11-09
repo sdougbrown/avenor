@@ -63,9 +63,10 @@ avenor answer "$PERM_BASE" --option <option-id>
 
 Wait for the child to exit, then inspect `$SENTINEL` if present. A parse error,
 crash, forced termination, or sentinel write error can leave no sentinel; report
-that outcome rather than polling forever. `DONE` is clean. `BLOCKED` means
-jockey escalated — read `REASON=` for context. Read a result file only if this
-run's sentinel names it in `RESULT=`.
+that outcome rather than polling forever. `DONE` is clean; `FAILED`, `TIMEOUT`,
+and `KILLED` indicate problems. `BLOCKED` means jockey escalated — read
+`REASON=` for context. Read a result file only if this run's sentinel names it
+in `RESULT=`.
 
 ## Note on dispatch depth
 

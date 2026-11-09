@@ -102,7 +102,7 @@ avenor control --socket /tmp/avenor-stable.sock spawn \
   --prompt "Your task here" \
   --dir /repo \
   --agent jockey \
-  --permission-handler file:/tmp/avenor-perm \
+  --permission-handler "file:$RUN_DIR/perm" \
   --label my-task
 
 # List running runtimes
