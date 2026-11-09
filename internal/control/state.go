@@ -22,6 +22,12 @@ type Snapshot struct {
 	UpdatedAt         int64          `json:"updated_at"`
 	TurnState         string         `json:"turn_state,omitempty"`
 	LatestSeq         int64          `json:"latest_seq,omitempty"`
+	// Status and the terminal fields below describe the run a server owns
+	// directly. A supervisor reports them per runtime; a one-shot server
+	// derives them from the events it publishes so a caller can await it.
+	Status     string `json:"status,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
 	// FinalOutput is a bounded status preview. The complete terminal reply is
 	// retained separately for the explicit result control method.
 	FinalOutput          string `json:"final_output,omitempty"`

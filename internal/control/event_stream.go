@@ -6,6 +6,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runstate"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 const (
@@ -58,8 +59,104 @@ func eventRuntimeID(ev events.Event) string {
 	return stringField(ev.Fields, "runtime_id")
 }
 
-func eventScopeKey(ev events.Event) string {
-	return eventRuntimeID(ev)
+// singleRunID names the one run a server owns when no supervisor supplies
+// runtimes. A supervisor server has no ambient run, so it returns empty.
+func (s *ControlServer) singleRunID() string {
+	if s.stableHandler != nil {
+		return ""
+	}
+	return s.state.Snapshot().RunID
+}
+
+// oneShotSnapshot returns the owned run's snapshot with the status a caller
+// expects even before the first event arrives.
+func (s *ControlServer) oneShotSnapshot() Snapshot {
+	snap := s.state.Snapshot()
+	if snap.Status == "" {
+		snap.Status = string(runstate.StatusRunning)
+	}
+	return snap
+}
+
+// oneShotList presents the owned run in the shape a supervisor's list uses, so
+// a caller can resolve it by run id or label the same way.
+func (s *ControlServer) oneShotList() []map[string]any {
+	snap := s.oneShotSnapshot()
+	if snap.RunID == "" {
+		return []map[string]any{}
+	}
+	return []map[string]any{s.oneShotEntry(snap)}
+}
+
+// oneShotEntry renders the owned run with the field names a supervisor's list
+// and runtime-scoped status use, so a caller reads one shape from either socket.
+func (s *ControlServer) oneShotEntry(snap Snapshot) map[string]any {
+	exitCode := 0
+	if snap.ExitCode != nil {
+		exitCode = *snap.ExitCode
+	}
+	return map[string]any{
+		"runtime_id":         snap.RunID,
+		"run_id":             snap.RunID,
+		"label":              snap.RunLabel,
+		"session_id":         snap.SessionID,
+		"status":             snap.Status,
+		"stop_reason":        snap.StopReason,
+		"exit_code":          exitCode,
+		"phase":              string(snap.Phase),
+		"phase_label":        snap.PhaseLabel,
+		"started_at":         snap.StartedAt,
+		"pending_permission": snap.PendingPermission,
+		"latest_seq":         snap.LatestSeq,
+	}
+}
+
+// SetRunSettled marks the run this server owns as settled and wakes
+// subscribers, so a client awaiting the socket observes the terminal state
+// before the server stops. It is a no-op on a supervisor, whose outcomes are
+// per runtime. The run loop calls it on any exit path it alone decides, such as
+// a retry it declines to start.
+func (s *ControlServer) SetRunSettled(exitCode int, stopReason string) {
+	if s.stableHandler != nil {
+		return
+	}
+	code := exitCode
+	wake := false
+	s.state.Update(func(ss *Snapshot) {
+		// A run that already published its terminal event needs no wake-up;
+		// only a suppressed attempt (or an exit before any terminal event) does.
+		if ss.Status != string(runstate.StatusEnded) || ss.ExitCode == nil {
+			wake = true
+		}
+		ss.Status = string(runstate.StatusEnded)
+		if stopReason != "" {
+			ss.StopReason = stopReason
+		}
+		ss.ExitCode = &code
+	})
+	if wake {
+		// The outcome is carried by status, stop_reason, and exit_code. Every
+		// terminal phase is done, matching what a supervisor reports for a
+		// completed session; one switch mapping exit codes here would be a third
+		// copy of that vocabulary beside StopReasonForExitCode.
+		s.PublishEvent(events.Event{Event: "agent.status", Fields: map[string]any{
+			"phase": string(runstate.PhaseDone),
+		}})
+	}
+}
+
+func (s *ControlServer) eventScope(ev events.Event) string {
+	return eventScopeWithFallback(ev, s.singleRunID())
+}
+
+// eventScopeWithFallback names the runtime an event belongs to. Events a
+// one-shot server publishes carry no runtime_id, so they take the fallback the
+// caller owns: the server's single run, or the run a subscriber follows.
+func eventScopeWithFallback(ev events.Event, fallback string) string {
+	if id := eventRuntimeID(ev); id != "" {
+		return id
+	}
+	return fallback
 }
 
 func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
@@ -87,7 +184,7 @@ func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := eventRuntimeID(out)
+	key := s.eventScope(out)
 	st := s.eventState[key]
 	if st == nil {
 		st = &runtimeEventState{}
@@ -154,6 +251,14 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 		switch event.Event {
 		case "session.start":
 			ss.TurnState = "starting"
+			if s.stableHandler == nil && (ss.Status == "" || ss.Status == string(runstate.StatusEnded)) {
+				ss.Status = string(runstate.StatusRunning)
+				ss.StopReason = ""
+				ss.ExitCode = nil
+				ss.FinalOutput = ""
+				ss.FullFinalOutput = ""
+				ss.FinalOutputTruncated = false
+			}
 		case "tool.call", "agent.thought_chunk", "agent.message_chunk":
 			if ss.TurnState == "starting" || ss.TurnState == "" {
 				ss.TurnState = "running"
@@ -162,11 +267,30 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 			if ss.TurnState != "idle" && ss.TurnState != "cancelling" {
 				ss.TurnState = "ended"
 			}
+			if s.stableHandler != nil {
+				break
+			}
+			reason, _ := event.Fields["stop_reason"].(string)
+			exitCode, hasExit := int64Field(event.Fields["exit_code"])
+			// A retryable attempt failure is not the run's outcome: the loop
+			// publishes another session.start, so report running until the last
+			// allowed attempt settles.
+			if hasExit && runtime.IsRetryableFailure(int(exitCode), reason) && ss.RetryAttempt > 0 && ss.RetryAttempt <= ss.MaxRetries {
+				break
+			}
+			ss.Status = string(runstate.StatusEnded)
+			if reason != "" {
+				ss.StopReason = reason
+			}
+			if hasExit {
+				code := int(exitCode)
+				ss.ExitCode = &code
+			}
 		}
 	})
 
 	s.mu.Lock()
-	if runtimeID := eventRuntimeID(event); runtimeID != "" {
+	if runtimeID := s.eventScope(event); runtimeID != "" {
 		st := s.eventState[runtimeID]
 		if st == nil {
 			st = &runtimeEventState{}

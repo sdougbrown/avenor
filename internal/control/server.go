@@ -183,12 +183,15 @@ type subscriber struct {
 	ch        chan events.Event
 	done      chan struct{}
 	runtimeID string
-	pending   []events.Event
-	dropped   int
-	seenSeq   map[string]int64
-	ready     bool
-	mu        sync.Mutex // guards subscriber buffers and channel lifecycle
-	closed    bool
+	// scopeID stands in for the runtime id on events a one-shot server
+	// publishes without one.
+	scopeID string
+	pending []events.Event
+	dropped int
+	seenSeq map[string]int64
+	ready   bool
+	mu      sync.Mutex // guards subscriber buffers and channel lifecycle
+	closed  bool
 }
 
 func NewServer(state *ControlState, owner OwnerCapability) *ControlServer {
@@ -1318,6 +1321,13 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if runtimeID == "" {
 			return success(req.ID, map[string]any{"final_output": s.state.FinalOutput()})
 		}
+		if s.stableHandler == nil {
+			snap := s.oneShotSnapshot()
+			if runtimeID != snap.RunID {
+				return failure(req.ID, -32000, fmt.Sprintf("runtime %q not found", runtimeID), nil)
+			}
+			return success(req.ID, map[string]any{"final_output": s.state.FinalOutput()})
+		}
 		// Result is intentionally narrower than status: implementations may
 		// retain a full terminal reply without putting it on status or event
 		// presentation paths.
@@ -1335,13 +1345,20 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 	case "status":
 		if rtID := runtimeIDFromParams(req.Params); rtID != "" {
 			if s.stableHandler == nil {
-				return failure(req.ID, -32601, "method not found", nil)
+				snap := s.oneShotSnapshot()
+				if rtID != snap.RunID {
+					return failure(req.ID, -32000, fmt.Sprintf("runtime %q not found", rtID), nil)
+				}
+				return success(req.ID, s.oneShotEntry(snap))
 			}
 			result, err := s.stableHandler.RuntimeStatus(rtID)
 			if err != nil {
 				return failure(req.ID, -32000, err.Error(), nil)
 			}
 			return success(req.ID, result)
+		}
+		if s.stableHandler == nil {
+			return success(req.ID, s.oneShotSnapshot())
 		}
 		return success(req.ID, s.state.Snapshot())
 	case "subscribe":
@@ -1355,6 +1372,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32602, "invalid params", map[string]any{"required": []string{"runtime_id"}})
 		}
 		sub := newSubscriber(c, p.RuntimeID, p.AfterSeq)
+		sub.scopeID = s.singleRunID()
 		s.mu.Lock()
 		if s.stopped {
 			s.mu.Unlock()
@@ -1660,7 +1678,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		return success(req.ID, result)
 	case "list":
 		if s.stableHandler == nil {
-			return failure(req.ID, -32601, "method not found", nil)
+			return success(req.ID, s.oneShotList())
 		}
 		return success(req.ID, s.stableHandler.List())
 
@@ -2299,7 +2317,11 @@ func (s *subscriber) matches(ev events.Event) bool {
 	if s.runtimeID == "" {
 		return true
 	}
-	return eventRuntimeID(ev) == s.runtimeID
+	return s.eventScope(ev) == s.runtimeID
+}
+
+func (s *subscriber) eventScope(ev events.Event) string {
+	return eventScopeWithFallback(ev, s.scopeID)
 }
 
 func (s *subscriber) recordSeqLocked(ev events.Event) bool {
@@ -2307,7 +2329,7 @@ func (s *subscriber) recordSeqLocked(ev events.Event) bool {
 	if !ok {
 		return true
 	}
-	key := eventScopeKey(ev)
+	key := s.eventScope(ev)
 	if last, ok := s.seenSeq[key]; ok && seq <= last {
 		return false
 	}
