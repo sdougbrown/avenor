@@ -1037,6 +1037,77 @@ func TestRunnerDispatchBackoffWakesWithoutChangeSignal(t *testing.T) {
 	}
 }
 
+// TestRunnerLeadershipLossClearsDispatchBackoff proves the backoff state
+// does not survive a leadership loss: a candidate held in backoff must be
+// dispatched again after the lease is lost and re-acquired, instead of
+// staying suppressed by a streak the re-acquired leadership inherited.
+func TestRunnerLeadershipLossClearsDispatchBackoff(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	cand := runnerCand("wf1", "start", "a1")
+	deps.setCandidates([]Candidate{cand})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setStickyErrors(cand.Identity, errors.New("host is down"))
+
+	// A backoff base far beyond the test's wait budget: with the old
+	// behavior the still-future entry suppresses the candidate for the
+	// whole window, so the second dispatch below cannot come from the
+	// backoff expiring.
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 10*time.Second, nil, nil)
+
+	waitUntil(t, "first dispatch failed into backoff", func() bool {
+		return deps.dispatchCount() >= 1 && !r.Status().DispatchBackoffUntil.IsZero()
+	})
+
+	// Force the leadership loss the same way the store would: the lease
+	// goes away, so the runner drops leadership and re-acquires.
+	rec, _, err := store.Get("c1")
+	if err != nil || rec.Leader == nil {
+		t.Fatalf("get lease: rec=%+v err=%v", rec, err)
+	}
+	if _, err := store.ReleaseLease("c1", rec.Leader.LeaseID, rec.Leader.OwnerEpoch); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	waitUntil(t, "runner leading again", func() bool { return storeLeaderEpoch(t, store) >= 2 })
+	// The discriminating assertion: the candidate is dispatched again even
+	// though the inherited backoff entry would still be future-dated. The
+	// inherited entry's 10s window outlasts the wait budget, so only a
+	// cleared map lets this dispatch through.
+	waitUntil(t, "candidate re-dispatched after the leadership loss", func() bool {
+		return deps.dispatchCount() >= 2
+	})
+}
+
+// TestRunnerPruneClearsStaleBackoffStatus proves the prune reports what it
+// enforces: when the last backoff-held candidate leaves the provider view,
+// its entry is pruned and the status stops naming a retry time nothing
+// holds anymore.
+func TestRunnerPruneClearsStaleBackoffStatus(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	cand := runnerCand("wf1", "start", "a1")
+	deps.setCandidates([]Candidate{cand})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setErrors(errors.New("injected failure"))
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 10*time.Second, nil, nil)
+	waitUntil(t, "failure recorded into backoff", func() bool {
+		return !r.Status().DispatchBackoffUntil.IsZero()
+	})
+
+	// The candidate leaves the provider view, so the next pass prunes its
+	// entry; the status must follow instead of naming a stale retry time.
+	deps.mu.Lock()
+	deps.cands = nil
+	deps.mu.Unlock()
+	waitUntil(t, "stale backoff status cleared after the prune", func() bool {
+		return r.Status().DispatchBackoffUntil.IsZero()
+	})
+}
+
 // TestDispatchBackoffDelay pins the schedule: the base after the first
 // consecutive error, doubling, capped at five times the base.
 func TestDispatchBackoffDelay(t *testing.T) {

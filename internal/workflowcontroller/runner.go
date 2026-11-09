@@ -432,11 +432,15 @@ func (s *leaderState) release(r *Runner) {
 }
 
 // dropLeadership discards the lease and any capacity block after a
-// leadership loss; the status leadership fields are cleared.
+// leadership loss; the status leadership fields are cleared. The backoff
+// state is dropped with them: another controller may have dispatched the
+// candidates meanwhile, so a stale streak would suppress them on a lease
+// this runner no longer owns, contradicting the cleared status fields.
 func (s *leaderState) dropLeadership(r *Runner) {
 	s.holding = false
 	s.leaseID = ""
 	s.blockedSource = ""
+	s.dispatchFail = map[workflow.ExecutionIdentity]dispatchFailEntry{}
 	r.clearLeadStatus()
 }
 
@@ -889,6 +893,12 @@ func (r *Runner) dispatchPass(s *leaderState, rec ControllerRecord, wait time.Du
 			if !active[id] {
 				delete(s.dispatchFail, id)
 			}
+		}
+		// The status field names a held retry time; once no candidate is
+		// held, a stale timestamp would report a backoff that nothing
+		// enforces. The success path clears it the same way.
+		if len(s.dispatchFail) == 0 {
+			r.setStatus(func(st *RunnerStatus) { st.DispatchBackoffUntil = time.Time{} })
 		}
 	}
 	// Candidates whose dispatch failed recently are held in backoff and
