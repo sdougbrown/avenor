@@ -6,6 +6,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runstate"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 const (
@@ -226,13 +227,21 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 			if s.stableHandler != nil {
 				break
 			}
+			reason, _ := event.Fields["stop_reason"].(string)
+			exitCode, hasExit := int64Field(event.Fields["exit_code"])
+			// A retryable attempt failure is not the run's outcome: the loop
+			// publishes another session.start, so report running until the last
+			// allowed attempt settles.
+			if hasExit && runtime.IsRetryableFailure(int(exitCode), reason) && ss.RetryAttempt <= ss.MaxRetries {
+				break
+			}
 			ss.Status = string(runstate.StatusEnded)
-			if reason, _ := event.Fields["stop_reason"].(string); reason != "" {
+			if reason != "" {
 				ss.StopReason = reason
 			}
-			if code, ok := int64Field(event.Fields["exit_code"]); ok {
-				exitCode := int(code)
-				ss.ExitCode = &exitCode
+			if hasExit {
+				code := int(exitCode)
+				ss.ExitCode = &code
 			}
 		}
 	})

@@ -122,6 +122,47 @@ func TestSupervisorEventsDoNotWriteOwnedStatus(t *testing.T) {
 	}
 }
 
+// A retryable attempt failure is not the run's outcome while another attempt is
+// allowed: the failed attempt must not settle the status await reads.
+func TestOneShotRetryableFailureKeepsRunning(t *testing.T) {
+	state := NewState("run_retry", "retry", 1)
+	s, _ := NewTestServer(state)
+
+	state.Update(func(ss *Snapshot) { ss.RetryAttempt = 1 })
+	s.PublishEvent(events.Event{Event: "session.start"})
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "error", "exit_code": 1}})
+	snap := state.Snapshot()
+	if snap.Status != "running" {
+		t.Fatalf("status after retryable failure = %q, want running", snap.Status)
+	}
+	if snap.ExitCode != nil {
+		t.Fatalf("retryable failure recorded a terminal exit code: %v", *snap.ExitCode)
+	}
+
+	// The final allowed attempt settles the run.
+	state.Update(func(ss *Snapshot) { ss.RetryAttempt = 2 })
+	s.PublishEvent(events.Event{Event: "session.start"})
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "error", "exit_code": 1}})
+	snap = state.Snapshot()
+	if snap.Status != "ended" || snap.StopReason != "error" || snap.ExitCode == nil || *snap.ExitCode != 1 {
+		t.Fatalf("exhausted retry status = %#v, want ended/error/1", snap)
+	}
+}
+
+// A non-retryable failure settles immediately even when retries remain.
+func TestOneShotNonRetryableFailureSettles(t *testing.T) {
+	state := NewState("run_refusal", "refusal", 2)
+	s, _ := NewTestServer(state)
+
+	state.Update(func(ss *Snapshot) { ss.RetryAttempt = 1 })
+	s.PublishEvent(events.Event{Event: "session.start"})
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "refusal", "exit_code": 2}})
+	snap := state.Snapshot()
+	if snap.Status != "ended" || snap.StopReason != "refusal" {
+		t.Fatalf("non-retryable status = %#v, want ended/refusal", snap)
+	}
+}
+
 // Events a one-shot server publishes carry no runtime_id, so a subscription
 // scoped to its run must still match them.
 func TestOneShotSubscriptionMatchesUnscopedEvents(t *testing.T) {
