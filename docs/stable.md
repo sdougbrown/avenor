@@ -442,7 +442,7 @@ Pass `--workflow-adapter-dir` to the stable command to point the supervisor at a
 - `inflight` — the controller's non-terminal dispatch attempts, capped by `max_inflight`.
 - `last_reconcile` — the latest reconcile pass of the leading runner.
 - `capacity_blocked` — present when dispatch is suppressed by admission capacity (`local` runtime slots or `tree` budget), with a detail string.
-- `dispatch_backoff_until` — the next retry time of the most recently failed dispatch, present while that candidate is held in backoff; absent otherwise.
+- `dispatch_backoff_until` — the next retry time of the most recently failed dispatch, present while that candidate is held in backoff; null otherwise.
 - `next_poll_at` — the next scheduled external-gate poll time.
 
 The host tools render these fields in a compact controller view (Pi render hooks and OpenCode prose) that appears only when controllers exist on the supervisor; with no controller support the tools report `method not found` and nothing else changes.

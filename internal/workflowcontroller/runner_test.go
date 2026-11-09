@@ -1108,6 +1108,54 @@ func TestRunnerPruneClearsStaleBackoffStatus(t *testing.T) {
 	})
 }
 
+// TestRunnerBackoffOutcomeSplit pins the two no-decision outcomes: a pass
+// whose only dispatchable candidates are all held in backoff reports
+// dispatch_backoff, while a pass that still holds a candidate kept out by
+// in-flight contention reports idle. Inverting the condition would
+// mislabel key contention as backoff.
+func TestRunnerBackoffOutcomeSplit(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	held := runnerCand("wf1", "start", "b1")
+	failing := runnerCand("wf2", "start", "a1")
+	deps.setCandidates([]Candidate{held, failing})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setStickyErrors(failing.Identity, errors.New("host is down"))
+
+	// Phase 1: the failing candidate backs off while its sibling dispatches
+	// freely, so the backoff exists before anything is blocked.
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 10*time.Second, nil, nil)
+	waitUntil(t, "failing candidate held in backoff", func() bool { return !r.Status().DispatchBackoffUntil.IsZero() })
+
+	// Phase 2: block every dispatch, so the sibling's next dispatch parks
+	// in-flight and its activation key stays claimed across passes. The
+	// backoff-held candidate is filtered before Select, so it cannot
+	// consume a slot.
+	deps.mu.Lock()
+	deps.block = make(chan struct{})
+	deps.blockAll = true
+	deps.mu.Unlock()
+	waitUntil(t, "sibling dispatched into a blocked dispatch", func() bool {
+		return deps.countDispatches(held.Identity) >= 2
+	})
+
+	// One suppressed candidate (backoff) and one non-suppressed candidate
+	// held out by in-flight contention: the pass reports idle, not
+	// dispatch_backoff.
+	waitUntil(t, "outcome idle while a contended candidate remains", func() bool {
+		return r.Status().LastOutcome == "idle"
+	})
+
+	// All-suppressed: only the backoff-held candidate remains in the view.
+	deps.mu.Lock()
+	deps.cands = []Candidate{failing}
+	deps.mu.Unlock()
+	waitUntil(t, "outcome dispatch_backoff while every candidate is held", func() bool {
+		return r.Status().LastOutcome == "dispatch_backoff"
+	})
+}
+
 // TestDispatchBackoffDelay pins the schedule: the base after the first
 // consecutive error, doubling, capped at five times the base.
 func TestDispatchBackoffDelay(t *testing.T) {
