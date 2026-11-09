@@ -853,9 +853,10 @@ kill $SUPERVISOR_PID 2>/dev/null
 Run an agent with file-based permission handling:
 
 ```sh
-# Start agent with permission handler
+# Start agent with a file-based permission handler
 avenor run --prompt-file prompt.txt \
   --sentinel-file /tmp/run.sentinel \
+  --permission-handler file:/tmp/run.perm \
   --on-event /tmp/events.jsonl &
 RUN_PID=$!
 
@@ -865,8 +866,9 @@ avenor watch --follow /tmp/events.jsonl | grep -i "permission.request" &
 # When you see a request, answer it
 avenor answer --option opt-allow /tmp/run.perm
 
-# Wait for completion
-wait $RUN_PID
+# Wait for the child, then read the outcome
+wait "$RUN_PID"
+cat /tmp/run.sentinel
 ```
 
 ### Multi-phase workflow with control socket
@@ -906,7 +908,7 @@ avenor watch --follow --format plain --since-cursor /tmp/cursor /tmp/events.json
 
 - `0` — Success (session ended with stop_reason "success" or no explicit reason)
 - `1` — General error or session ended with stop_reason "error"; may trigger retry if `--max-retries` > 0
-- `2` — Usage/validation error (avenor control subcommands only)
+- `2` — Flag validation error (unknown flags, malformed values, conflicting inputs)
 - `5` — Blocked (a phase aborted with an abort marker)
 - `6` — Provider quota exhausted (`quota_exhausted`); fall back to another model or retry later
 - `7` — Provider rate limit (`rate_limited`); retried when `--max-retries` > 0
