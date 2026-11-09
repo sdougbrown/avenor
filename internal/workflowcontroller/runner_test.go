@@ -962,8 +962,6 @@ func TestRunnerDispatchBackoffIsPerCandidate(t *testing.T) {
 	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
 	deps.setStickyErrors(failing.Identity, errors.New("host is down"))
 
-	// Short cadence; a 100ms backoff base makes the hold window
-	// observable on the 20ms pass interval.
 	// 1s backoff base: the assertion compares the sibling's re-dispatch
 	// time against the failing candidate's retry time (set + 1s), so the
 	// margin decouples from the 20ms pass interval — realistic CI
@@ -997,6 +995,45 @@ func TestRunnerDispatchBackoffIsPerCandidate(t *testing.T) {
 	}
 	if !secondAt.Before(deadline) {
 		t.Fatalf("sibling re-dispatched at %v, not before the failing candidate's retry time %v: the backoff suppressed the non-failing candidate (keyed too broadly)", secondAt, deadline)
+	}
+}
+
+// TestRunnerDispatchBackoffWakesWithoutChangeSignal proves the
+// preparePass wait-shortening is what makes a backoff honor its retry
+// time: with no change channel and a long anti-entropy cadence, the
+// held candidate's retry must land at its backoff time, not a full
+// anti-entropy period later. A regression that drops the fold-in
+// delays the retry to the anti-entropy tick; the ~1s assertion bound
+// sits between the 100ms backoff and the 2s cadence, so no scheduling
+// delay can mask the difference.
+func TestRunnerDispatchBackoffWakesWithoutChangeSignal(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 1)
+	deps := newFakeDeps(store, "c1")
+	cand := runnerCand("wf1", "start", "a1")
+	deps.setCandidates([]Candidate{cand})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setErrors(errors.New("injected failure"))
+	// Long anti-entropy and renew cadences, no change channel: the
+	// only wake that can release the candidate early is the backoff
+	// fold-in itself.
+	r := startRunner(t, store, deps, 2*time.Second, 2*time.Second, 100*time.Millisecond, nil, nil)
+
+	waitUntil(t, "first dispatch attempted", func() bool { return deps.countDispatches(cand.Identity) >= 1 })
+	firstAt := deps.dispatchAt(cand.Identity, 0)
+	if firstAt.IsZero() {
+		t.Fatal("candidate was never dispatched")
+	}
+	// The injected error is recorded; the hold window opens at
+	// firstAt + 100ms.
+	waitUntil(t, "error recorded (non-zero backoff until)", func() bool { return !r.Status().DispatchBackoffUntil.IsZero() })
+	waitUntil(t, "candidate re-dispatched after the backoff", func() bool { return deps.countDispatches(cand.Identity) >= 2 })
+	secondAt := deps.dispatchAt(cand.Identity, 1)
+	if secondAt.IsZero() {
+		t.Fatal("candidate was never re-dispatched after the injected failure")
+	}
+	if delta := secondAt.Sub(firstAt); delta > time.Second {
+		t.Fatalf("second dispatch %v after the first: the backoff retry waited for the 2s anti-entropy cadence instead of waking at the retry time", delta)
 	}
 }
 
