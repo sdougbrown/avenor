@@ -149,6 +149,9 @@ type PeerRecord struct {
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Dir     string `json:"dir,omitempty"`
+	// Self is set by the router, never by the transport: the record is the
+	// caller's own session, the same run the reserved `self` alias resolves to.
+	Self bool `json:"self,omitempty"`
 }
 
 // PeerLast is one peer's most recent completed turn, as the peers `last` action

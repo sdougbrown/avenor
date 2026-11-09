@@ -88,6 +88,13 @@ func assertPeersResult(t *testing.T, c messaging.ConformanceCase, provider *fake
 				t.Fatalf("peer %d dir = %q, want %q", index, got, want)
 			}
 		}
+		if selfRun := stringOf(c.Provider["peers_self"]); selfRun != "" {
+			for _, record := range result.Peers {
+				if got, want := record.Self, record.RunID == selfRun; got != want {
+					t.Fatalf("peer %q self = %v, want %v", record.RunID, got, want)
+				}
+			}
+		}
 		if provider.peered.Generation != "gen-7" {
 			t.Fatalf("peers generation = %q, want gen-7", provider.peered.Generation)
 		}
@@ -348,6 +355,24 @@ func TestRenderPeersOmitsMissingLabelAndAttributes(t *testing.T) {
 	want := "**Active sessions:**\n" +
 		"  rt_8 [agent]\n" +
 		"  rt_9"
+	if got != want {
+		t.Fatalf("RenderPeers = %q, want %q", got, want)
+	}
+}
+
+// TestRenderPeersMarksSelf pins the caller marker a self record renders: the
+// suffix sits between the name block and the attribute block, and a self record
+// with no label carries the marker on its bare run id.
+func TestRenderPeersMarksSelf(t *testing.T) {
+	got := RenderPeers([]messaging.PeerRecord{
+		{RunID: "rt_9", Label: "child-a", Kind: "agent", Status: "running", Self: true},
+		{RunID: "supervisor", Kind: "supervisor", Status: "running", Self: true},
+		{RunID: "rt_7", Label: "child-b", Kind: "agent", Status: "running"},
+	})
+	want := "**Active sessions:**\n" +
+		"  child-a (rt_9) (self) [agent, running]\n" +
+		"  supervisor (self) [supervisor, running]\n" +
+		"  child-b (rt_7) [agent, running]"
 	if got != want {
 		t.Fatalf("RenderPeers = %q, want %q", got, want)
 	}

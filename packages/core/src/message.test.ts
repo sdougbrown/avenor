@@ -12,6 +12,7 @@ import {
   executePeers,
   normalizeRouteRules,
   peersDetails,
+  renderPeerList,
   resultOutput,
   ToolError,
 } from './message.js'
@@ -556,6 +557,57 @@ describe('last text', () => {
     expect(quote('a\u200bb\u202ec\u0085d"e\\f\ng')).toBe(
       '"a\\u200bb\\u202ec\\u0085d\\"e\\\\f\\ng"',
     )
+  })
+})
+
+describe('peers list text', () => {
+  it("marks the caller's own record with a self marker", () => {
+    const records: PeerRecord[] = [
+      { run_id: 'rt_9', label: 'child-a', kind: 'agent', status: 'running', self: true },
+      { run_id: 'supervisor', kind: 'supervisor', status: 'running', self: true },
+      { run_id: 'rt_7', label: 'child-b', kind: 'agent', status: 'running' },
+    ]
+    expect(renderPeerList(records)).toBe(
+      '**Active sessions:**\n' +
+        '  child-a (rt_9) (self) [agent, running]\n' +
+        '  supervisor (self) [supervisor, running]\n' +
+        '  child-b (rt_7) [agent, running]',
+    )
+    expect(renderPeerList([])).toBe('No other agent sessions connected.')
+  })
+
+  it('marks exactly the caller record and reports it in the structured output', async () => {
+    const provider: MessageProvider = {
+      caller: () => ({ kind: 'broker', runId: 'rt_2' }),
+      surface: () => 'mcp-ts',
+      role: () => 'host',
+      resolve: async ref => ({ runId: ref, match: 'unique' }),
+      state: async () => ({ live: false, resumable: true, status: 'done' }),
+      tell: async () => ({ outcome: 'sent' }),
+      ask: async () => ({ outcome: 'sent' }),
+      reply: async () => ({ outcome: 'replied' }),
+      withdraw: async () => ({ outcome: 'withdrawn' }),
+      resume: async () => ({ outcome: 'resumed' }),
+      rename: async () => ({ outcome: 'renamed' }),
+      last: async () => ({ outcome: 'sent', hasRecord: false }),
+      peers: async () => ({
+        peers: [
+          { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
+          { run_id: 'rt_3' },
+        ],
+      }),
+    }
+    const result = await executePeers(provider, {})
+    expect(result.peers.map(peer => ({ run_id: peer.run_id, self: peer.self === true }))).toEqual([
+      { run_id: 'rt_2', self: true },
+      { run_id: 'rt_3', self: false },
+    ])
+    expect(peersDetails(result)).toEqual({
+      peers: [
+        { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running', self: true },
+        { run_id: 'rt_3' },
+      ],
+    })
   })
 })
 

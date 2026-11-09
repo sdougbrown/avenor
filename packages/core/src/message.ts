@@ -36,6 +36,8 @@ export interface PeerRecord {
   backend?: string
   model?: string
   dir?: string
+  /** Set by the router, never by the transport: the record is the caller's own session. */
+  self?: boolean
 }
 
 /**
@@ -753,9 +755,12 @@ export async function executePeers(
     } catch (err) {
       throw asToolError(err)
     }
+    const callerRunId = provider.caller().runId
     const result: PeersRouterResult = {
       action,
-      peers: peers.peers,
+      // Assigned, never merged: the router is the sole authority for the flag,
+      // so a session record carrying `self` cannot spoof the marker.
+      peers: peers.peers.map(peer => ({ ...peer, self: peer.run_id === callerRunId })),
       text: '',
     }
     if (peers.detail !== undefined) {
@@ -825,13 +830,16 @@ export async function executePeers(
 /**
  * Render the peers list block the surfaces show: the one list text for the
  * shared records, so every surface that routes through the router renders a
- * peer identically.
+ * peer identically. A record the router marked self carries a `(self)` marker
+ * between the name block and the attributes, so a caller can find its own
+ * session in the roster.
  */
 export function renderPeerList(records: PeerRecord[]): string {
   if (records.length === 0) return 'No other agent sessions connected.'
   const lines = records.map(record => {
     let line = `  ${record.run_id}`
     if (record.label) line = `  ${record.label} (${record.run_id})`
+    if (record.self) line += ' (self)'
     const attrs = [record.kind, record.status, record.backend, record.model].filter(
       (value): value is string => typeof value === 'string' && value !== '',
     )
@@ -878,6 +886,7 @@ export function peersDetails(result: PeersRouterResult): Record<string, unknown>
           const value = peer[name]
           if (value) record[name] = value
         }
+        if (peer.self) record.self = true
         return record
       }),
     }

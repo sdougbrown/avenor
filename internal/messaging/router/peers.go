@@ -98,6 +98,12 @@ func peersList(ctx context.Context, p Provider, action string) (Result, error) {
 	if listingErr != nil && len(records) == 0 {
 		return Result{}, refused(listingErr)
 	}
+	callerRunID := p.Caller().RunID
+	for index := range records {
+		// Assigned, never merged: the router is the sole authority for the flag,
+		// so a session record carrying `self` cannot spoof the marker.
+		records[index].Self = records[index].RunID == callerRunID
+	}
 	result := Result{Action: action, Peers: records}
 	if listingErr != nil {
 		// Classify through refused once so the detail carries the same
@@ -189,8 +195,10 @@ func LastFacts(runID, label, stopReason string) map[string]string {
 // RenderPeers renders the peers list block a surface shows. It is the one list
 // text for the records a surface routes through this package, so the surfaces
 // using it cannot disagree on how a peer's display name, kind and status are
-// rendered. A surface still rendering its own list will disagree on kind, and
-// on the attribute block for a record with no status.
+// rendered. A record the router marked self carries a `(self)` marker between
+// the name block and the attributes, so a caller can find its own session in
+// the roster. A surface still rendering its own list will disagree on kind, on
+// the attribute block for a record with no status, and on the self marker.
 func RenderPeers(records []messaging.PeerRecord) string {
 	if len(records) == 0 {
 		return "No other agent sessions connected."
@@ -200,6 +208,9 @@ func RenderPeers(records []messaging.PeerRecord) string {
 		line := "  " + record.RunID
 		if record.Label != "" {
 			line = "  " + record.Label + " (" + record.RunID + ")"
+		}
+		if record.Self {
+			line += " (self)"
 		}
 		var attrs []string
 		for _, value := range []string{record.Kind, record.Status, record.Backend, record.Model} {
