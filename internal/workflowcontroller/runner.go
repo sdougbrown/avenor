@@ -130,9 +130,10 @@ type RunnerConfig struct {
 
 // dispatchWorkerResult carries one worker's outcome back to the leader loop.
 type dispatchWorkerResult struct {
-	identity workflow.ExecutionIdentity
-	result   DispatchResult
-	err      error
+	identity   workflow.ExecutionIdentity
+	result     DispatchResult
+	err        error
+	ownerEpoch int64 // the leader lease epoch the dispatch ran under
 }
 
 // unreportedEntry tracks the pending-decision count for one identity and the
@@ -458,27 +459,36 @@ func (s *leaderState) clearBlock(r *Runner) {
 // capacity block persists across passes until a capacity-change signal or
 // an anti-entropy pass clears it.
 func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLead bool) {
+	// Only a result from the lease this leader state still owns may touch
+	// the backoff state: after a leadership loss the map was reset, so a
+	// delayed result from the superseded lease would otherwise re-suppress
+	// a candidate for a failure the current lease never made.
+	currentLease := s.holding && res.ownerEpoch == s.ownerEpoch
 	if res.err != nil {
 		log.Printf("workflow controller %s: dispatch %v: %v", r.controllerID, res.identity, res.err)
 		// Back the candidate off: its next dispatch is deferred, doubling
 		// per consecutive failure, so a persistently failing dispatch
 		// degrades to a bounded retry cadence instead of a hot loop.
-		e := s.dispatchFail[res.identity]
-		e.count++
-		e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
-		s.dispatchFail[res.identity] = e
-		r.setStatus(func(st *RunnerStatus) {
-			st.LastOutcome = "dispatch_error"
-			st.DispatchBackoffUntil = e.next
-		})
+		if currentLease {
+			e := s.dispatchFail[res.identity]
+			e.count++
+			e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
+			s.dispatchFail[res.identity] = e
+			r.setStatus(func(st *RunnerStatus) {
+				st.LastOutcome = "dispatch_error"
+				st.DispatchBackoffUntil = e.next
+			})
+		}
 		return false
 	}
 	// A delivered result means the dispatch worked; the candidate's
 	// consecutive-failure chain is broken.
-	if _, ok := s.dispatchFail[res.identity]; ok {
-		delete(s.dispatchFail, res.identity)
-		if len(s.dispatchFail) == 0 {
-			r.setStatus(func(st *RunnerStatus) { st.DispatchBackoffUntil = time.Time{} })
+	if currentLease {
+		if _, ok := s.dispatchFail[res.identity]; ok {
+			delete(s.dispatchFail, res.identity)
+			if len(s.dispatchFail) == 0 {
+				r.setStatus(func(st *RunnerStatus) { st.DispatchBackoffUntil = time.Time{} })
+			}
 		}
 	}
 	switch res.result.Kind {
@@ -1044,7 +1054,7 @@ func drainSignal(ch <-chan struct{}) {
 // leader loop; the leader drains the channel before exiting, so a blocking
 // send cannot outlive the runner.
 func (r *Runner) dispatchWorker(d Decision, lease LeaderLease) {
-	res := dispatchWorkerResult{identity: d.Candidate.Identity}
+	res := dispatchWorkerResult{identity: d.Candidate.Identity, ownerEpoch: lease.OwnerEpoch}
 	if r.ctx.Err() == nil {
 		res.result, res.err = r.deps.Dispatch(r.ctx, d, lease)
 	} else {

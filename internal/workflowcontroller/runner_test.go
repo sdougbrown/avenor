@@ -1168,6 +1168,58 @@ func TestRunnerBackoffOutcomeSplit(t *testing.T) {
 	})
 }
 
+// TestRunnerStaleResultDoesNotFoldAfterLeadershipLoss proves a delayed
+// error from a dispatch made under a superseded lease never reaches the
+// backoff state: the leader processes worker results while not holding
+// and after re-acquisition, and folding there would suppress a candidate
+// for a failure the current lease never made.
+func TestRunnerStaleResultDoesNotFoldAfterLeadershipLoss(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	cand := runnerCand("wf1", "start", "a1")
+	deps.setCandidates([]Candidate{cand})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	deps.setErrors(errors.New("injected failure"))
+	deps.mu.Lock()
+	deps.blockFirst = 1 // the first dispatch parks until released
+	block := make(chan struct{})
+	deps.block = block
+	deps.mu.Unlock()
+
+	// A 10s backoff base: a stale fold would suppress the candidate far
+	// beyond the wait budget, so the re-dispatch below can only come from
+	// the stale result being skipped.
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 10*time.Second, nil, nil)
+	waitUntil(t, "first dispatch parked", func() bool { return deps.dispatchCount() >= 1 })
+
+	// Lose leadership while the dispatch is parked, and wait until the
+	// runner has dropped it, so the released result below is stale by
+	// construction rather than racing the loss detection.
+	rec, _, err := store.Get("c1")
+	if err != nil || rec.Leader == nil {
+		t.Fatalf("get lease: rec=%+v err=%v", rec, err)
+	}
+	if _, err := store.ReleaseLease("c1", rec.Leader.LeaseID, rec.Leader.OwnerEpoch); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	waitUntil(t, "leadership dropped", func() bool { return !r.Status().Leading })
+
+	// Release the parked dispatch: its error was consumed under the
+	// superseded lease, so the result is stale when it lands.
+	block <- struct{}{}
+
+	// The re-acquired leader must dispatch the candidate again instead of
+	// suppressing it on the stale failure.
+	waitUntil(t, "runner leading again", func() bool { return storeLeaderEpoch(t, store) >= 2 })
+	waitUntil(t, "candidate re-dispatched despite the stale failure", func() bool {
+		return deps.dispatchCount() >= 2
+	})
+	if got := r.Status().DispatchBackoffUntil; !got.IsZero() {
+		t.Fatalf("status reports a backoff from the stale result: %v", got)
+	}
+}
+
 // TestDispatchBackoffDelay pins the schedule: the base after the first
 // consecutive error, doubling, capped at five times the base.
 func TestDispatchBackoffDelay(t *testing.T) {
