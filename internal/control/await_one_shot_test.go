@@ -1,0 +1,85 @@
+package control
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/sdougbrown/avenor/internal/events"
+)
+
+// The one-shot server owns exactly one run and publishes events without a
+// runtime id. Await resolves a run with list, then reads status/history/result
+// by the id list reports, so those verbs must work without a supervisor.
+func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
+	state := NewState("run_1", "demo", 0)
+	s, _ := NewTestServer(state)
+
+	s.PublishEvent(events.Event{Event: "session.start", SessionID: "ses_1"})
+
+	list, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 1, Method: "list"}).Result.([]map[string]any)
+	if !ok || len(list) != 1 {
+		t.Fatalf("list = %#v, want one entry", list)
+	}
+	for field, want := range map[string]any{
+		"runtime_id": "run_1",
+		"run_id":     "run_1",
+		"label":      "demo",
+		"status":     "running",
+	} {
+		if got := list[0][field]; got != want {
+			t.Errorf("list[%q] = %v, want %v", field, got, want)
+		}
+	}
+
+	status, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 2, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(Snapshot)
+	if !ok {
+		t.Fatal("scoped status did not return a snapshot")
+	}
+	if status.RunID != "run_1" || status.Status != "running" {
+		t.Fatalf("status = %#v, want run_1 running", status)
+	}
+
+	history, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 3, Method: "history", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
+	if !ok {
+		t.Fatal("scoped history did not return a result")
+	}
+	if got := history["events"].([]map[string]any); len(got) != 1 || got[0]["event"] != "session.start" {
+		t.Fatalf("history = %#v, want the run's events under its run id", got)
+	}
+
+	s.PublishEvent(events.Event{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{
+		"stop_reason":  "end_turn",
+		"exit_code":    0,
+		"final_output": "done",
+	}})
+	status, _ = s.dispatch(nil, Request{JSONRPC: "2.0", ID: 4, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(Snapshot)
+	if status.Status != "ended" || status.StopReason != "end_turn" {
+		t.Fatalf("terminal status = %#v, want ended/end_turn", status)
+	}
+	if got := s.state.FinalOutput(); got != "done" {
+		t.Fatalf("final output = %q, want done", got)
+	}
+
+	result, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 5, Method: "result", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(map[string]any)
+	if !ok || result["final_output"] != "done" {
+		t.Fatalf("result = %#v, want the terminal output", result)
+	}
+
+	resp := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 7, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_other"}`)})
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Fatalf("unknown run status error = %#v, want -32000", resp.Error)
+	}
+}
+
+// Events a one-shot server publishes carry no runtime_id, so a subscription
+// scoped to its run must still match them.
+func TestOneShotSubscriptionMatchesUnscopedEvents(t *testing.T) {
+	sub := newSubscriber(nil, "run_1", 0)
+	sub.scopeID = "run_1"
+	if !sub.matches(events.Event{Event: "session.start"}) {
+		t.Fatal("unscoped event did not match the one-shot run")
+	}
+	if sub.matches(events.Event{Event: "session.start", Fields: map[string]any{"runtime_id": "rt_other"}}) {
+		t.Fatal("event from another runtime matched the one-shot run")
+	}
+}

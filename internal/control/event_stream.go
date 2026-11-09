@@ -62,6 +62,56 @@ func eventScopeKey(ev events.Event) string {
 	return eventRuntimeID(ev)
 }
 
+// singleRunID names the one run a server owns when no supervisor supplies
+// runtimes. A supervisor server has no ambient run, so it returns empty.
+func (s *ControlServer) singleRunID() string {
+	if s.stableHandler != nil {
+		return ""
+	}
+	return s.state.Snapshot().RunID
+}
+
+// oneShotSnapshot returns the owned run's snapshot with the status a caller
+// expects even before the first event arrives.
+func (s *ControlServer) oneShotSnapshot() Snapshot {
+	snap := s.state.Snapshot()
+	if snap.Status == "" {
+		snap.Status = string(runstate.StatusRunning)
+	}
+	return snap
+}
+
+// oneShotList presents the owned run in the shape a supervisor's list uses, so
+// a caller can resolve it by run id or label the same way.
+func (s *ControlServer) oneShotList() []map[string]any {
+	snap := s.oneShotSnapshot()
+	if snap.RunID == "" {
+		return []map[string]any{}
+	}
+	return []map[string]any{{
+		"runtime_id":         snap.RunID,
+		"run_id":             snap.RunID,
+		"label":              snap.RunLabel,
+		"session_id":         snap.SessionID,
+		"status":             snap.Status,
+		"phase":              string(snap.Phase),
+		"phase_label":        snap.PhaseLabel,
+		"started_at":         snap.StartedAt,
+		"pending_permission": snap.PendingPermission,
+		"latest_seq":         snap.LatestSeq,
+	}}
+}
+
+// eventScope indexes one event under the runtime that owns it. A one-shot
+// server's events carry no runtime_id, so they fall back to the run it owns;
+// this keeps its history and subscriptions addressable by that id.
+func (s *ControlServer) eventScope(ev events.Event) string {
+	if id := eventRuntimeID(ev); id != "" {
+		return id
+	}
+	return s.singleRunID()
+}
+
 func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
 	// Canonical events are written to durable NDJSON by the caller, so retain
 	// the complete final_output here. Presentation boundaries are applied only
@@ -87,7 +137,7 @@ func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := eventRuntimeID(out)
+	key := s.eventScope(out)
 	st := s.eventState[key]
 	if st == nil {
 		st = &runtimeEventState{}
@@ -154,6 +204,9 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 		switch event.Event {
 		case "session.start":
 			ss.TurnState = "starting"
+			if ss.Status == "" || ss.Status == string(runstate.StatusEnded) {
+				ss.Status = string(runstate.StatusRunning)
+			}
 		case "tool.call", "agent.thought_chunk", "agent.message_chunk":
 			if ss.TurnState == "starting" || ss.TurnState == "" {
 				ss.TurnState = "running"
@@ -162,11 +215,18 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 			if ss.TurnState != "idle" && ss.TurnState != "cancelling" {
 				ss.TurnState = "ended"
 			}
+			ss.Status = string(runstate.StatusEnded)
+			if reason, _ := event.Fields["stop_reason"].(string); reason != "" {
+				ss.StopReason = reason
+			}
+			if code, ok := int64Field(event.Fields["exit_code"]); ok {
+				ss.ExitCode = int(code)
+			}
 		}
 	})
 
 	s.mu.Lock()
-	if runtimeID := eventRuntimeID(event); runtimeID != "" {
+	if runtimeID := s.eventScope(event); runtimeID != "" {
 		st := s.eventState[runtimeID]
 		if st == nil {
 			st = &runtimeEventState{}
