@@ -111,14 +111,61 @@ func (s *ControlServer) oneShotEntry(snap Snapshot) map[string]any {
 	}
 }
 
-// eventScope indexes one event under the runtime that owns it. A one-shot
-// server's events carry no runtime_id, so they fall back to the run it owns;
-// this keeps its history and subscriptions addressable by that id.
+// SetRunSettled marks the run this server owns as settled and wakes
+// subscribers, so a client awaiting the socket observes the terminal state
+// before the server stops. It is a no-op on a supervisor, whose outcomes are
+// per runtime. The run loop calls it on any exit path it alone decides, such as
+// a retry it declines to start.
+func (s *ControlServer) SetRunSettled(exitCode int, stopReason string) {
+	if s.stableHandler != nil {
+		return
+	}
+	code := exitCode
+	wake := false
+	s.state.Update(func(ss *Snapshot) {
+		// A run that already published its terminal event needs no wake-up;
+		// only a suppressed attempt (or an exit before any terminal event) does.
+		if ss.Status != string(runstate.StatusEnded) || ss.ExitCode == nil {
+			wake = true
+		}
+		ss.Status = string(runstate.StatusEnded)
+		if stopReason != "" {
+			ss.StopReason = stopReason
+		}
+		ss.ExitCode = &code
+	})
+	if wake {
+		s.PublishEvent(events.Event{Event: "agent.status", Fields: map[string]any{
+			"phase": string(settledPhase(exitCode)),
+		}})
+	}
+}
+
+func settledPhase(exitCode int) runstate.Phase {
+	switch exitCode {
+	case 0:
+		return runstate.Phase(runstate.StatusDone)
+	case 124:
+		return runstate.Phase(runstate.StatusTimeout)
+	case 130:
+		return runstate.Phase(runstate.StatusKilled)
+	default:
+		return runstate.Phase(runstate.StatusFailed)
+	}
+}
+
 func (s *ControlServer) eventScope(ev events.Event) string {
+	return eventScopeWithFallback(ev, s.singleRunID())
+}
+
+// eventScopeWithFallback names the runtime an event belongs to. Events a
+// one-shot server publishes carry no runtime_id, so they take the fallback the
+// caller owns: the server's single run, or the run a subscriber follows.
+func eventScopeWithFallback(ev events.Event, fallback string) string {
 	if id := eventRuntimeID(ev); id != "" {
 		return id
 	}
-	return s.singleRunID()
+	return fallback
 }
 
 func (s *ControlServer) CanonicalizeEvent(event events.Event) events.Event {

@@ -122,6 +122,41 @@ func TestSupervisorEventsDoNotWriteOwnedStatus(t *testing.T) {
 	}
 }
 
+func TestOneShotSetRunSettledPublishesTerminalState(t *testing.T) {
+	state := NewState("run_retry", "retry", 1)
+	s, _ := NewTestServer(state)
+	state.Update(func(ss *Snapshot) { ss.RetryAttempt = 1 })
+	s.PublishEvent(events.Event{Event: "session.start"})
+
+	// A retryable failure is suppressed while the loop may retry, then the loop
+	// declines to start another attempt and settles the run itself.
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{"stop_reason": "error", "exit_code": 1}})
+	if got := state.Snapshot().Status; got != "running" {
+		t.Fatalf("status before settle = %q, want running", got)
+	}
+	s.SetRunSettled(1, "error")
+	snap := state.Snapshot()
+	if snap.Status != "ended" || snap.StopReason != "error" || snap.ExitCode == nil || *snap.ExitCode != 1 {
+		t.Fatalf("settled status = %#v, want ended/error/1", snap)
+	}
+	history, _ := s.runtimeHistory("run_retry", 0, 10)
+	last := history[len(history)-1]
+	if last.Event != "agent.status" {
+		t.Fatalf("last history event = %q, want the settle wake-up", last.Event)
+	}
+}
+
+// A supervisor server ignores settlement: its outcomes belong to runtimes.
+func TestSupervisorIgnoresRunSettlement(t *testing.T) {
+	state := NewState("run_1", "demo", 0)
+	s, _ := NewTestServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+	s.SetRunSettled(1, "error")
+	if snap := state.Snapshot(); snap.Status != "" || snap.ExitCode != nil {
+		t.Fatalf("supervisor settlement wrote the server snapshot: %#v", snap)
+	}
+}
+
 // A retryable attempt failure is not the run's outcome while another attempt is
 // allowed: the failed attempt must not settle the status await reads.
 func TestOneShotRetryableFailureKeepsRunning(t *testing.T) {

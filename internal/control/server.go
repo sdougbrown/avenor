@@ -2320,14 +2320,8 @@ func (s *subscriber) matches(ev events.Event) bool {
 	return s.eventScope(ev) == s.runtimeID
 }
 
-// eventScope names the runtime an event belongs to for this subscription. A
-// one-shot server publishes events without a runtime id, so they take the
-// scope of the single run the subscriber is following.
 func (s *subscriber) eventScope(ev events.Event) string {
-	if id := eventRuntimeID(ev); id != "" {
-		return id
-	}
-	return s.scopeID
+	return eventScopeWithFallback(ev, s.scopeID)
 }
 
 func (s *subscriber) recordSeqLocked(ev events.Event) bool {

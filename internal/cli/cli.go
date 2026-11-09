@@ -216,7 +216,19 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 	var finalRetryAfter int64
 	var finalResult string
 
+	// settleControl lets the run report its terminal state to a one-shot
+	// control socket. The loop alone decides whether another attempt follows,
+	// so it, not the event stream, owns the final outcome.
+	var settleControl func(code int, stopReason string)
+
 	exitWithSentinel := func(code int) int {
+		sr := finalStopReason
+		if sr == "" {
+			sr = runtime.StopReasonForExitCode(code)
+		}
+		if settleControl != nil {
+			settleControl(code, sr)
+		}
 		resultPath := ""
 		if opts.ResultFile != "" && finalResult != "" {
 			if err := writeResultFile(opts.ResultFile, finalResult); err != nil {
@@ -226,10 +238,6 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 			}
 		}
 		if opts.SentinelFile != "" {
-			sr := finalStopReason
-			if sr == "" {
-				sr = runtime.StopReasonForExitCode(code)
-			}
 			WriteSentinelResult(opts.SentinelFile, code, finalSessionID, sr, runID, finalRetryAfter, "", resultPath, stderr)
 		}
 		return code
@@ -524,6 +532,9 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 		}()
 	}
 	var writer EventSink = newFanoutWriter(baseWriter, controlServer, metadata)
+	if controlServer != nil {
+		settleControl = controlServer.SetRunSettled
+	}
 
 	var fileHandler *permission.FileHandler
 	if effectivePermHandler != "" {
@@ -872,6 +883,9 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 		result, err := looprunner.Run(lrCtx, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: loop run: %v\n", err)
+			if settleControl != nil {
+				settleControl(1, "error")
+			}
 			if opts.SentinelFile != "" {
 				WriteSentinel(opts.SentinelFile, 1, result.SessionID, "error", runID, stderr)
 			}
@@ -880,6 +894,9 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 
 		writeSentinelForResult(result, opts.SentinelFile, runID, stderr)
 
+		if settleControl != nil {
+			settleControl(result.ExitCode, result.StopReason)
+		}
 		return result.ExitCode
 	}
 
@@ -1002,12 +1019,18 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 		result, err := teamrunner.Run(trCtx, runOpts)
 		if err != nil {
 			fmt.Fprintf(stderr, "avenor: team run: %v\n", err)
+			if settleControl != nil {
+				settleControl(1, "error")
+			}
 			if opts.SentinelFile != "" {
 				WriteSentinel(opts.SentinelFile, 1, result.SessionID, "error", runID, stderr)
 			}
 			return 1
 		}
 
+		if settleControl != nil {
+			settleControl(result.ExitCode, result.StopReason)
+		}
 		if opts.SentinelFile != "" {
 			if result.Reason != "" {
 				WriteSentinelResult(opts.SentinelFile, result.ExitCode, result.SessionID, result.StopReason, runID, result.RetryAfter, result.Reason, "", stderr)
