@@ -30,6 +30,13 @@ func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
 			t.Errorf("list[%q] = %v, want %v", field, got, want)
 		}
 	}
+	// cmd/avenor/await.go reads these keys to resolve and follow the run, so a
+	// missing or renamed one breaks await even when the value checks above pass.
+	for _, key := range []string{"runtime_id", "run_id", "label", "started_at", "status", "phase", "pending_permission"} {
+		if _, ok := list[0][key]; !ok {
+			t.Errorf("list entry is missing %q", key)
+		}
+	}
 
 	status, ok := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 2, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_1"}`)}).Result.(Snapshot)
 	if !ok {
@@ -68,6 +75,32 @@ func TestOneShotServerAnswersTheAwaitSurface(t *testing.T) {
 	resp := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 7, Method: "status", Params: json.RawMessage(`{"runtime_id":"run_other"}`)})
 	if resp.Error == nil || resp.Error.Code != -32000 {
 		t.Fatalf("unknown run status error = %#v, want -32000", resp.Error)
+	}
+	resp = s.dispatch(nil, Request{JSONRPC: "2.0", ID: 8, Method: "result", Params: json.RawMessage(`{"runtime_id":"run_other"}`)})
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Fatalf("unknown run result error = %#v, want -32000", resp.Error)
+	}
+}
+
+// A supervisor publishes its child runtimes' events through the same handler.
+// Those events must not overwrite the server's own snapshot status: on a
+// supervisor that snapshot belongs to no child, and flapping it would report
+// whichever runtime started or ended last.
+func TestSupervisorEventsDoNotWriteOwnedStatus(t *testing.T) {
+	state := NewState("run_1", "demo", 0)
+	s, _ := NewTestServer(state)
+	s.SetStableHandler(&mockStableHandler{})
+
+	s.PublishEvent(events.Event{Event: "session.start", Fields: map[string]any{"runtime_id": "rt_1"}})
+	s.PublishEvent(events.Event{Event: "session.end", Fields: map[string]any{
+		"runtime_id":  "rt_1",
+		"stop_reason": "end_turn",
+		"exit_code":   0,
+	}})
+
+	snap := state.Snapshot()
+	if snap.Status != "" || snap.StopReason != "" || snap.ExitCode != 0 {
+		t.Fatalf("supervisor child events wrote the server snapshot: %#v", snap)
 	}
 }
 

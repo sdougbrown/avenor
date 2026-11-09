@@ -34,6 +34,14 @@ func TestAwaitAttachesToOneShotControlSocket(t *testing.T) {
 		exit <- awaitRunDeclared([]string{"--socket", socket, "--until", "done", "--print-output", "one-shot"}, &stdout, &stderr)
 	}()
 
+	deadline := time.Now().Add(5 * time.Second)
+	for !server.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("await never attached to the control socket")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	server.PublishEvent(events.Event{Event: "session.end", SessionID: "ses_1", Fields: map[string]any{
 		"stop_reason":  "end_turn",
 		"exit_code":    0,

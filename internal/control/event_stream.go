@@ -204,7 +204,7 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 		switch event.Event {
 		case "session.start":
 			ss.TurnState = "starting"
-			if ss.Status == "" || ss.Status == string(runstate.StatusEnded) {
+			if s.stableHandler == nil && (ss.Status == "" || ss.Status == string(runstate.StatusEnded)) {
 				ss.Status = string(runstate.StatusRunning)
 			}
 		case "tool.call", "agent.thought_chunk", "agent.message_chunk":
@@ -214,6 +214,9 @@ func (s *ControlServer) PublishCanonicalEvent(event events.Event) {
 		case "session.end":
 			if ss.TurnState != "idle" && ss.TurnState != "cancelling" {
 				ss.TurnState = "ended"
+			}
+			if s.stableHandler != nil {
+				break
 			}
 			ss.Status = string(runstate.StatusEnded)
 			if reason, _ := event.Fields["stop_reason"].(string); reason != "" {
