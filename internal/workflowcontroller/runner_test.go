@@ -844,13 +844,13 @@ func TestRunnerStopCleanNoGoroutineLeak(t *testing.T) {
 }
 
 // TestRunnerDispatchErrorDoesNotStopPasses proves a deps.Dispatch error is
-// contained: the runner records a dispatch_error outcome, keeps leading, and
-// later passes keep dispatching. Timer cadences are long so no timer-driven
-// pass can run during the assertions; both dispatch attempts are held
-// blocked until released, so the follow-up pass triggered by the failed
-// worker's result overwrites the recorded outcome with dispatch_backoff,
-// which also proves the error was recorded — the assertion below therefore
-// accepts either.
+// contained: the error path is recorded, the runner keeps leading, and
+// later passes keep dispatching. The error path is pinned on
+// DispatchBackoffUntil — set only by handleResult's error branch and
+// persistent until the success clears it — rather than on the outcome
+// string, which the follow-up pass can fold over within the backoff
+// window. Timer cadences are long so no timer-driven pass can run during
+// the assertions; both dispatch attempts are held blocked until released.
 func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
 	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
@@ -964,7 +964,13 @@ func TestRunnerDispatchBackoffIsPerCandidate(t *testing.T) {
 
 	// Short cadence; a 100ms backoff base makes the hold window
 	// observable on the 20ms pass interval.
-	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond, nil, nil)
+	// 1s backoff base: the assertion compares the sibling's re-dispatch
+	// time against the failing candidate's retry time (set + 1s), so the
+	// margin decouples from the 20ms pass interval — realistic CI
+	// scheduling delays (tens to low hundreds of ms) stay well inside
+	// the window, while a too-broad keying suppresses the sibling for
+	// the whole second and fails the assertion regardless of load.
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, time.Second, nil, nil)
 
 	// The failing candidate's first failure is recorded; the hold window
 	// opens. Capture the retry time while it is the first window, so the
