@@ -11,18 +11,27 @@ You need:
 
 ## Invocation
 
+Create a fresh directory for each run so old artifacts cannot be mistaken for
+this run's output:
+
+```sh
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/avenor-jockey.XXXXXX")
+```
+
 ```sh
 avenor run \
   --backend opencode-acp \
   --agent jockey \
   --prompt "Your task here" \
   --dir /repo \
-  --permission-handler file:/tmp/avenor-perm \
-  --on-event /tmp/avenor-events.ndjson \
-  --sentinel-file /tmp/avenor-done.env
+  --permission-handler "file:$RUN_DIR/perm" \
+  --on-event "$RUN_DIR/events.ndjson" \
+  --sentinel-file "$RUN_DIR/done.env"
 ```
 
-Run this in the background. The process writes events to `/tmp/avenor-events.ndjson` as it runs and writes a completion sentinel to `/tmp/avenor-done.env` when it finishes.
+Run the selected invocation as a direct background child and record its process
+handle. Bound the whole command with your execution tool's timeout. Do not rely
+on a launcher that forks and leaves its child untracked.
 
 To use a prompt file instead:
 
@@ -32,9 +41,9 @@ avenor run \
   --agent jockey \
   --prompt-file /repo/task.md \
   --dir /repo \
-  --permission-handler file:/tmp/avenor-perm \
-  --on-event /tmp/avenor-events.ndjson \
-  --sentinel-file /tmp/avenor-done.env
+  --permission-handler "file:$RUN_DIR/perm" \
+  --on-event "$RUN_DIR/events.ndjson" \
+  --sentinel-file "$RUN_DIR/done.env"
 ```
 
 ## Monitoring
@@ -42,20 +51,22 @@ avenor run \
 Tail the event log to see what jockey is doing:
 
 ```sh
-avenor watch --follow /tmp/avenor-events.ndjson
+avenor watch --follow "$RUN_DIR/events.ndjson"
 ```
 
-Watch for `permission.request` events — those mean jockey has a question. When one appears, use the `answer-jockey` skill with `/tmp/avenor-perm` as the handler path.
+Watch for `permission.request` events — those mean jockey has a question. When one appears, use the `answer-jockey` skill with `$RUN_DIR/perm` as the handler path.
 
 To filter to milestones and findings only:
 
 ```sh
-avenor watch --follow --classify /tmp/avenor-events.ndjson
+avenor watch --follow --classify "$RUN_DIR/events.ndjson"
 ```
 
 ## Completion
 
-When the run finishes, `/tmp/avenor-done.env` contains the outcome:
+Wait for the child to exit, then inspect `$RUN_DIR/done.env` if present. A parse
+error, crash, forced termination, or sentinel write error can leave no sentinel;
+report that outcome rather than polling forever. A sentinel contains:
 
 ```
 DONE
@@ -73,7 +84,10 @@ STOP_REASON=error
 RUN=a3f9...
 ```
 
-Read `STATUS=` to branch on the outcome. `DONE` is clean completion. `FAILED`, `TIMEOUT`, and `KILLED` indicate problems. `BLOCKED` means jockey emitted `<|workflow: abort | reason|>` and needs escalation.
+The first line is the outcome. `DONE` is clean completion. `FAILED`, `TIMEOUT`,
+and `KILLED` indicate problems. `BLOCKED` means jockey emitted
+`<|workflow: abort | reason|>` and needs escalation. Read a result file only if
+this run's sentinel names it in `RESULT=`.
 
 ## Using a stable supervisor
 
@@ -88,7 +102,7 @@ avenor control --socket /tmp/avenor-stable.sock spawn \
   --prompt "Your task here" \
   --dir /repo \
   --agent jockey \
-  --permission-handler file:/tmp/avenor-perm \
+  --permission-handler "file:$RUN_DIR/perm" \
   --label my-task
 
 # List running runtimes
