@@ -759,8 +759,14 @@ export async function executePeers(
     const result: PeersRouterResult = {
       action,
       // Assigned, never merged: the router is the sole authority for the flag,
-      // so a session record carrying `self` cannot spoof the marker.
-      peers: peers.peers.map(peer => ({ ...peer, self: peer.run_id === callerRunId })),
+      // so a session record carrying `self` cannot spoof the marker. The key
+      // is emitted only when true, matching Go's omitempty on PeerRecord.Self.
+      peers: peers.peers.map(peer => {
+        const record = { ...peer }
+        if (record.run_id === callerRunId) record.self = true
+        else delete record.self
+        return record
+      }),
       text: '',
     }
     if (peers.detail !== undefined) {
