@@ -908,7 +908,9 @@ avenor watch --follow --format plain --since-cursor /tmp/cursor /tmp/events.json
 
 - `0` — Success (session ended with stop_reason "success" or no explicit reason)
 - `1` — General error or session ended with stop_reason "error"; may trigger retry if `--max-retries` > 0
-- `2` — Flag validation error (unknown flags, malformed values, conflicting inputs)
+- `2` — Flag validation error (unknown flags, malformed values, `--prompt`/`--prompt-file` conflict), or a session that ended with stop_reason `refusal` or `tool_denied`
+- `3` — Session ended with stop_reason `max_tokens`
+- `4` — Session ended with stop_reason `max_turn_requests`
 - `5` — Blocked (a phase aborted with an abort marker)
 - `6` — Provider quota exhausted (`quota_exhausted`); fall back to another model or retry later
 - `7` — Provider rate limit (`rate_limited`); retried when `--max-retries` > 0
