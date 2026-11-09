@@ -537,6 +537,11 @@ avenor control --socket /tmp/avenor.sock shutdown graceful
 
 Wait on a run until it reaches attention or done. Resolves a run by ID or label over a control socket, or by scanning `~/.avenor/sockets` when `--socket` is omitted.
 
+`avenor await` attaches to a supervisor-managed runtime. A one-shot `avenor run
+--control-socket` server answers `status` but not the `history` and `subscribe`
+verbs `await` subscribes with, so awaiting it returns `method not found`; wait for
+that process to exit and read its sentinel instead.
+
 ```
 avenor await [flags] <run-id|label>
 ```
