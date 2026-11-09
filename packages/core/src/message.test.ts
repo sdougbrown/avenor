@@ -98,7 +98,7 @@ function fakeProvider(testCase: FixtureCase) {
         : conditions.callerKind === 'broker'
           ? 'broker'
           : ('' as 'owner'),
-      runId: conditions.callerKind === 'owner' ? 'supervisor' : 'run-caller',
+      runId: stringOf(spec.peers_self) || (conditions.callerKind === 'owner' ? 'supervisor' : 'run-caller'),
     }),
     surface: () => stringOf(conditions.surface) as never,
     role: () => 'agent',
@@ -187,6 +187,7 @@ function fakeProvider(testCase: FixtureCase) {
         for (const key of ['label', 'kind', 'status', 'backend', 'model', 'dir'] as const) {
           if (typeof peer[key] === 'string') record[key] = peer[key] as string
         }
+        if (peer.self === true) record.self = true
         return record
       })
       const detail = stringOf(spec.peers_error)
@@ -397,6 +398,14 @@ function assertPeersResult(
         expect(record[key], `${testCase.name}: ${key}`).toBe(stringOf(peer[key]) || undefined)
       }
     })
+    const selfRun = stringOf(spec.peers_self)
+    if (selfRun) {
+      peers.forEach((peer, index) => {
+        expect(result.peers[index].self === true, `${testCase.name}: self`).toBe(
+          result.peers[index].run_id === selfRun,
+        )
+      })
+    }
   }
   const renamed = object(spec.rename)
   if (renamed) {
@@ -593,6 +602,7 @@ describe('peers list text', () => {
       peers: async () => ({
         peers: [
           { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running' },
+          { run_id: 'rt_9', label: 'spoofed', self: true },
           { run_id: 'rt_3' },
         ],
       }),
@@ -600,11 +610,13 @@ describe('peers list text', () => {
     const result = await executePeers(provider, {})
     expect(result.peers.map(peer => ({ run_id: peer.run_id, self: peer.self === true }))).toEqual([
       { run_id: 'rt_2', self: true },
+      { run_id: 'rt_9', self: false },
       { run_id: 'rt_3', self: false },
     ])
     expect(peersDetails(result)).toEqual({
       peers: [
         { run_id: 'rt_2', label: 'mesh-a', kind: 'agent', status: 'running', self: true },
+        { run_id: 'rt_9', label: 'spoofed' },
         { run_id: 'rt_3' },
       ],
     })

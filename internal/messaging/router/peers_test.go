@@ -378,6 +378,25 @@ func TestRenderPeersMarksSelf(t *testing.T) {
 	}
 }
 
+// TestPeersDetailsPinsTheSelfKey pins the Go structured output's self key:
+// the JSON tag is named and spelled exactly as the TS surface emits it, and
+// omitempty keeps the key off records that are not the caller's, so the two
+// languages cannot drift on the structured shape.
+func TestPeersDetailsPinsTheSelfKey(t *testing.T) {
+	details := PeersDetails(Result{Action: "list", Peers: []messaging.PeerRecord{
+		{RunID: "rt_2", Label: "mesh-a", Self: true},
+		{RunID: "rt_3"},
+	}})
+	raw, err := json.Marshal(details)
+	if err != nil {
+		t.Fatalf("encode details: %v", err)
+	}
+	want := `{"peers":[{"run_id":"rt_2","label":"mesh-a","self":true},{"run_id":"rt_3"}]}`
+	if string(raw) != want {
+		t.Fatalf("details = %s, want %s", raw, want)
+	}
+}
+
 func TestToolOutputObject(t *testing.T) {
 	tell := Result{Action: "tell", Outcome: messaging.OutcomeSent, MessageID: "msg_1", Label: "peer", Text: "sent"}
 	want := map[string]any{"action": "tell", "outcome": "sent", "text": "sent", "message_id": "msg_1", "label": "peer"}

@@ -232,6 +232,11 @@ func newFake(t *testing.T, c messaging.ConformanceCase) *fakeProvider {
 	if kind == "owner" {
 		runID = "supervisor"
 	}
+	// A case that sets peers_self declares the caller's run id, so the fake
+	// speaks as that run instead of the callerKind default.
+	if selfRun := stringOf(c.Provider["peers_self"]); selfRun != "" {
+		runID = selfRun
+	}
 	provider := &fakeProvider{
 		caller:  messaging.Caller{Kind: messaging.CallerKind(kind), RunID: runID},
 		surface: messaging.Surface(stringOf(c.Conditions["surface"])),

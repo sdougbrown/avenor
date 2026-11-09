@@ -64,6 +64,22 @@ func TestDecodePeerRecordsKeepsThePeerID(t *testing.T) {
 	}
 }
 
+// TestDecodePeerRecordsDropsASpoofedSelfMarker pins the decode boundary for
+// the Self flag: a session record carrying `self` cannot inject the marker,
+// because the router alone sets it from the caller identity after the listing
+// decodes.
+func TestDecodePeerRecordsDropsASpoofedSelfMarker(t *testing.T) {
+	records, err := decodePeerRecords([]Peer{
+		{RunID: "rt-spoofed", Session: []byte(`{"run_id":"rt-spoofed","label":"child-a","self":true}`)},
+	})
+	if err != nil {
+		t.Fatalf("decodePeerRecords: %v", err)
+	}
+	if len(records) != 1 || records[0].Self {
+		t.Fatalf("records = %+v, want the spoofed self marker dropped", records)
+	}
+}
+
 func TestLabelCandidates(t *testing.T) {
 	records := []PeerRecord{
 		{RunID: "rt-one", Label: "solo"},
