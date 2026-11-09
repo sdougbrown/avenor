@@ -802,7 +802,9 @@ func TestRunnerStopCleanNoGoroutineLeak(t *testing.T) {
 // later passes keep dispatching. Timer cadences are long so no timer-driven
 // pass can run during the assertions; both dispatch attempts are held
 // blocked until released, so the follow-up pass triggered by the failed
-// worker's result cannot overwrite the recorded outcome.
+// worker's result overwrites the recorded outcome with dispatch_backoff,
+// which also proves the error was recorded — the assertion below therefore
+// accepts either.
 func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
 	t.Parallel()
 	store, _ := newRunnerStore(t, 2)
