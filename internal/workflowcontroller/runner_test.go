@@ -870,6 +870,13 @@ func TestRunnerDispatchErrorBacksOffAndRecovers(t *testing.T) {
 	// Short cadence; a 100ms backoff base makes the schedule observable.
 	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond, nil, nil)
 
+	// The set-on-error side of the contract: once the first failure is
+	// recorded, the next retry time must be visible and non-zero while
+	// the candidate is held.
+	waitUntil(t, "DispatchBackoffUntil set while held in backoff", func() bool {
+		return !r.Status().DispatchBackoffUntil.IsZero()
+	})
+
 	// The third delivery succeeds and clears the backoff; the fourth
 	// (same candidate, still ready in this fake) must be allowed again.
 	waitUntil(t, "four dispatches", func() bool { return deps.dispatchCount() >= 4 })
