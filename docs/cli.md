@@ -128,7 +128,8 @@ resolved, and by file identity when the paths already exist — and none may cla
 the permission request or response file derived from the sentinel while the file
 handler is active, and the result and pid paths must be single-line. An invocation
 rejected by flag validation writes no artifacts and leaves earlier files untouched.
-A rejection after flags parse attempts to write a sentinel, but a write error is
+For example, non-empty `--prompt` and `--prompt-file` together exit 2 without a
+sentinel. A rejection after flags parse attempts to write a sentinel, but a write error is
 only reported on stderr and does not change the exit code. A crash or forced
 termination can also leave no sentinel. Use fresh paths for every invocation;
 old sentinel, event, result, or pid files can otherwise be mistaken for this run.

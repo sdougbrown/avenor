@@ -151,6 +151,9 @@ func RunCommand() *clicontract.Command {
 			{Name: "roster-entry", Kind: clicontract.String, Usage: "roster entry name for direct selection"},
 			{Name: "pony-config", Kind: clicontract.String, Usage: "path to pony backend JSON config (required for --backend pony)"},
 		},
+		InputRules: []*clicontract.Rule{
+			clicontract.EnabledOn("prompt-file", clicontract.Or(clicontract.Not(clicontract.Truthy("prompt-file")), clicontract.Not(clicontract.Truthy("prompt"))), "--prompt and --prompt-file are mutually exclusive"),
+		},
 	}
 }
 
@@ -409,10 +412,6 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 		}
 	}
 
-	if opts.Prompt != "" && opts.PromptFile != "" {
-		fmt.Fprintln(stderr, "avenor: --prompt and --prompt-file are mutually exclusive")
-		return exitWithSentinel(1)
-	}
 	if opts.LoopFile != "" && opts.TeamFile != "" {
 		fmt.Fprintln(stderr, "avenor: --loop-file and --team-file are mutually exclusive")
 		return exitWithSentinel(1)
