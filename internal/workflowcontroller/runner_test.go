@@ -1056,8 +1056,13 @@ func TestRunnerLeadershipLossClearsDispatchBackoff(t *testing.T) {
 	// backoff expiring.
 	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 10*time.Second, nil, nil)
 
+	var preLossDeadline time.Time
 	waitUntil(t, "first dispatch failed into backoff", func() bool {
-		return deps.dispatchCount() >= 1 && !r.Status().DispatchBackoffUntil.IsZero()
+		if r.Status().DispatchBackoffUntil.IsZero() {
+			return false
+		}
+		preLossDeadline = r.Status().DispatchBackoffUntil
+		return true
 	})
 
 	// Force the leadership loss the same way the store would: the lease
@@ -1078,6 +1083,13 @@ func TestRunnerLeadershipLossClearsDispatchBackoff(t *testing.T) {
 	waitUntil(t, "candidate re-dispatched after the leadership loss", func() bool {
 		return deps.dispatchCount() >= 2
 	})
+	// The status must not report the stale pre-loss deadline: clearLeadStatus
+	// drops it with the lease, and any later value is a fresh streak from
+	// the second dispatch's own failure (a strictly later time, since the
+	// doubling schedule adds to it).
+	if got := r.Status().DispatchBackoffUntil; got.Equal(preLossDeadline) {
+		t.Fatalf("status kept the stale pre-loss backoff deadline %v across the leadership loss", got)
+	}
 }
 
 // TestRunnerPruneClearsStaleBackoffStatus proves the prune reports what it
