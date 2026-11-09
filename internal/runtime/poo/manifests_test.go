@@ -58,14 +58,19 @@ func TestMessagingManifests(t *testing.T) {
 	if catalog.Len() != 1 {
 		t.Fatalf("catalog: %v", catalog.Names())
 	}
+	// The message binding rides stdin: a present message — even an explicitly
+	// empty one — emits --message-stdin and carries the text off argv, while an
+	// absent message (withdraw, a message-less ask) emits no flag at all.
 	for _, tc := range []struct {
 		args  map[string]any
 		flags []string
+		stdin *string
 	}{
-		{map[string]any{"action": "tell", "target": "-peer", "message": "-hello\nworld"}, []string{"--action=tell", "--message=-hello\nworld", "--target=-peer"}},
-		{map[string]any{"action": "ask", "timeout_ms": 600000}, []string{"--action=ask", "--timeout-ms=600000"}},
-		{map[string]any{"action": "reply", "reply_to": "id", "message": "..."}, []string{"--action=reply", "--message=...", "--reply-to=id"}},
-		{map[string]any{"action": "withdraw", "message_id": "id"}, []string{"--action=withdraw", "--message-id=id"}},
+		{map[string]any{"action": "tell", "target": "-peer", "message": "-hello\nworld"}, []string{"--action=tell", "--message-stdin", "--target=-peer"}, ptr("-hello\nworld")},
+		{map[string]any{"action": "tell", "target": "-peer", "message": ""}, []string{"--action=tell", "--message-stdin", "--target=-peer"}, ptr("")},
+		{map[string]any{"action": "ask", "timeout_ms": 600000}, []string{"--action=ask", "--timeout-ms=600000"}, nil},
+		{map[string]any{"action": "reply", "reply_to": "id", "message": "..."}, []string{"--action=reply", "--message-stdin", "--reply-to=id"}, ptr("...")},
+		{map[string]any{"action": "withdraw", "message_id": "id"}, []string{"--action=withdraw", "--message-id=id"}, nil},
 	} {
 		plan, err := catalog.Plan("avenor_message", tc.args)
 		if err != nil {
@@ -74,6 +79,19 @@ func TestMessagingManifests(t *testing.T) {
 		want := append([]string{exe, "message", "--asks-dir=" + asks}, tc.flags...)
 		if !reflect.DeepEqual(plan.Argv, want) || plan.Timeout != messaging.MaxWait+30*time.Second {
 			t.Errorf("plan: %+v want %q", plan, want)
+		}
+		switch {
+		case tc.stdin == nil && plan.Stdin != nil:
+			t.Errorf("%v: stdin = %q, want none", tc.args, *plan.Stdin)
+		case tc.stdin != nil && plan.Stdin == nil:
+			t.Errorf("%v: stdin missing, want %q", tc.args, *tc.stdin)
+		case tc.stdin != nil && *plan.Stdin != *tc.stdin:
+			t.Errorf("%v: stdin = %q, want %q", tc.args, *plan.Stdin, *tc.stdin)
+		}
+		for _, arg := range plan.Argv {
+			if tc.stdin != nil && *tc.stdin != "" && strings.Contains(arg, *tc.stdin) {
+				t.Errorf("argv %q carries the message text", arg)
+			}
 		}
 	}
 	for _, args := range []map[string]any{{}, {"action": "bad"}, {"action": "ask", "timeout_ms": -1}, {"action": "ask", "timeout_ms": 600001}, {"action": "ask", "timeout_ms": 1.5}, {"action": "tell", "extra": "x"}} {
@@ -361,7 +379,13 @@ func TestFeedInstructionMatchesManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(plan.Argv, "\n"); !strings.Contains(got, fmt.Sprintf("--reply-to=%s", "ask-id")) || !strings.Contains(got, "--message=...") || !strings.Contains(got, "--action=reply") {
+	if got := strings.Join(plan.Argv, "\n"); !strings.Contains(got, fmt.Sprintf("--reply-to=%s", "ask-id")) || !strings.Contains(got, "--message-stdin") || strings.Contains(got, "--message=") || !strings.Contains(got, "--action=reply") {
 		t.Fatal(plan.Argv)
 	}
+	if plan.Stdin == nil || *plan.Stdin != "..." {
+		t.Fatalf("stdin = %v, want the reply text", plan.Stdin)
+	}
 }
+
+// ptr returns a pointer to its argument, for stdin expectations.
+func ptr(s string) *string { return &s }
