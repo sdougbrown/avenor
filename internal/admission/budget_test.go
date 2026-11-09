@@ -1,7 +1,9 @@
 package admission
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -521,6 +523,164 @@ func TestReapReclaimsDeadPIDAcrossHandles(t *testing.T) {
 	active, _, _ = root.Status()
 	if active != 0 {
 		t.Fatalf("active = %d, want 0 after reap", active)
+	}
+}
+
+// A failed in-place shrink (the write lands over a longer file but the
+// truncate never takes effect, #555) leaves a valid JSON object followed
+// by the tail of the old, longer file. The budget must stay usable: the
+// first value is the latest valid state, and the next write re-truncates
+// and repairs the file. Before the fix, every readBudget failed with
+// "invalid character after top-level value" and the file never recovered.
+func TestBudgetSurvivesFailedShrinkTruncate(t *testing.T) {
+	path := newBudgetFile(t)
+	b, err := CreateRoot(path, 4)
+	if err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	defer b.Close()
+
+	// Occupy a slot so the on-disk file is longer than an empty-active one.
+	tok, err := b.Acquire("holder")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Simulate a write that lands but whose truncate fails: overwrite the
+	// file at offset 0 with the shorter (slot-released) state and leave the
+	// tail of the old, longer file in place.
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	bf, err := readBudget(b.f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(bf.Active, tok)
+	shorter, err := json.MarshalIndent(bf, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.f.Write(shorter); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately no Truncate: the tail of the old file remains.
+	unlock(b.f)
+
+	// The file is now a valid JSON object plus stale trailing bytes. The
+	// budget must still read the first value, and a write must
+	// re-truncate and repair it. Read the file state directly: Status()
+	// falls back to (0, capacity, rootID) on a read error, so it cannot
+	// confirm the corrupted file actually decodes.
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(b.f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &struct{}{}); err == nil {
+		t.Fatal("precondition: corrupted file parses strictly, want stale trailing bytes present")
+	}
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	bf, err = readBudget(b.f)
+	if err != nil {
+		t.Fatalf("readBudget after failed shrink = %v, want the first value to decode", err)
+	}
+	if len(bf.Active) != 0 {
+		t.Fatalf("post-corruption active = %d, want 0", len(bf.Active))
+	}
+	if bf.Capacity != 4 {
+		t.Fatalf("post-corruption capacity = %d, want 4", bf.Capacity)
+	}
+	if err := unlock(b.f); err != nil {
+		t.Fatal(err)
+	}
+
+	tok2, err := b.Acquire("holder2")
+	if err != nil {
+		t.Fatalf("Acquire after failed shrink = %v, want the budget usable", err)
+	}
+	b.Release(tok2)
+
+	// After the write re-truncated the file, the stale trailing bytes are
+	// gone: the file must now parse strictly, without any tolerance.
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = io.ReadAll(b.f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	var repaired budgetFile
+	if err := json.Unmarshal(raw, &repaired); err != nil {
+		t.Fatalf("post-repair file does not parse strictly = %v, want the write to clear trailing bytes", err)
+	}
+	if len(repaired.Active) != 0 {
+		t.Fatalf("post-repair active = %d, want 0", len(repaired.Active))
+	}
+}
+
+// A write interrupted mid-object leaves a truncated first value, which has
+// no valid state to recover; it must still fail loudly rather than parse
+// a partial file.
+func TestBudgetFailsOnTruncatedValue(t *testing.T) {
+	path := newBudgetFile(t)
+	b, err := CreateRoot(path, 4)
+	if err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	defer b.Close()
+
+	tok, err := b.Acquire("holder")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	_ = tok
+
+	// Truncate the file mid-object so the first value is incomplete.
+	if err := lock(b.f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	data, rerr := io.ReadAll(b.f)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(data) <= 20 {
+		t.Fatalf("budget file too short to truncate mid-object: %d bytes", len(data))
+	}
+	if _, err := b.f.WriteAt(data[:20], 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.f.Truncate(20); err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(b.f); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := b.Acquire("holder2"); err == nil {
+		t.Fatal("Acquire after mid-object truncate = success, want a parse error")
 	}
 }
 
