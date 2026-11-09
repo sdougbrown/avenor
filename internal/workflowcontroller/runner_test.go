@@ -880,13 +880,35 @@ func TestRunnerDispatchErrorBacksOffAndRecovers(t *testing.T) {
 	if d := recs[2].at.Sub(recs[1].at); d < 160*time.Millisecond {
 		t.Fatalf("third dispatch after %v, want the ~200ms doubled backoff honored", d)
 	}
-	// The successful third delivery cleared the backoff, so the fourth
-	// attempt is not deferred by it.
-	if d := recs[3].at.Sub(recs[2].at); d > 100*time.Millisecond {
-		t.Fatalf("fourth dispatch after %v, want no backoff after a successful delivery", d)
+	// The successful third delivery (which the fourth above followed)
+	// cleared the streak: the backoff state must be gone, not merely
+	// expired.
+	if s := r.Status(); !s.DispatchBackoffUntil.IsZero() {
+		t.Fatalf("backoff state not cleared after a successful delivery: next=%v", s.DispatchBackoffUntil)
 	}
-	if s := r.Status(); s.DispatchBackoffUntil.IsZero() {
-		t.Fatal("status never recorded a dispatch backoff retry time")
+}
+
+// TestDispatchBackoffDelay pins the schedule: the base after the first
+// consecutive error, doubling, capped at five times the base.
+func TestDispatchBackoffDelay(t *testing.T) {
+	base := 100 * time.Millisecond
+	for _, tc := range []struct {
+		count int
+		want  time.Duration
+	}{
+		{1, base},
+		{2, 2 * base},
+		{3, 4 * base},
+		{4, 5 * base},
+		{5, 5 * base},
+		{9, 5 * base},
+	} {
+		if got := dispatchBackoffDelay(base, tc.count); got != tc.want {
+			t.Errorf("dispatchBackoffDelay(%v, %d) = %v, want %v", base, tc.count, got, tc.want)
+		}
+	}
+	if got := dispatchBackoffDelay(0, 1); got != defaultDispatchBackoffBase {
+		t.Errorf("zero base falls back to the package default, got %v", got)
 	}
 }
 
