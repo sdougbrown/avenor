@@ -48,6 +48,19 @@ func TestRunDeclaredFlagSyntaxRejectsBeforeSentinel(t *testing.T) {
 	}
 }
 
+func TestRunConflictingPromptsRejectBeforeArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "done.env")
+	var stdout, stderr bytes.Buffer
+	code := runDeclared([]string{"run", "--prompt=x", "--prompt-file=prompt.txt", "--sentinel-file=" + sentinel}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("exit = %d, stderr = %q; want usage error", code, stderr.String())
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("sentinel exists after rejection: %v", err)
+	}
+}
+
 func TestSchemaCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runDeclared([]string{"schema"}, &stdout, &stderr)

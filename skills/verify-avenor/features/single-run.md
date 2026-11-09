@@ -3,6 +3,7 @@
 ## Sub-features
 
 - Inline prompt vs `--prompt-file`
+- Conflicting non-empty prompt inputs fail validation with exit 2 and no sentinel
 - Event stream emission (`--on-event`, NDJSON)
 - Completion sentinel (`--sentinel-file`: `DONE`, `SESSION=`, `STOP_REASON=`, `RUN=`, `RESULT=` when a result file was written)
 - Result file (`--result-file`: the run's final answer as plain text, written before the sentinel)
@@ -45,6 +46,19 @@ file; the result file holds the same text as the terminal `session.end`
 `final_output`; the pid file is gone within the polling window; `events.ndjson`
 contains a `session.start` and a terminal `session.end` with
 `stop_reason: end_turn`, all carrying the `verify-smoke` label.
+
+Check rejection in a fresh directory as well:
+
+```sh
+REJECT=$(mktemp -d /tmp/avenor-verify-reject.XXXXXX)
+./avenor run --prompt text --prompt-file "$REJECT/prompt.txt" \
+  --sentinel-file "$REJECT/done.env" 2>"$REJECT/stderr.txt"
+echo "exit=$?"
+grep 'mutually exclusive' "$REJECT/stderr.txt"
+test ! -e "$REJECT/done.env" && echo "no sentinel"
+```
+
+**Rejection proof:** exit `2`, a mutually exclusive diagnostic, and no sentinel.
 
 For this Pi smoke run, also check the submission event in the same captured log:
 
