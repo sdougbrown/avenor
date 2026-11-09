@@ -11,9 +11,10 @@ $ARGUMENTS: the task to dispatch to Codex, or a path to a prompt file prefixed w
 ### 1. Set up paths
 
 ```bash
-PERM_BASE=/tmp/avenor-perm-$$
-EVENTS=/tmp/avenor-events-$$.ndjson
-SENTINEL=/tmp/avenor-done-$$.env
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/avenor-codex.XXXXXX")
+PERM_BASE=$RUN_DIR/perm
+EVENTS=$RUN_DIR/events.ndjson
+SENTINEL=$RUN_DIR/done.env
 ```
 
 ### 2. Dispatch
@@ -42,6 +43,10 @@ avenor run \
 
 ### 3. Monitor
 
+Run the selected invocation as a direct background child and record its process
+handle. Bound the whole command with your execution tool's timeout. Do not rely
+on a launcher that forks and leaves its child untracked.
+
 ```bash
 avenor watch --follow --classify "$EVENTS"
 ```
@@ -54,7 +59,11 @@ avenor answer "$PERM_BASE" --option <option-id>
 
 ### 4. Read the result
 
-Poll for `$SENTINEL`. `DONE` is clean completion. `FAILED`, `TIMEOUT`, `KILLED` indicate problems.
+Wait for the child to exit, then inspect `$SENTINEL` if present. A parse error,
+crash, forced termination, or sentinel write error can leave no sentinel; report
+that outcome rather than polling forever. The first line is `DONE` on clean
+completion; `FAILED`, `TIMEOUT`, and `KILLED` indicate problems. Read a result
+file only if this run's sentinel names it in `RESULT=`.
 
 ## When to use jockey instead
 

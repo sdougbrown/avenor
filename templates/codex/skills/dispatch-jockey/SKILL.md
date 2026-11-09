@@ -11,9 +11,10 @@ $ARGUMENTS: the task to dispatch to jockey, or a path to a prompt file prefixed 
 ### 1. Set up paths
 
 ```bash
-PERM_BASE=/tmp/avenor-perm-$$
-EVENTS=/tmp/avenor-events-$$.ndjson
-SENTINEL=/tmp/avenor-done-$$.env
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/avenor-jockey.XXXXXX")
+PERM_BASE=$RUN_DIR/perm
+EVENTS=$RUN_DIR/events.ndjson
+SENTINEL=$RUN_DIR/done.env
 ```
 
 ### 2. Dispatch
@@ -44,6 +45,10 @@ avenor run \
 
 ### 3. Monitor
 
+Run the selected invocation as a direct background child and record its process
+handle. Bound the whole command with your execution tool's timeout. Do not rely
+on a launcher that forks and leaves its child untracked.
+
 ```bash
 avenor watch --follow --classify "$EVENTS"
 ```
@@ -56,7 +61,11 @@ avenor answer "$PERM_BASE" --option <option-id>
 
 ### 4. Read the result
 
-Poll `$SENTINEL`. `DONE` is clean. `BLOCKED` means jockey escalated — read `REASON=` for context.
+Wait for the child to exit, then inspect `$SENTINEL` if present. A parse error,
+crash, forced termination, or sentinel write error can leave no sentinel; report
+that outcome rather than polling forever. `DONE` is clean. `BLOCKED` means
+jockey escalated — read `REASON=` for context. Read a result file only if this
+run's sentinel names it in `RESULT=`.
 
 ## Note on dispatch depth
 

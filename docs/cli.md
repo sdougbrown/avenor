@@ -114,7 +114,9 @@ before that cleanup runs, leaving the file behind. A SIGKILL or a crash skips
 cleanup and leaves a stale pid file behind, and the kernel recycles pids, so
 `kill -0 $(cat run.pid)` alone can report an unrelated process as live. Check
 the process identity before signalling — `ps -o command= -p <pid>` works on both
-Linux and macOS — or wait for the sentinel instead. Launch wrappers cannot
+Linux and macOS. A sentinel alone cannot prove that a process is still running
+or that an invocation completed: validation, a crash, or a write failure can
+leave it absent. Launch wrappers cannot
 supply a trustworthy pid: `setsid` forks when the caller leads a process group,
 so a recorded `$!` can name a shell that already exited while the run continues.
 Letting the run publish its pid avoids that. The pid file is only removed by the
@@ -124,22 +126,40 @@ run that wrote it.
 distinct paths — compared as absolute paths with existing parent directories
 resolved, and by file identity when the paths already exist — and none may claim
 the permission request or response file derived from the sentinel while the file
-handler is active, and the result and pid paths must be single-line. An invocation rejected by flag validation writes
-no result or pid file and leaves an earlier answer untouched. A rejection after
-the flags are parsed still writes its sentinel when `--sentinel-file` is set, so
-a supervisor can wait on it; a command line that does not parse exits 2 before
-the sentinel path is known, so nothing is written. Treat the sentinel path as
-the run's own output rather than a place to keep an answer, since a rejection
-rewrites it like any other exit.
+handler is active, and the result and pid paths must be single-line. An invocation
+rejected by flag validation writes no artifacts and leaves earlier files untouched.
+A rejection after flags parse attempts to write a sentinel, but a write error is
+only reported on stderr and does not change the exit code. A crash or forced
+termination can also leave no sentinel. Use fresh paths for every invocation;
+old sentinel, event, result, or pid files can otherwise be mistaken for this run.
+
+For a direct child process, wait for its exit as well as checking its sentinel.
+The following example uses GNU `timeout` to bound the entire command, including
+setup. It does not use a launcher that forks away from the shell's child:
 
 ```sh
-avenor run --prompt-file my-prompt.txt --label "data-prep" \
-  --on-event /tmp/events.jsonl --sentinel-file /tmp/run.sentinel \
-  --result-file /tmp/result.txt --pid-file /tmp/run.pid &
-
-until [ -f /tmp/run.sentinel ]; do sleep 1; done
-cat /tmp/result.txt
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/avenor-run.XXXXXX")
+timeout --kill-after=10s 120s avenor run --prompt "Summarize this directory" \
+  --label "data-prep" --on-event "$RUN_DIR/events.jsonl" \
+  --sentinel-file "$RUN_DIR/done.env" --result-file "$RUN_DIR/result.txt" \
+  --pid-file "$RUN_DIR/run.pid" &
+CHILD=$!
+if wait "$CHILD"; then code=0; else code=$?; fi
+printf 'process exit: %s\n' "$code"
+if [ -f "$RUN_DIR/done.env" ]; then
+  cat "$RUN_DIR/done.env"
+  if grep -Fxq "RESULT=$RUN_DIR/result.txt" "$RUN_DIR/done.env"; then
+    cat "$RUN_DIR/result.txt"
+  fi
+else
+  printf '%s\n' 'No sentinel: the command failed before publication or was interrupted.' >&2
+fi
 ```
+
+When another supervisor launches the run, use that supervisor's completion
+status and timeout rather than assuming `$!` names the run. Read a result only
+when the current sentinel names it in `RESULT=`; a settled failure can carry a
+result too, so inspect the outcome before treating it as success.
 
 See [loop.md](loop.md) for multi-phase loop config.
 

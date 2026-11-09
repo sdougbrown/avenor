@@ -13,9 +13,10 @@ $ARGUMENTS: the task to dispatch to jockey, or a path to a prompt file prefixed 
 Choose consistent paths for this run:
 
 ```bash
-PERM_BASE=/tmp/avenor-perm-$$
-EVENTS=/tmp/avenor-events-$$.ndjson
-SENTINEL=/tmp/avenor-done-$$.env
+RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/avenor-jockey.XXXXXX")
+PERM_BASE=$RUN_DIR/perm
+EVENTS=$RUN_DIR/events.ndjson
+SENTINEL=$RUN_DIR/done.env
 ```
 
 ### 2. Dispatch
@@ -44,7 +45,9 @@ avenor run \
   --sentinel-file "$SENTINEL"
 ```
 
-Run in the background. Avenor writes events to `$EVENTS` and the completion sentinel to `$SENTINEL`.
+Run the selected command as a direct child in the background and record its
+process handle. Bound the whole command with your execution tool's timeout.
+Do not rely on a launcher that forks and leaves its child untracked.
 
 ### 3. Monitor
 
@@ -62,7 +65,9 @@ avenor answer "$PERM_BASE" --option <option-id>
 
 ### 4. Read the result
 
-Poll for `$SENTINEL` to know when the run is done. The file contains:
+Wait for the child to exit, then inspect `$SENTINEL` if it exists. A parse
+error, crash, forced termination, or sentinel write error can leave no sentinel;
+report that outcome rather than polling forever. The file contains:
 
 ```
 DONE
@@ -71,7 +76,9 @@ STOP_REASON=end_turn
 RUN=a3f9...
 ```
 
-`STATUS` values: `DONE` (clean), `FAILED`, `TIMEOUT`, `KILLED`, `BLOCKED` (jockey escalated — check `REASON=`).
+The first line is `DONE` (clean), `FAILED`, `TIMEOUT`, `KILLED`, or `BLOCKED`
+(jockey escalated — check `REASON=`). Do not infer success from a result file
+unless this run's sentinel names it in `RESULT=`.
 
 ## See also
 
