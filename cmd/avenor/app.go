@@ -104,6 +104,9 @@ func app() *clicontract.App {
 					{Name: "roster-file", Kind: clicontract.String, Usage: "path to roster config to validate (standalone or as fallback for loop/team)"},
 					{Name: "roster-entry", Kind: clicontract.String, Usage: "roster entry name to look up (requires --roster-file)"},
 				},
+				InputRules: []*clicontract.Rule{
+					clicontract.EnabledOn("roster-entry", clicontract.Or(clicontract.Not(clicontract.Truthy("roster-entry")), clicontract.Truthy("roster-file")), "--roster-entry requires --roster-file"),
+				},
 				Handle: handleVerify,
 			},
 			{
@@ -167,6 +170,10 @@ func app() *clicontract.App {
 					{Name: "allowed-host", Kind: clicontract.Repeat, Usage: "exact tailnet hostname accepted on the HTTP transport (repeatable)"},
 					{Name: "mcp-launch-wrapper-policy", Kind: clicontract.String, Usage: "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else launch-wrapper-policy.json under the avenor config home (XDG_CONFIG_HOME/avenor or ~/.config/avenor)); ignored when attaching to an existing supervisor, though a named file that is missing or malformed still fails"},
 				},
+				InputRules: []*clicontract.Rule{
+					clicontract.EnabledOn("auth-token-file", clicontract.Or(clicontract.Not(clicontract.Truthy("auth-token-file")), clicontract.Not(clicontract.Truthy("auth-token"))), "--auth-token and --auth-token-file cannot both be set"),
+					clicontract.EnabledOn("no-autostart", clicontract.Or(clicontract.Not(clicontract.Truthy("no-autostart")), clicontract.Truthy("supervisor-socket")), "--no-autostart requires --supervisor-socket"),
+				},
 				Handle: handleMCP,
 			},
 			{
@@ -182,7 +189,8 @@ func app() *clicontract.App {
 						Flags: []clicontract.Flag{
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to template JSON file (required)", Required: true},
 						},
-						Handle: handleWorkflowCreate,
+						InputRules: nonEmptyRequiredRules("request-file"),
+						Handle:     handleWorkflowCreate,
 					},
 					{
 						Name:  "instantiate",
@@ -192,7 +200,8 @@ func app() *clicontract.App {
 							{Name: "template-version", Kind: clicontract.String, Usage: "template version (required)", Required: true},
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to instance JSON file (required; {\"metadata\":{...},\"params\":{...}} or {})", Required: true},
 						},
-						Handle: handleWorkflowInstantiate,
+						InputRules: nonEmptyRequiredRules("template-id", "template-version", "request-file"),
+						Handle:     handleWorkflowInstantiate,
 					},
 					{
 						Name:        "status",
@@ -235,7 +244,8 @@ func app() *clicontract.App {
 							{Name: "lease-id", Kind: clicontract.String, Usage: "lease id (required)", Required: true},
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to complete request JSON file (required; must contain owner_token, outcome, outputs, artifacts)", Required: true},
 						},
-						Handle: handleWorkflowComplete,
+						InputRules: nonEmptyRequiredRules("activation-id", "attempt-id", "lease-id", "request-file"),
+						Handle:     handleWorkflowComplete,
 					},
 					{
 						Name:        "gate",
@@ -246,7 +256,8 @@ func app() *clicontract.App {
 							{Name: "operation", Kind: clicontract.String, Usage: "gate operation (required; satisfy, reject, waive, or external_result)", Required: true},
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to gate request JSON file (required)", Required: true},
 						},
-						Handle: handleWorkflowGate,
+						InputRules: nonEmptyRequiredRules("activation-id", "operation", "request-file"),
+						Handle:     handleWorkflowGate,
 					},
 					{
 						Name:        "skip",
@@ -255,7 +266,8 @@ func app() *clicontract.App {
 						Flags: []clicontract.Flag{
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to skip request JSON file (required; must contain actor, reason, evidence_ids)", Required: true},
 						},
-						Handle: handleWorkflowSkip,
+						InputRules: nonEmptyRequiredRules("request-file"),
+						Handle:     handleWorkflowSkip,
 					},
 					{
 						Name:        "cancel",
@@ -265,7 +277,8 @@ func app() *clicontract.App {
 							{Name: "reason", Kind: clicontract.String, Usage: "reason for the cancel (required; recorded on the workflow.canceled event)", Required: true},
 							{Name: "actor", Kind: clicontract.String, Usage: "actor id recorded as the canceling operator", Default: "cli"},
 						},
-						Handle: handleWorkflowCancel,
+						InputRules: nonEmptyRequiredRules("reason"),
+						Handle:     handleWorkflowCancel,
 					},
 					{
 						Name:        "unblock",
@@ -274,7 +287,8 @@ func app() *clicontract.App {
 						Flags: []clicontract.Flag{
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to unblock request JSON file (required; must contain actor, reason)", Required: true},
 						},
-						Handle: handleWorkflowUnblock,
+						InputRules: nonEmptyRequiredRules("request-file"),
+						Handle:     handleWorkflowUnblock,
 					},
 					{
 						Name:        "ready",
@@ -295,7 +309,8 @@ func app() *clicontract.App {
 								Flags: []clicontract.Flag{
 									{Name: "request-file", Kind: clicontract.String, Usage: "path to controller JSON file (required)", Required: true},
 								},
-								Handle: handleWorkflowControllerCreate,
+								InputRules: nonEmptyRequiredRules("request-file"),
+								Handle:     handleWorkflowControllerCreate,
 							},
 							{
 								Name:        "enable",
@@ -310,7 +325,8 @@ func app() *clicontract.App {
 								Flags: []clicontract.Flag{
 									{Name: "reason", Kind: clicontract.String, Usage: "reason for disabling (required)", Required: true},
 								},
-								Handle: handleWorkflowControllerDisable,
+								InputRules: nonEmptyRequiredRules("reason"),
+								Handle:     handleWorkflowControllerDisable,
 							},
 							{
 								Name:        "status",
@@ -377,6 +393,9 @@ func app() *clicontract.App {
 							{Name: "max-retries", Kind: clicontract.Int, Usage: "maximum retry attempts on transient failure"},
 							{Name: "launch-wrapper", Kind: clicontract.Repeat, Usage: "opaque argv prefix in front of the backend command; repeatable, each use adds one element"},
 						},
+						InputRules: []*clicontract.Rule{
+							clicontract.EnabledOn("prompt-file", clicontract.Or(clicontract.Not(clicontract.Truthy("prompt-file")), clicontract.Not(clicontract.Truthy("prompt"))), "--prompt and --prompt-file are mutually exclusive"),
+						},
 						Handle: handleControlSpawn,
 					},
 					{
@@ -432,6 +451,14 @@ func app() *clicontract.App {
 			},
 		},
 	}
+}
+
+func nonEmptyRequiredRules(names ...string) []*clicontract.Rule {
+	rules := make([]*clicontract.Rule, 0, len(names))
+	for _, name := range names {
+		rules = append(rules, clicontract.EnabledOn(name, clicontract.Truthy(name), "--"+name+" must not be empty"))
+	}
+	return rules
 }
 
 // schemaDocument is the shape the schema command writes: the declared

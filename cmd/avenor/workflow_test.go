@@ -369,7 +369,7 @@ func TestWorkflowCLICancel(t *testing.T) {
 	defer os.Remove(sock)
 	var outBuf, errBuf bytes.Buffer
 	code = runDeclared([]string{"workflow", "--socket", sock, "cancel", wf}, &outBuf, &errBuf)
-	if code != 2 || !strings.Contains(errBuf.String(), "--reason is required") {
+	if code != 2 || !strings.Contains(errBuf.String(), "missing required flag --reason") {
 		t.Fatalf("cancel without --reason: want exit 2 with required message, got %d: %s", code, errBuf.String())
 	}
 }

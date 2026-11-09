@@ -105,12 +105,6 @@ func handleMCP(ctx context.Context, inv clicontract.Invocation, stderr io.Writer
 	if err := mcpMaxWaitError(maxWait); err != nil {
 		return nil, usageErrorf("avenor mcp: %v", err)
 	}
-	if tokenSet && fileSet {
-		return nil, usageErrorf("avenor mcp: --auth-token and --auth-token-file cannot both be set")
-	}
-	if noAutostart && supervisorSocket == "" {
-		return nil, usageErrorf("avenor mcp: --no-autostart requires --supervisor-socket")
-	}
 	if transport == "http" {
 		// Precedence: explicit --auth-token, then --auth-token-file, then the
 		// MCP_AUTH_TOKEN environment variable.

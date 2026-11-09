@@ -27,10 +27,6 @@ func handleVerify(ctx context.Context, inv clicontract.Invocation, stderr io.Wri
 	rosterFile := inv.Flags["roster-file"]
 	rosterEntry := inv.Flags["roster-entry"]
 
-	if rosterEntry != "" && rosterFile == "" {
-		return nil, usageErrorf("avenor verify: --roster-entry requires --roster-file")
-	}
-
 	if loopFile == "" && teamFile == "" && rosterFile == "" {
 		return nil, usageErrorf("avenor verify: at least one of --loop-file, --team-file, or --roster-file is required")
 	}

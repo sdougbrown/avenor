@@ -339,6 +339,16 @@ Then spawn runtimes via `avenor control spawn`. See [stable.md](stable.md),
 [messaging.md](messaging.md#running-a-hub) and
 [control-protocol.md](control-protocol.md) for full details.
 
+## avenor schema
+
+`avenor schema` prints the declared command surface as JSON. Flag defaults use
+their value types: integers are numbers and durations are Go duration strings,
+such as `30s`. Command `input_rules` describe relationships between supplied
+flags. The CLI checks those rules and required flags before running a handler;
+missing required flags report `missing required flag --<name>`.
+The rules do not cover every validation: handlers also check configuration,
+environment variables, and some flag relationships.
+
 ## avenor message
 
 Send broker messages as the current child run, not as the supervisor:
@@ -361,7 +371,8 @@ without a claim record. Use `withdraw` with `--message-id` to close an open ask.
 This keeps the text out of command arguments, which can be visible to other
 processes. The flag is mutually exclusive with `--message`, including an empty
 `--message=`. Supplying both exits 2 without sending. When the flag is absent or
-false, the command does not read stdin. A read error, input past 1 MiB of raw
+false, the command does not read stdin. The stdin flag removes text from argv,
+not from tool calls, transcripts, or other surfaces. A read error, input past 1 MiB of raw
 input, or input that is not valid UTF-8 exits 1 without sending. `--message`
 text must be valid UTF-8 too; invalid UTF-8 exits 1 without sending, instead
 of being silently replaced with the Unicode replacement character during

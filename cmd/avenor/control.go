@@ -188,9 +188,6 @@ func spawnParamsFromInvocation(inv clicontract.Invocation) (map[string]any, erro
 	promptFile := inv.Flags["prompt-file"]
 	thinking := inv.Flags["thinking"]
 
-	if prompt != "" && promptFile != "" {
-		return nil, usageErrorf("avenor control: spawn: --prompt and --prompt-file are mutually exclusive")
-	}
 	if prompt == "" && promptFile == "" {
 		return nil, usageErrorf("avenor control: spawn: --prompt or --prompt-file is required")
 	}
