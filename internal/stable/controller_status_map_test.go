@@ -25,7 +25,15 @@ func TestControllerStatusMapDispatchBackoffUntil(t *testing.T) {
 	t.Run("nil when no backoff is held", func(t *testing.T) {
 		runner := &workflowcontroller.RunnerStatus{}
 		got := controllerStatusMap(rec, "self", runner, nil)
-		if v := got["dispatch_backoff_until"]; v != nil {
+		// Key presence is part of the RPC shape: a dropped entry
+		// would render differently than an explicit null, so the
+		// assertion must pin the key existing with a nil value
+		// (a bare != nil check is satisfied by an absent key too).
+		v, ok := got["dispatch_backoff_until"]
+		if !ok {
+			t.Fatal("dispatch_backoff_until key missing from the status map; want present with a nil value")
+		}
+		if v != nil {
 			t.Fatalf("dispatch_backoff_until = %#v, want nil", v)
 		}
 	})

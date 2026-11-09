@@ -871,11 +871,6 @@ func TestRunnerDispatchErrorDoesNotStopPasses(t *testing.T) {
 	// reports the injected error.
 	waitUntil(t, "first dispatch attempted", func() bool { return deps.dispatchCount() >= 1 })
 	block <- struct{}{}
-	// Pin the error path specifically: dispatch_error is set on the
-	// failed worker's result and persists until the follow-up pass's
-	// success result overwrites it (the 100µs backoff base means the
-	// follow-up pass never reports the candidate as held, so no
-	// dispatch_backoff fold can mask the error outcome).
 	// Pin the error path specifically. The outcome string alone is not
 	// a reliable pin: the follow-up pass can fold a stale
 	// dispatch_backoff (or idle) over it within the backoff window
