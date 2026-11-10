@@ -850,10 +850,21 @@ func TestControllerDefinitionReconcileAtStartup(t *testing.T) {
 	if _, err := prev.Create("removed", 5); err != nil {
 		t.Fatalf("seed create removed: %v", err)
 	}
+	if _, err := prev.Create("only-inflight", 4); err != nil {
+		t.Fatalf("seed create only-inflight: %v", err)
+	}
+	if _, err := prev.SetDesiredState("only-inflight", workflowcontroller.DesiredEnabled, ""); err != nil {
+		t.Fatalf("seed enable only-inflight: %v", err)
+	}
+	if _, err := prev.Create("only-state", 7); err != nil {
+		t.Fatalf("seed create only-state: %v", err)
+	}
 
 	defsDir := filepath.Join(t.TempDir(), "defs")
 	writeControllerDefinition(t, defsDir, "c1.json", `{"controller_id": "c1", "max_inflight": 9, "desired_state": "disabled"}`)
 	writeControllerDefinition(t, defsDir, "c2.json", `{"controller_id": "c2", "max_inflight": 2, "desired_state": "enabled"}`)
+	writeControllerDefinition(t, defsDir, "only-inflight.json", `{"controller_id": "only-inflight", "max_inflight": 11}`)
+	writeControllerDefinition(t, defsDir, "only-state.json", `{"controller_id": "only-state", "max_inflight": 7, "desired_state": "enabled"}`)
 
 	sup := newTestSupervisor(t, Config{
 		ControlSocket:         newStableSocketPath(t, "wfctl-defs"),
@@ -894,6 +905,38 @@ func TestControllerDefinitionReconcileAtStartup(t *testing.T) {
 	}
 	if rec.MaxInflight != 5 || rec.DesiredState != workflowcontroller.DesiredDisabled {
 		t.Fatalf("removed controller changed: max_inflight %d desired %s, want untouched 5/disabled", rec.MaxInflight, rec.DesiredState)
+	}
+
+	// A definition with no desired_state reconciles only max_inflight: the
+	// enabled record stays enabled with a leader loop.
+	rec, ok, err = store.Get("only-inflight")
+	if err != nil || !ok {
+		t.Fatalf("get only-inflight: ok=%v err=%v", ok, err)
+	}
+	if rec.MaxInflight != 11 || rec.DesiredState != workflowcontroller.DesiredEnabled {
+		t.Fatalf("only-inflight = max_inflight %d desired %s, want 11/enabled", rec.MaxInflight, rec.DesiredState)
+	}
+	sup.controllerLoopsMu.Lock()
+	_, onlyInflightLoop := sup.controllerLoops["only-inflight"]
+	sup.controllerLoopsMu.Unlock()
+	if !onlyInflightLoop {
+		t.Fatal("only-inflight has no leader loop after its definition reconciled max_inflight")
+	}
+
+	// A definition whose max_inflight matches the record skips the
+	// SetMaxInflight branch and reconciles only desired_state.
+	rec, ok, err = store.Get("only-state")
+	if err != nil || !ok {
+		t.Fatalf("get only-state: ok=%v err=%v", ok, err)
+	}
+	if rec.MaxInflight != 7 || rec.DesiredState != workflowcontroller.DesiredEnabled {
+		t.Fatalf("only-state = max_inflight %d desired %s, want 7/enabled", rec.MaxInflight, rec.DesiredState)
+	}
+	sup.controllerLoopsMu.Lock()
+	_, onlyStateLoop := sup.controllerLoops["only-state"]
+	sup.controllerLoopsMu.Unlock()
+	if !onlyStateLoop {
+		t.Fatal("only-state has no leader loop after its definition enabled it")
 	}
 }
 
