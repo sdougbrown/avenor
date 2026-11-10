@@ -6230,23 +6230,33 @@ func (s *Supervisor) reconcileWorkflowControllers(store *workflowcontroller.Cont
 			log.Printf("workflow: controller definition %s not applied: %v", def.File, err)
 			continue
 		}
+		maxInflightReconciled := false
 		if !ok {
 			rec, err = store.Create(def.ControllerID, def.MaxInflight)
 			if err != nil {
 				log.Printf("workflow: controller definition %s not applied: %v", def.File, err)
 				continue
 			}
-			log.Printf("workflow: controller %s created from definition %s (max_inflight=%d, desired_state=%s)", def.ControllerID, def.File, def.MaxInflight, rec.DesiredState)
+			desired := rec.DesiredState
+			if def.DesiredState != "" {
+				desired = def.DesiredState
+			}
+			log.Printf("workflow: controller %s created from definition %s (max_inflight=%d, desired_state=%s)", def.ControllerID, def.File, def.MaxInflight, desired)
 		} else if rec.MaxInflight != def.MaxInflight {
 			if rec, err = store.SetMaxInflight(def.ControllerID, def.MaxInflight); err != nil {
 				log.Printf("workflow: controller definition %s not applied: %v", def.File, err)
 				continue
 			}
+			maxInflightReconciled = true
 			log.Printf("workflow: controller %s max_inflight reconciled from definition %s to %d", def.ControllerID, def.File, def.MaxInflight)
 		}
 		if def.DesiredState != "" && rec.DesiredState != def.DesiredState {
 			if _, err := store.SetDesiredState(def.ControllerID, def.DesiredState, fmt.Sprintf("controller definition %s", def.File)); err != nil {
-				log.Printf("workflow: controller definition %s partially applied (max_inflight reconciled, desired_state failed): %v", def.File, err)
+				partial := "desired_state failed"
+				if maxInflightReconciled {
+					partial = "max_inflight reconciled, desired_state failed"
+				}
+				log.Printf("workflow: controller definition %s partially applied (%s): %v", def.File, partial, err)
 				continue
 			}
 			log.Printf("workflow: controller %s desired_state reconciled from definition %s to %s", def.ControllerID, def.File, def.DesiredState)
