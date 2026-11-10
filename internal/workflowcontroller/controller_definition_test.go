@@ -85,6 +85,18 @@ func TestLoadControllerDefinitionsValidation(t *testing.T) {
 	}
 }
 
+func TestLoadControllerDefinitionsDirIsFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(file, []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+	if _, err := LoadControllerDefinitions(file); err == nil {
+		t.Fatal("LoadControllerDefinitions on a regular file: err = nil, want non-nil")
+	}
+}
+
 func TestLoadControllerDefinitionsDuplicateIDs(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
