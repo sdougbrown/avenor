@@ -832,3 +832,17 @@ func TestValidateTemplateRejectsNegativeBackoff(t *testing.T) {
 		t.Fatalf("ValidateTemplate(default) error = %v, want negative backoff_seconds rejection", err)
 	}
 }
+
+func TestValidateTemplateRejectsOversizedBackoff(t *testing.T) {
+	t.Parallel()
+	var tmpl Template
+	if err := json.Unmarshal(mutateTemplate(t, mutateFirstNode(func(node map[string]any) {
+		node["retry_policy"] = map[string]any{"max_attempts": 2, "exhaustion": "block", "backoff_seconds": 365*24*60*60 + 1}
+	})), &tmpl); err != nil {
+		t.Fatalf("decode template: %v", err)
+	}
+	err := ValidateTemplate(tmpl)
+	if err == nil || !strings.Contains(err.Error(), "backoff_seconds must not exceed 31536000") {
+		t.Fatalf("ValidateTemplate() error = %v, want oversized backoff_seconds rejection", err)
+	}
+}

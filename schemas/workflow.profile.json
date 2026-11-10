@@ -429,7 +429,8 @@
             "type": "string"
           },
           "backoff_seconds": {
-            "type": "integer"
+            "type": "integer",
+            "maximum": 31536000
           }
         },
         "required": [

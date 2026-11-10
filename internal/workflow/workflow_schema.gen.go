@@ -2571,6 +2571,9 @@ func svalidateWorkflowProfileRetryPolicy(raw json.RawMessage, path, schemaPath s
 			} else if !isSafe {
 				*issues = append(*issues, WorkflowProfileStructuralIssueAt("safeInteger", fpath, fspath))
 			} else {
+				if float64(ival) > 3.1536e+07 {
+					*issues = append(*issues, WorkflowProfileStructuralIssueAt("maximum", fpath, fspath))
+				}
 			}
 		default:
 			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
@@ -3894,6 +3897,9 @@ func (v WorkflowProfileOutputBinding) validate(path string, issues *[]Issue) {
 
 func (v WorkflowProfileRetryPolicy) validate(path string, issues *[]Issue) {
 	if v.BackoffSeconds != nil {
+		if float64(*v.BackoffSeconds) > 3.1536e+07 {
+			*issues = append(*issues, Issue{Code: "maximum", Path: path + "/" + escapePtr("backoff_seconds")})
+		}
 	}
 	if v.Outcome != nil {
 	}

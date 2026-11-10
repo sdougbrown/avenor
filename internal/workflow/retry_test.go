@@ -888,3 +888,59 @@ func TestRetryBackoffStampsNotBeforeReadiness(t *testing.T) {
 		t.Fatalf("instance after exhaustion = %s, want blocked", snap.Instance.Status)
 	}
 }
+
+// TestRetryBackoffRestampsEachRearm proves the backoff derives from the most
+// recent termination, not the first: with budget for three attempts, the
+// second re-arm stamps a fresh not-before readiness time from the second
+// termination instead of reusing the stale one.
+func TestRetryBackoffRestampsEachRearm(t *testing.T) {
+	t.Parallel()
+	const templateID = "retry-backoff-refresh"
+	const backoffSeconds = 60
+	templateJSON := []byte(fmt.Sprintf(`{
+  "schema_version": 1,
+  "template_id": %q,
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "run", "prompt": "do the thing"}, "retry_policy": {"max_attempts": 3, "exhaustion": "block", "backoff_seconds": %d}}],
+  "terminal_outcomes": ["done"]
+}`, templateID, backoffSeconds))
+	m, s, wf := newRetryFixture(t, templateJSON, templateID)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+	terminations := make(map[string]time.Time)
+	for round := 1; round <= 2; round++ {
+		attemptID, leaseID := startRetryAttempt(t, m, wf, "start", act.ID)
+		before := len(terminations)
+		mustTerminateAs(t, m, wf, "start", act.ID, attemptID, leaseID, AttemptFailed)
+		for _, e := range readEvents(t, s, wf) {
+			if e.Kind == EventAttemptTerminated && e.Identity.NodeID == NodeID("start") {
+				terminations[string(e.ID)] = e.At
+			}
+		}
+		if len(terminations) == before {
+			t.Fatalf("termination %d recorded no event", round)
+		}
+		snap, _, err = s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("loadCurrent round %d: %v", round, err)
+		}
+		act = activationByNode(&snap.Instance, "start")
+		if act.Status != ActivationReady {
+			t.Fatalf("round %d activation status = %s, want ready", round, act.Status)
+		}
+		var last time.Time
+		for _, at := range terminations {
+			if at.After(last) {
+				last = at
+			}
+		}
+		want := last.Add(backoffSeconds * time.Second)
+		if act.ReadyAt == nil || !act.ReadyAt.Equal(want) {
+			t.Fatalf("round %d ready_at = %v, want %v (last termination + backoff)", round, act.ReadyAt, want)
+		}
+	}
+}

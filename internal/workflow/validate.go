@@ -1204,12 +1204,21 @@ func compositionFields(limits *CompositionLimits) map[string]any {
 	return map[string]any{"max_depth": limits.MaximumDepth, "max_children": limits.MaximumChildren}
 }
 
+// maxRetryBackoffSeconds bounds the declared backoff so the duration
+// conversion in the reducer cannot overflow (int64 nanoseconds caps near
+// 292 years; a wrapped negative readiness time would silently disable the
+// backoff).
+const maxRetryBackoffSeconds = 365 * 24 * 60 * 60
+
 func validateRetryPolicy(policy *RetryPolicy, where string) error {
 	if policy == nil {
 		return nil
 	}
 	if policy.BackoffSeconds < 0 {
 		return fmt.Errorf("invalid workflow template: %s: backoff_seconds must not be negative", where)
+	}
+	if policy.BackoffSeconds > maxRetryBackoffSeconds {
+		return fmt.Errorf("invalid workflow template: %s: backoff_seconds must not exceed %d", where, maxRetryBackoffSeconds)
 	}
 	return nil
 }
@@ -1232,7 +1241,7 @@ func retryFields(policy *RetryPolicy) map[string]any {
 	if policy == nil {
 		return nil
 	}
-	return map[string]any{"max_attempts": policy.MaximumAttempts, "exhaustion": policy.Exhaustion, "outcome": policy.Outcome, "backoff_seconds": policy.BackoffSeconds}
+	return map[string]any{"max_attempts": policy.MaximumAttempts, "exhaustion": policy.Exhaustion, "outcome": policy.Outcome}
 }
 
 func integerValue(value int) *int64 {
