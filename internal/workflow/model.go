@@ -676,6 +676,10 @@ type RetryPolicy struct {
 	MaximumAttempts int                 `json:"max_attempts"`
 	Exhaustion      RetryExhaustionKind `json:"exhaustion"`
 	Outcome         OutcomeName         `json:"outcome,omitempty"`
+	// BackoffSeconds delays each re-armed attempt by this many seconds; zero
+	// re-arms immediately. The activation stays ready but is not
+	// dispatchable until its readiness time passes.
+	BackoffSeconds int64 `json:"backoff_seconds,omitempty"`
 }
 
 type CompletionContract struct {

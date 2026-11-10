@@ -58,14 +58,21 @@ type Decision struct {
 }
 
 // Select orders the candidates for one controller and returns those it may
-// dispatch, honoring effective-priority aging, deterministic tie breaking,
-// the controller's in-flight limit, derived concurrency-key occupancy, and
-// stale-candidate exclusion. The result depends only on the input slices'
-// contents, never their order.
+// dispatch, honoring readiness gating (a candidate whose readiness time is
+// in the future — a retry backoff — is not dispatchable yet),
+// effective-priority aging, deterministic tie breaking, the controller's
+// in-flight limit, derived concurrency-key occupancy, and stale-candidate
+// exclusion. The result depends only on the input slices' contents, never
+// their order.
 func Select(input SelectInput) []Decision {
 	eligible := make([]Candidate, 0, len(input.Candidates))
 	for _, candidate := range input.Candidates {
 		if candidate.ControllerID != input.ControllerID {
+			continue
+		}
+		if candidate.ReadyAt.After(input.Now) {
+			// The readiness time is a not-before time (a retry backoff), so
+			// the candidate is held until it passes.
 			continue
 		}
 		eligible = append(eligible, candidate)

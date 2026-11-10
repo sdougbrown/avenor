@@ -819,3 +819,72 @@ func TestBlockExhaustionDoesNotResurrectFailedInstance(t *testing.T) {
 		t.Fatalf("instance after later block exhaustion = %s, want failed (terminal not regressed)", snap.Instance.Status)
 	}
 }
+
+// TestRetryBackoffStampsNotBeforeReadiness proves a re-armed attempt under a
+// backoff policy keeps the activation ready while stamping a not-before
+// readiness time one backoff interval past the termination, so a retry
+// budget cannot be spent inside one transient outage. Exhaustion still
+// blocks once the budget is gone.
+func TestRetryBackoffStampsNotBeforeReadiness(t *testing.T) {
+	t.Parallel()
+	const templateID = "retry-backoff"
+	const backoffSeconds = 1200
+	templateJSON := []byte(fmt.Sprintf(`{
+  "schema_version": 1,
+  "template_id": %q,
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "run", "prompt": "do the thing"}, "retry_policy": {"max_attempts": 2, "exhaustion": "block", "backoff_seconds": %d}}],
+  "terminal_outcomes": ["done"]
+}`, templateID, backoffSeconds))
+	m, s, wf := newRetryFixture(t, templateJSON, templateID)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+
+	// First attempt fails: budget remains, so the activation re-arms with a
+	// not-before readiness time.
+	attemptID, leaseID := startRetryAttempt(t, m, wf, "start", act.ID)
+	mustTerminateAs(t, m, wf, "start", act.ID, attemptID, leaseID, AttemptFailed)
+
+	var terminatedAt time.Time
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventAttemptTerminated && e.Identity.NodeID == NodeID("start") {
+			terminatedAt = e.At
+		}
+	}
+	if terminatedAt.IsZero() {
+		t.Fatalf("no attempt_terminated event found for start")
+	}
+
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after retry: %v", err)
+	}
+	rearmed := activationByNode(&snap.Instance, "start")
+	if rearmed.Status != ActivationReady {
+		t.Fatalf("re-armed activation status = %s, want ready", rearmed.Status)
+	}
+	wantNotBefore := terminatedAt.Add(backoffSeconds * time.Second)
+	if rearmed.ReadyAt == nil || !rearmed.ReadyAt.Equal(wantNotBefore) {
+		t.Fatalf("re-armed activation ready_at = %v, want %v", rearmed.ReadyAt, wantNotBefore)
+	}
+
+	// The second attempt exhausts the budget and blocks regardless of the
+	// backoff still pending on the readiness time.
+	attemptID, leaseID = startRetryAttempt(t, m, wf, "start", rearmed.ID)
+	mustTerminateAs(t, m, wf, "start", rearmed.ID, attemptID, leaseID, AttemptTimedOut)
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after exhaustion: %v", err)
+	}
+	exhausted := activationByNode(&snap.Instance, "start")
+	if exhausted.Status != ActivationBlocked {
+		t.Fatalf("exhausted activation status = %s, want blocked", exhausted.Status)
+	}
+	if snap.Instance.Status != WorkflowBlocked {
+		t.Fatalf("instance after exhaustion = %s, want blocked", snap.Instance.Status)
+	}
+}

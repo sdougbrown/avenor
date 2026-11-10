@@ -138,7 +138,7 @@ func TestSelectOrdering(t *testing.T) {
 			wantPrio: []int{100, 95},
 		},
 		{
-			name: "future ready time counts as no wait",
+			name: "future ready time holds the candidate",
 			input: SelectInput{
 				ControllerID: "ctrl",
 				Now:          now,
@@ -148,9 +148,11 @@ func TestSelectOrdering(t *testing.T) {
 					cand("wf2", "n2", "a2", withPriority(90)),
 				},
 			},
-			// Equal effective priority; ReadyAt breaks the tie ascending.
-			wantIDs:  "wf2/n2/a2,wf1/n1/a1",
-			wantPrio: []int{90, 90},
+			// A future readiness time is a not-before time (a retry backoff):
+			// the candidate is not dispatchable until it passes, so only the
+			// past-ready candidate is selected.
+			wantIDs:  "wf2/n2/a2",
+			wantPrio: []int{90},
 		},
 		{
 			name: "ready time breaks priority tie ascending",
@@ -528,5 +530,29 @@ func TestSelectRevisionPassedThrough(t *testing.T) {
 		if d.Candidate.Revision != want {
 			t.Fatalf("decision %d revision = %d, want %d", i, d.Candidate.Revision, want)
 		}
+	}
+}
+
+// TestSelectHoldsFutureReadyCandidates proves a candidate whose readiness
+// time is in the future — a re-armed retry backoff — is not dispatchable
+// until the readiness time passes, while an already-ready candidate is
+// unaffected.
+func TestSelectHoldsFutureReadyCandidates(t *testing.T) {
+	t.Parallel()
+	input := SelectInput{
+		ControllerID: "ctrl",
+		Now:          now,
+		MaxInflight:  10,
+		Candidates: []Candidate{
+			cand("wf1", "n1", "a1", withReadyAt(now.Add(20*time.Minute))),
+			cand("wf2", "n2", "a2"),
+		},
+	}
+	if got := ids(Select(input)); got != "wf2/n2/a2" {
+		t.Fatalf("Select() = %s, want only the past-ready candidate", got)
+	}
+	input.Now = now.Add(21 * time.Minute)
+	if got := ids(Select(input)); got != "wf2/n2/a2,wf1/n1/a1" {
+		t.Fatalf("Select() after the readiness time passed = %s, want both candidates", got)
 	}
 }

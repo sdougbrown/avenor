@@ -116,7 +116,7 @@ fields:
 | `launch_wrappers` | no | Registry of trusted, author-reviewed executable configurations: `[{id, argv}]` (see [Launch wrappers](#launch-wrappers)). |
 | `bounded_loops` | no | Explicit bounded loop constructs. |
 | `default_lease_policy` | no | `{ttl_seconds, heartbeat_interval_seconds}`. |
-| `default_retry_policy` | no | `{max_attempts, exhaustion, outcome}`. |
+| `default_retry_policy` | no | `{max_attempts, exhaustion, outcome, backoff_seconds?}`. |
 | `working_directory` | no | Default attempt working directory: `{"from_instance_param": "<param id>"}`. |
 | `composition_limits` | no | `{max_depth, max_children}` for child workflows. |
 
@@ -756,6 +756,12 @@ the configured exhaustion when the budget is gone. A `canceled` attempt — a
 deliberate operator kill or supervisor teardown — never re-arms and never
 retries: the activation parks in `blocked`, the canceled attempt still
 occupies one retry-budget slot, and `workflow.unblock` re-arms it.
+
+`retry_policy.backoff_seconds` delays each re-arm: the activation stays
+`ready` but is not dispatchable until its not-before readiness time passes
+(one backoff interval after the failed attempt), so a retry budget cannot be
+spent inside one transient outage. The readiness time is persisted with the
+activation and survives a supervisor restart.
 
 A retry retains the activation and loop iteration, consumes only the retry
 budget, and cannot follow a semantic branch or checkpoint. Exhaustion applies

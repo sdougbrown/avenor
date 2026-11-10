@@ -797,3 +797,38 @@ func TestValidateTemplateJSONAssignmentDeciderModel(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateTemplateRejectsNegativeBackoff(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		mutator func(map[string]any)
+	}{
+		{
+			name: "node retry policy",
+			mutator: func(node map[string]any) {
+				node["retry_policy"] = map[string]any{"max_attempts": 2, "exhaustion": "block", "backoff_seconds": -1}
+			},
+		},
+	} {
+		var tmpl Template
+		if err := json.Unmarshal(mutateTemplate(t, mutateFirstNode(tc.mutator)), &tmpl); err != nil {
+			t.Fatalf("decode template (%s): %v", tc.name, err)
+		}
+		err := ValidateTemplate(tmpl)
+		if err == nil || !strings.Contains(err.Error(), "backoff_seconds must not be negative") {
+			t.Fatalf("ValidateTemplate(%s) error = %v, want negative backoff_seconds rejection", tc.name, err)
+		}
+	}
+	negativeDefault := strings.Replace(validTemplateJSON,
+		`"default_retry_policy": {"max_attempts": 2, "exhaustion": "block"}`,
+		`"default_retry_policy": {"max_attempts": 2, "exhaustion": "block", "backoff_seconds": -5}`, 1)
+	var tmpl Template
+	if err := json.Unmarshal([]byte(negativeDefault), &tmpl); err != nil {
+		t.Fatalf("decode template: %v", err)
+	}
+	err := ValidateTemplate(tmpl)
+	if err == nil || !strings.Contains(err.Error(), "backoff_seconds must not be negative") {
+		t.Fatalf("ValidateTemplate(default) error = %v, want negative backoff_seconds rejection", err)
+	}
+}

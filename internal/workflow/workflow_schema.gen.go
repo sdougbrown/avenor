@@ -2548,15 +2548,33 @@ func svalidateWorkflowProfileRetryPolicy(raw json.RawMessage, path, schemaPath s
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("required", path+"/"+escapePtr("max_attempts"), schemaPath))
 	}
 	allowed := map[string]bool{
-		"exhaustion":   true,
-		"max_attempts": true,
-		"outcome":      true,
+		"backoff_seconds": true,
+		"exhaustion":      true,
+		"max_attempts":    true,
+		"outcome":         true,
 	}
 	for key := range m {
 		if allowed[key] {
 			continue
 		}
 		*issues = append(*issues, WorkflowProfileStructuralIssueAt("additionalProperties", path+"/"+escapePtr(key), schemaPath))
+	}
+	if r, ok := m["backoff_seconds"]; ok {
+		fpath := path + "/" + escapePtr("backoff_seconds")
+		fspath := schemaPath + "/properties/" + escapePtr("backoff_seconds")
+		switch WorkflowProfileStructuralKind(r) {
+		case "number":
+			ival, isInt, isSafe := WorkflowProfileStructuralIntParts(r)
+			_ = ival
+			if !isInt {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+			} else if !isSafe {
+				*issues = append(*issues, WorkflowProfileStructuralIssueAt("safeInteger", fpath, fspath))
+			} else {
+			}
+		default:
+			*issues = append(*issues, WorkflowProfileStructuralIssueAt("type", fpath, fspath))
+		}
 	}
 	if r, ok := m["exhaustion"]; ok {
 		fpath := path + "/" + escapePtr("exhaustion")
@@ -3875,6 +3893,8 @@ func (v WorkflowProfileOutputBinding) validate(path string, issues *[]Issue) {
 }
 
 func (v WorkflowProfileRetryPolicy) validate(path string, issues *[]Issue) {
+	if v.BackoffSeconds != nil {
+	}
 	if v.Outcome != nil {
 	}
 }
@@ -5649,9 +5669,10 @@ func (v *WorkflowProfileOutputBinding) UnmarshalJSON(data []byte) error {
 }
 
 type WorkflowProfileRetryPolicy struct {
-	Exhaustion  string  "json:\"exhaustion\""
-	MaxAttempts int64   "json:\"max_attempts\""
-	Outcome     *string "json:\"outcome,omitempty\""
+	BackoffSeconds *int64  "json:\"backoff_seconds,omitempty\""
+	Exhaustion     string  "json:\"exhaustion\""
+	MaxAttempts    int64   "json:\"max_attempts\""
+	Outcome        *string "json:\"outcome,omitempty\""
 }
 
 func (v *WorkflowProfileRetryPolicy) UnmarshalJSON(data []byte) error {
@@ -5664,11 +5685,17 @@ func (v *WorkflowProfileRetryPolicy) UnmarshalJSON(data []byte) error {
 	}
 	for key := range raw {
 		switch key {
+		case "backoff_seconds":
 		case "exhaustion":
 		case "max_attempts":
 		case "outcome":
 		default:
 			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	if r, ok := raw["backoff_seconds"]; ok {
+		if len(r) == 4 && string(r) == "null" {
+			return fmt.Errorf("field \"backoff_seconds\" must not be null")
 		}
 	}
 	if r, ok := raw["exhaustion"]; ok {
@@ -5694,24 +5721,33 @@ func (v *WorkflowProfileRetryPolicy) UnmarshalJSON(data []byte) error {
 	}
 	type alias WorkflowProfileRetryPolicy
 	var next alias
+	if encoded, ok := raw["backoff_seconds"]; ok {
+		var decoded0 int64
+		integer1, integral, safe := WorkflowProfileStructuralIntParts(encoded)
+		if !integral || !safe {
+			return fmt.Errorf("integer value is not a safe mathematical integer")
+		}
+		decoded0 = int64(integer1)
+		next.BackoffSeconds = &decoded0
+	}
 	if encoded, ok := raw["exhaustion"]; ok {
 		if err := json.Unmarshal(encoded, &next.Exhaustion); err != nil {
 			return err
 		}
 	}
 	if encoded, ok := raw["max_attempts"]; ok {
-		integer0, integral, safe := WorkflowProfileStructuralIntParts(encoded)
+		integer2, integral, safe := WorkflowProfileStructuralIntParts(encoded)
 		if !integral || !safe {
 			return fmt.Errorf("integer value is not a safe mathematical integer")
 		}
-		next.MaxAttempts = int64(integer0)
+		next.MaxAttempts = int64(integer2)
 	}
 	if encoded, ok := raw["outcome"]; ok {
-		var decoded1 string
-		if err := json.Unmarshal(encoded, &decoded1); err != nil {
+		var decoded3 string
+		if err := json.Unmarshal(encoded, &decoded3); err != nil {
 			return err
 		}
-		next.Outcome = &decoded1
+		next.Outcome = &decoded3
 	}
 	*v = WorkflowProfileRetryPolicy(next)
 	return nil
