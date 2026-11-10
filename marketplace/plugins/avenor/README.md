@@ -119,6 +119,16 @@ already uses for its peers:
   and the launch copy of this variable only records the identity as the child
   joined it.
 
+A self-registered session's name follows Claude Code's `/rename`. After the built-in
+command runs, the layer reads the title it recorded (the last `custom-title`
+record in the session transcript, so a bare `/rename`'s generated name counts)
+and posts it to the broker's `/session_name`, which ranks a human-chosen name
+above the model, launch and environment labels. A resumed session posts the
+title it already has when it starts. The broker's name rule decides what it
+accepts: a refused title is logged, and peers keep the previous name. A provisioned run publishes no title: its transcript opens with
+the launch label, which no person chose, and the supervisor's label stays the
+name peers address.
+
 The layer picks one of two identities at `session.start`, and which one it is
 turns on the credential:
 
