@@ -124,8 +124,8 @@ command runs, the layer reads the title it recorded (the last `custom-title`
 record in the session transcript, so a bare `/rename`'s generated name counts)
 and posts it to the broker's `/session_name`, which ranks a human-chosen name
 above the model, launch and environment labels. A resumed session posts the
-title it already has when it starts. Titles past 64 characters are cut to the
-broker's limit. A provisioned run publishes no title: its transcript opens with
+title it already has when it starts. The broker's name rule decides what it
+accepts: a refused title is logged, and peers keep the previous name. A provisioned run publishes no title: its transcript opens with
 the launch label, which no person chose, and the supervisor's label stays the
 name peers address.
 

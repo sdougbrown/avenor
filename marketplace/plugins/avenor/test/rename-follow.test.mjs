@@ -101,14 +101,9 @@ test("a session that was never named publishes nothing", async () => {
   assert.deepEqual(f.published(), [])
 })
 
-test("a title past the broker's 64-character rule is cut, not dropped", async () => {
+test("a long title is posted as typed, leaving the name rule to the broker", async () => {
   const f = await fixture("long", title("x".repeat(80)))
-  assert.deepEqual(f.published(), ["x".repeat(64)])
-})
-
-test("a title cut at the limit keeps an astral character whole", async () => {
-  const f = await fixture("astral", title("x".repeat(63) + "\u{1F40E}tail"))
-  assert.deepEqual(f.published(), ["x".repeat(63) + "\u{1F40E}"])
+  assert.deepEqual(f.published(), ["x".repeat(80)])
 })
 
 test("a refused name leaves /rename's own result untouched", async () => {

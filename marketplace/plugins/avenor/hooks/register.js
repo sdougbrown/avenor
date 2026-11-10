@@ -123,7 +123,9 @@ async function followRename(d, e, next) {
  * The title comes from the transcript's last custom-title record, which is
  * there as soon as /rename returns, including for a bare /rename whose
  * generated name appears nowhere else; the typed argument stands in when the
- * transcript cannot be read. A session with no title says nothing.
+ * transcript cannot be read. A session with no title says nothing. The
+ * broker owns the name rule, so a refused name is logged and the peer record
+ * keeps its previous name.
  */
 async function publishSessionTitle(d, typedName) {
   let name = await transcriptTitle(d)
@@ -134,7 +136,7 @@ async function publishSessionTitle(d, typedName) {
     return
   }
   try {
-    await brokerPost(d, "/session_name", { name: Array.from(name).slice(0, 64).join("") })
+    await brokerPost(d, "/session_name", { name: name })
   } catch (err) {
     await logLayer(d, "publishing the session name failed: " + errorText(err))
   }
