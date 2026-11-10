@@ -113,4 +113,7 @@ func TestLoadControllerDefinitionsDuplicateIDs(t *testing.T) {
 	if len(loaded.Failures) != 1 || !strings.Contains(loaded.Failures[0].Err.Error(), "dup") {
 		t.Fatalf("failures = %v, want one rejection naming dup", loaded.Failures)
 	}
+	if !errors.Is(loaded.Failures[0], ErrInvalidController) {
+		t.Fatalf("duplicate rejection err = %v, want ErrInvalidController", loaded.Failures[0].Err)
+	}
 }

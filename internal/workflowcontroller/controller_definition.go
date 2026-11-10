@@ -96,8 +96,8 @@ func LoadControllerDefinitions(dir string) (ControllerDefinitions, error) {
 		}
 		loaded.Failures = append(loaded.Failures, ControllerDefinitionFailure{
 			File: files[0],
-			Err: fmt.Errorf("controller id %q declared by %s; all rejected",
-				id, strings.Join(files, ", ")),
+			Err: fmt.Errorf("%w: controller id %q declared by %s; all rejected",
+				ErrInvalidController, id, strings.Join(files, ", ")),
 		})
 	}
 	return loaded, nil
