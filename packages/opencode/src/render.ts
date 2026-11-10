@@ -603,9 +603,13 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   lines.push(`In-flight: ${inflight}${maxInflight !== undefined ? ` of ${maxInflight}` : ''}`)
   const lastReconcile = selectedOptional(status, 'last_reconcile')
   if (lastReconcile) lines.push(`Last reconcile: ${lastReconcile}`)
+  const lastOutcome = selectedOptional(status, 'last_outcome')
+  if (lastOutcome) lines.push(`Last outcome: ${lastOutcome}`)
   if (blocked) lines.push(`Capacity blocked: ${selected(blocked, 'source')}${blockedDetail ? ` — ${blockedDetail}` : ''}`)
   const backoff = selectedOptional(status, 'dispatch_backoff_until')
   if (backoff) lines.push(`Dispatch backoff: ${backoff}`)
+  const retryBackoff = selectedOptional(status, 'retry_backoff_until')
+  if (retryBackoff) lines.push(`Retry backoff: ${retryBackoff}`)
   const nextPoll = selectedOptional(status, 'next_poll_at')
   if (nextPoll) lines.push(`Next external poll: ${nextPoll}`)
   lines.push(

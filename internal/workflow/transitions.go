@@ -736,9 +736,18 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event, polici
 	policy := retryPolicyFor(policies, next, act.NodeID)
 	if policy != nil && len(act.AttemptIDs) < policy.MaximumAttempts {
 		// Re-arm the same activation for a new attempt; the stale lease was
-		// already released above so the new attempt is freshly claimed.
+		// already released above so the new attempt is freshly claimed. A
+		// declared backoff stamps a not-before readiness time derived from
+		// the event's timestamp, so replay reproduces it without consulting
+		// the wall clock; dispatch skips activations whose readiness is in
+		// the future.
 		act.Status = ActivationReady
-		copyReadyAt(act, event)
+		if policy.BackoffSeconds > 0 {
+			notBefore := event.At.Add(time.Duration(policy.BackoffSeconds) * time.Second)
+			act.ReadyAt = &notBefore
+		} else {
+			copyReadyAt(act, event)
+		}
 		return nil
 	}
 	exhaustion := RetryExhaustionBlock

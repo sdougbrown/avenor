@@ -183,6 +183,10 @@ existing version, so a missed bump fails the setup script.
   sees a terminal status. `exhaustion: "block"` leaves the activation and the
   instance `blocked`, and the runner must handle that status. See
   [Heartbeat recovery and retry](https://avenor.douggo.com/workflow#heartbeat-recovery-and-retry).
+- `"backoff_seconds": 1200` waits 20 minutes between attempts: the re-armed
+  activation stays `ready` but is not dispatched until the readiness time
+  passes. Use it so both attempts of a small budget do not land inside one
+  transient backend outage.
 - Attempts that end `failed` (including `contract_unmet`), `timed_out`, or
   `panicked` re-arm while the budget lasts. A `canceled` attempt never
   re-arms: it uses one slot of the budget and blocks the activation until

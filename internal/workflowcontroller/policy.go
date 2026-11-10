@@ -57,15 +57,31 @@ type Decision struct {
 	EffectivePriority int
 }
 
+// heldByReadiness reports whether the candidate's readiness time is a
+// not-before time still in the future (a retry backoff). Select gates
+// dispatch on it; the runner derives its wake schedule and the
+// retry_backoff outcome label from the same predicate, so the two copies
+// cannot drift.
+func heldByReadiness(candidate Candidate, now time.Time) bool {
+	return candidate.ReadyAt.After(now)
+}
+
 // Select orders the candidates for one controller and returns those it may
-// dispatch, honoring effective-priority aging, deterministic tie breaking,
-// the controller's in-flight limit, derived concurrency-key occupancy, and
-// stale-candidate exclusion. The result depends only on the input slices'
-// contents, never their order.
+// dispatch, honoring readiness gating (a candidate whose readiness time is
+// in the future — a retry backoff — is not dispatchable yet),
+// effective-priority aging, deterministic tie breaking, the controller's
+// in-flight limit, derived concurrency-key occupancy, and stale-candidate
+// exclusion. The result depends only on the input slices' contents, never
+// their order.
 func Select(input SelectInput) []Decision {
 	eligible := make([]Candidate, 0, len(input.Candidates))
 	for _, candidate := range input.Candidates {
 		if candidate.ControllerID != input.ControllerID {
+			continue
+		}
+		if heldByReadiness(candidate, input.Now) {
+			// The readiness time is a not-before time (a retry backoff), so
+			// the candidate is held until it passes.
 			continue
 		}
 		eligible = append(eligible, candidate)
@@ -143,13 +159,11 @@ func Select(input SelectInput) []Decision {
 }
 
 // effectivePriority ages a candidate's priority by the whole minutes it has
-// been waiting past its ready time, capped at 100. A future ready time
-// counts as no wait.
+// been waiting past its ready time, capped at 100. Select only calls it on
+// gate-eligible candidates, whose ready time has passed, so the wait is
+// never negative.
 func effectivePriority(candidate Candidate, now time.Time) int {
 	wait := now.Sub(candidate.ReadyAt)
-	if wait < 0 {
-		wait = 0
-	}
 	priority := candidate.Priority + int(wait.Minutes())
 	if priority > 100 {
 		priority = 100

@@ -190,6 +190,12 @@ func ValidateTemplate(template Template) error {
 		if err := validateAssignmentPermissionPolicy(node.Assignment); err != nil {
 			return fmt.Errorf("invalid workflow template: node %q: %w", node.ID, err)
 		}
+		if err := validateRetryPolicy(node.RetryPolicy, fmt.Sprintf("node %q retry_policy", node.ID)); err != nil {
+			return err
+		}
+	}
+	if err := validateRetryPolicy(template.DefaultRetry, "default_retry_policy"); err != nil {
+		return err
 	}
 	if err := validateTemplateParams(template); err != nil {
 		return err
@@ -1196,6 +1202,25 @@ func compositionFields(limits *CompositionLimits) map[string]any {
 		return nil
 	}
 	return map[string]any{"max_depth": limits.MaximumDepth, "max_children": limits.MaximumChildren}
+}
+
+// maxRetryBackoffSeconds bounds the declared backoff so the duration
+// conversion in the reducer cannot overflow (int64 nanoseconds caps near
+// 292 years; a wrapped negative readiness time would silently disable the
+// backoff).
+const maxRetryBackoffSeconds = 365 * 24 * 60 * 60
+
+func validateRetryPolicy(policy *RetryPolicy, where string) error {
+	if policy == nil {
+		return nil
+	}
+	if policy.BackoffSeconds < 0 {
+		return fmt.Errorf("invalid workflow template: %s: backoff_seconds must not be negative", where)
+	}
+	if policy.BackoffSeconds > maxRetryBackoffSeconds {
+		return fmt.Errorf("invalid workflow template: %s: backoff_seconds must not exceed %d", where, maxRetryBackoffSeconds)
+	}
+	return nil
 }
 
 func leaseFields(policy *LeasePolicy) map[string]any {

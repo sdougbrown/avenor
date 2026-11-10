@@ -84,6 +84,9 @@ type RunnerStatus struct {
 	// DispatchBackoffUntil is the next retry time of the most recently
 	// failed dispatch; zero when no dispatch error has been seen.
 	DispatchBackoffUntil time.Time
+	// RetryBackoffUntil is the earliest time a candidate held by its retry
+	// backoff becomes dispatchable; zero when no candidate is held.
+	RetryBackoffUntil time.Time
 }
 
 // DefaultAntiEntropy is the cadence at which a leading runner refreshes the
@@ -296,6 +299,7 @@ func (r *Runner) clearLeadStatus() {
 		s.CapacityBlocked = ""
 		s.CapacityDetail = ""
 		s.DispatchBackoffUntil = time.Time{}
+		s.RetryBackoffUntil = time.Time{}
 	})
 }
 
@@ -384,6 +388,11 @@ type leaderState struct {
 	// dispatchFail holds the backoff state of candidates whose most recent
 	// dispatches failed, keyed by execution identity.
 	dispatchFail map[workflow.ExecutionIdentity]dispatchFailEntry
+	// readyHold is the earliest future readiness time among the current
+	// pass's candidates (a retry backoff), or the zero time when none is.
+	// It wakes the loop at the hold's expiry and reports the held state;
+	// each pass recomputes it from the live candidates.
+	readyHold time.Time
 	// outstanding is the number of workers that have not delivered a result
 	// yet.
 	outstanding int
@@ -442,6 +451,7 @@ func (s *leaderState) dropLeadership(r *Runner) {
 	s.leaseID = ""
 	s.blockedSource = ""
 	s.dispatchFail = map[workflow.ExecutionIdentity]dispatchFailEntry{}
+	s.readyHold = time.Time{}
 	r.clearLeadStatus()
 }
 
@@ -775,6 +785,14 @@ func (r *Runner) preparePass(s *leaderState, rec ControllerRecord, nextRenewDue 
 			wait = d
 		}
 	}
+	// A candidate held by its retry backoff wakes the loop at its readiness
+	// time for the same reason; the field is recomputed every dispatch pass
+	// from the live candidates, so a stale value only shortens one wait.
+	if dl := s.readyHold; !dl.IsZero() && dl.After(r.now()) {
+		if d := dl.Sub(r.now()); d < wait {
+			wait = d
+		}
+	}
 	// Poll scheduling shares the pass: due cursors are offered to bounded
 	// workers and the wait folds in the earliest scheduled next poll.
 	if r.poll != nil {
@@ -926,6 +944,29 @@ func (r *Runner) dispatchPass(s *leaderState, rec ControllerRecord, wait time.Du
 		candidates = filtered
 	}
 	view := r.buildInflightView(s, inflight)
+	// Track candidates held only by their future readiness time (a retry
+	// backoff): the earliest such time wakes the loop so the hold does not
+	// depend on the anti-entropy cadence, and an all-held pass reports a
+	// distinct outcome instead of idle.
+	readyHold := time.Time{}
+	futureHeld := 0
+	for _, c := range candidates {
+		if heldByReadiness(c, r.now()) {
+			futureHeld++
+			if readyHold.IsZero() || c.ReadyAt.Before(readyHold) {
+				readyHold = c.ReadyAt
+			}
+		}
+	}
+	s.readyHold = readyHold
+	// A future readiness time wakes this pass's final wait so the hold
+	// never depends on the anti-entropy cadence, including on the first
+	// pass that discovers it.
+	if !readyHold.IsZero() {
+		if d := readyHold.Sub(r.now()); d > 0 && d < wait {
+			wait = d
+		}
+	}
 	decisions := Select(SelectInput{
 		ControllerID: r.controllerID,
 		Candidates:   candidates,
@@ -937,13 +978,19 @@ func (r *Runner) dispatchPass(s *leaderState, rec ControllerRecord, wait time.Du
 	r.setStatus(func(s *RunnerStatus) {
 		s.LastReconcile = reconciledAt
 		s.Inflight = activeCount(view, r.controllerID)
+		// RetryBackoffUntil is recomputed every pass, so it never outlives
+		// the hold it names; zero clears a stale timestamp.
+		s.RetryBackoffUntil = readyHold
 		if len(decisions) == 0 && s.CapacityBlocked == "" {
 			// Claim the backoff label only when suppression is the whole
 			// reason: a non-suppressed candidate held out by in-flight
 			// key contention is not a backoff story.
-			if suppressed > 0 && len(candidates) == 0 {
+			switch {
+			case suppressed > 0 && len(candidates) == 0:
 				s.LastOutcome = "dispatch_backoff"
-			} else {
+			case futureHeld > 0 && futureHeld == len(candidates):
+				s.LastOutcome = "retry_backoff"
+			default:
 				s.LastOutcome = "idle"
 			}
 		}

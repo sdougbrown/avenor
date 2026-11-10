@@ -819,3 +819,189 @@ func TestBlockExhaustionDoesNotResurrectFailedInstance(t *testing.T) {
 		t.Fatalf("instance after later block exhaustion = %s, want failed (terminal not regressed)", snap.Instance.Status)
 	}
 }
+
+// TestRetryBackoffStampsNotBeforeReadiness proves a re-armed attempt under a
+// backoff policy keeps the activation ready while stamping a not-before
+// readiness time one backoff interval past the termination, so a retry
+// budget cannot be spent inside one transient outage. Exhaustion still
+// blocks once the budget is gone.
+func TestRetryBackoffStampsNotBeforeReadiness(t *testing.T) {
+	t.Parallel()
+	const templateID = "retry-backoff"
+	const backoffSeconds = 1200
+	templateJSON := []byte(fmt.Sprintf(`{
+  "schema_version": 1,
+  "template_id": %q,
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "run", "prompt": "do the thing"}, "retry_policy": {"max_attempts": 2, "exhaustion": "block", "backoff_seconds": %d}}],
+  "terminal_outcomes": ["done"]
+}`, templateID, backoffSeconds))
+	m, s, wf := newRetryFixture(t, templateJSON, templateID)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+
+	// First attempt fails: budget remains, so the activation re-arms with a
+	// not-before readiness time.
+	attemptID, leaseID := startRetryAttempt(t, m, wf, "start", act.ID)
+	mustTerminateAs(t, m, wf, "start", act.ID, attemptID, leaseID, AttemptFailed)
+
+	var terminatedAt time.Time
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventAttemptTerminated && e.Identity.NodeID == NodeID("start") {
+			terminatedAt = e.At
+		}
+	}
+	if terminatedAt.IsZero() {
+		t.Fatalf("no attempt_terminated event found for start")
+	}
+
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after retry: %v", err)
+	}
+	rearmed := activationByNode(&snap.Instance, "start")
+	if rearmed.Status != ActivationReady {
+		t.Fatalf("re-armed activation status = %s, want ready", rearmed.Status)
+	}
+	wantNotBefore := terminatedAt.Add(backoffSeconds * time.Second)
+	if rearmed.ReadyAt == nil || !rearmed.ReadyAt.Equal(wantNotBefore) {
+		t.Fatalf("re-armed activation ready_at = %v, want %v", rearmed.ReadyAt, wantNotBefore)
+	}
+
+	// The second attempt exhausts the budget and blocks regardless of the
+	// backoff still pending on the readiness time.
+	attemptID, leaseID = startRetryAttempt(t, m, wf, "start", rearmed.ID)
+	mustTerminateAs(t, m, wf, "start", rearmed.ID, attemptID, leaseID, AttemptTimedOut)
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent after exhaustion: %v", err)
+	}
+	exhausted := activationByNode(&snap.Instance, "start")
+	if exhausted.Status != ActivationBlocked {
+		t.Fatalf("exhausted activation status = %s, want blocked", exhausted.Status)
+	}
+	if snap.Instance.Status != WorkflowBlocked {
+		t.Fatalf("instance after exhaustion = %s, want blocked", snap.Instance.Status)
+	}
+}
+
+// TestRetryBackoffRestampsEachRearm proves the backoff derives from the most
+// recent termination, not the first: with budget for three attempts, the
+// second re-arm stamps a fresh not-before readiness time from the second
+// termination instead of reusing the stale one.
+func TestRetryBackoffRestampsEachRearm(t *testing.T) {
+	t.Parallel()
+	const templateID = "retry-backoff-refresh"
+	const backoffSeconds = 60
+	templateJSON := []byte(fmt.Sprintf(`{
+  "schema_version": 1,
+  "template_id": %q,
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "run", "prompt": "do the thing"}, "retry_policy": {"max_attempts": 3, "exhaustion": "block", "backoff_seconds": %d}}],
+  "terminal_outcomes": ["done"]
+}`, templateID, backoffSeconds))
+	m, s, wf := newRetryFixture(t, templateJSON, templateID)
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+	terminations := make(map[string]time.Time)
+	for round := 1; round <= 2; round++ {
+		attemptID, leaseID := startRetryAttempt(t, m, wf, "start", act.ID)
+		before := len(terminations)
+		mustTerminateAs(t, m, wf, "start", act.ID, attemptID, leaseID, AttemptFailed)
+		for _, e := range readEvents(t, s, wf) {
+			if e.Kind == EventAttemptTerminated && e.Identity.NodeID == NodeID("start") {
+				terminations[string(e.ID)] = e.At
+			}
+		}
+		if len(terminations) == before {
+			t.Fatalf("termination %d recorded no event", round)
+		}
+		snap, _, err = s.loadCurrent(wf)
+		if err != nil {
+			t.Fatalf("loadCurrent round %d: %v", round, err)
+		}
+		act = activationByNode(&snap.Instance, "start")
+		if act.Status != ActivationReady {
+			t.Fatalf("round %d activation status = %s, want ready", round, act.Status)
+		}
+		var last time.Time
+		for _, at := range terminations {
+			if at.After(last) {
+				last = at
+			}
+		}
+		want := last.Add(backoffSeconds * time.Second)
+		if act.ReadyAt == nil || !act.ReadyAt.Equal(want) {
+			t.Fatalf("round %d ready_at = %v, want %v (last termination + backoff)", round, act.ReadyAt, want)
+		}
+	}
+}
+
+// TestRetryBackoffCarriesNotBeforeToCandidates proves the re-armed
+// activation's backoff-stamped readiness time reaches the dispatch candidate
+// query: after a failed attempt with budget left, the controller's candidate
+// reports ReadyAt one backoff interval past the termination — the pass-through
+// that connects the reducer's stamp to the dispatch selection gate.
+func TestRetryBackoffCarriesNotBeforeToCandidates(t *testing.T) {
+	t.Parallel()
+	const templateID = "retry-backoff-candidates"
+	const backoffSeconds = 900
+	templateJSON := []byte(fmt.Sprintf(`{
+  "schema_version": 1,
+  "template_id": %q,
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "run", "prompt": "do the thing"}, "dispatch": {"mode": "auto", "controller_id": "ctrl"}, "retry_policy": {"max_attempts": 2, "exhaustion": "block", "backoff_seconds": %d}}],
+  "terminal_outcomes": ["done"]
+}`, templateID, backoffSeconds))
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	if _, err := m.WorkflowCreate(templateJSON); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	wf := mustInstantiateTemplate(t, m, templateID, "1")
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+	attemptID, leaseID := startRetryAttempt(t, m, wf, "start", act.ID)
+	mustTerminateAs(t, m, wf, "start", act.ID, attemptID, leaseID, AttemptFailed)
+
+	var terminatedAt time.Time
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventAttemptTerminated && e.Identity.NodeID == NodeID("start") {
+			terminatedAt = e.At
+		}
+	}
+	if terminatedAt.IsZero() {
+		t.Fatalf("no attempt_terminated event found for start")
+	}
+
+	cands, err := m.CandidatesForController("ctrl", 5)
+	if err != nil {
+		t.Fatalf("CandidatesForController: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("candidates = %d, want the re-armed activation", len(cands))
+	}
+	wantReady := terminatedAt.Add(backoffSeconds * time.Second)
+	if !cands[0].ReadyAt.Equal(wantReady) {
+		t.Fatalf("candidate ready_at = %v, want %v", cands[0].ReadyAt, wantReady)
+	}
+}
