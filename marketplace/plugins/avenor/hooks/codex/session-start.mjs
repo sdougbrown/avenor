@@ -4,6 +4,7 @@
 // registered twice; a fork arrives with a new id and mints its own peer.
 
 import {
+  defaultSessionLabel,
   identityPlan,
   logLine,
   postAuthed,
@@ -67,6 +68,12 @@ async function registerAndWrite() {
   if (existing !== null) plan.runID = "";
 
   const registered = await registerOrAttach(plan);
+  // A self-registered run nobody named takes a label from the work it is in.
+  if (plan.kind === "register" && registered.label === "") {
+    const cwd = typeof input.cwd === "string" && input.cwd !== "" ? input.cwd : process.cwd();
+    registered.label = await defaultSessionLabel(cwd, registered);
+    if (registered.label === "") logLine(sessionID, "no default label derived; keeping " + registered.run_id);
+  }
   const record = {
     version: RECORD_VERSION,
     session_id: sessionID,

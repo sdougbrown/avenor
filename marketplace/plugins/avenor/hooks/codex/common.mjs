@@ -9,6 +9,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 
+import { defaultHostLabel, pickLabel } from "../label.js";
+
 export const RECORD_VERSION = 1;
 export const QUEUE_TIMEOUT_MS = 20000;
 
@@ -145,8 +147,67 @@ export async function postAuthed(url, route, record, body, timeoutMs) {
   return postJSON(url, route, { ...body, run_id: record.run_id, token: record.run_token }, timeoutMs);
 }
 
-
 export class BrokerRefusal extends Error {}
+
+/**
+ * The label a self-registered session takes when nobody named it:
+ * "codex-<repo>[@branch]" from the hook's directory, suffixed -2 … -9 when a
+ * listed peer holds it. Empty means nothing usable derives and the run keeps
+ * its minted id.
+ */
+export async function defaultSessionLabel(dir, record, git = gitAnswer, fetchGet = getAuthed) {
+  try {
+    const toplevel = await git(dir, ["rev-parse", "--show-toplevel"]);
+    const branch = toplevel === "" ? "" : await git(dir, ["branch", "--show-current"]);
+    const base = defaultHostLabel("codex", dir, toplevel, branch);
+    return base === "" ? "" : pickLabel(base, await takenLabels(record, fetchGet));
+  } catch {
+    return "";
+  }
+}
+
+function gitAnswer(dir, args) {
+  return new Promise((resolve) => {
+    execFile("git", ["-C", dir, ...args], { timeout: 5000 }, (error, stdout) => {
+      resolve(error === null ? stdout.trim() : "");
+    });
+  });
+}
+
+/** The labels the broker lists to this run, or null when the listing is unreadable or partial. */
+async function takenLabels(record, fetchGet) {
+  try {
+    const answer = await fetchGet(record.broker_url, "/sessions", record);
+    const body = answer.body;
+    if (!answer.ok || body === null || typeof body !== "object" || typeof body.peers_error === "string" || !Array.isArray(body.sessions)) {
+      return null;
+    }
+    return new Set(body.sessions.map((row) => row && row.label).filter((label) => typeof label === "string"));
+  } catch {
+    return null;
+  }
+}
+
+export async function getAuthed(url, route, record, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url.replace(/\/+$/, "") + route, {
+      headers: { "X-Avenor-Run-Id": record.run_id, "X-Avenor-Run-Token": record.run_token },
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let body = null;
+    try {
+      body = text === "" ? null : JSON.parse(text);
+    } catch {
+      body = null;
+    }
+    return { status: response.status, ok: response.ok, body };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Trade the environment's identity at the broker. Provisioned sessions attach

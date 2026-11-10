@@ -13,6 +13,11 @@ are bound to that run, and inbound peer messages are queued into the thread with
 but the host contract differs: Codex hooks are separate processes, so identity
 lives in a mode-0600 record under `$AVENOR_HOME/peers/codex/<session id>/`, and
 the MCP server reads that record from the property the `PreToolUse` hook adds.
+A self-registered session with no `AVENOR_LABEL` or `AVENOR_SESSION_NAME` takes
+the default label `codex-<repo>[@branch]` from its working directory (the branch
+is left off `main` and `master`, the directory name stands in outside a
+repository, and a taken label gets `-2` to `-9`), so peers can tell sessions
+apart.
 See [codex-peers.md](../../../skills/verify-avenor/features/codex-peers.md) for
 the drive and its limits; spawned Codex children are deferred to step 5 of the
 issue.
