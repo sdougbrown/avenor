@@ -944,3 +944,64 @@ func TestRetryBackoffRestampsEachRearm(t *testing.T) {
 		}
 	}
 }
+
+// TestRetryBackoffCarriesNotBeforeToCandidates proves the re-armed
+// activation's backoff-stamped readiness time reaches the dispatch candidate
+// query: after a failed attempt with budget left, the controller's candidate
+// reports ReadyAt one backoff interval past the termination — the pass-through
+// that connects the reducer's stamp to the dispatch selection gate.
+func TestRetryBackoffCarriesNotBeforeToCandidates(t *testing.T) {
+	t.Parallel()
+	const templateID = "retry-backoff-candidates"
+	const backoffSeconds = 900
+	templateJSON := []byte(fmt.Sprintf(`{
+  "schema_version": 1,
+  "template_id": %q,
+  "template_version": "1",
+  "entry_nodes": ["start"],
+  "nodes": [{"id": "start", "action": {"type": "run", "prompt": "do the thing"}, "dispatch": {"mode": "auto", "controller_id": "ctrl"}, "retry_policy": {"max_attempts": 2, "exhaustion": "block", "backoff_seconds": %d}}],
+  "terminal_outcomes": ["done"]
+}`, templateID, backoffSeconds))
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	if _, err := m.WorkflowCreate(templateJSON); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	wf := mustInstantiateTemplate(t, m, templateID, "1")
+	if err := m.RebuildCandidateIndex("test"); err != nil {
+		t.Fatalf("RebuildCandidateIndex: %v", err)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+	attemptID, leaseID := startRetryAttempt(t, m, wf, "start", act.ID)
+	mustTerminateAs(t, m, wf, "start", act.ID, attemptID, leaseID, AttemptFailed)
+
+	var terminatedAt time.Time
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventAttemptTerminated && e.Identity.NodeID == NodeID("start") {
+			terminatedAt = e.At
+		}
+	}
+	if terminatedAt.IsZero() {
+		t.Fatalf("no attempt_terminated event found for start")
+	}
+
+	cands, err := m.CandidatesForController("ctrl", 5)
+	if err != nil {
+		t.Fatalf("CandidatesForController: %v", err)
+	}
+	if len(cands) != 1 {
+		t.Fatalf("candidates = %d, want the re-armed activation", len(cands))
+	}
+	wantReady := terminatedAt.Add(backoffSeconds * time.Second)
+	if !cands[0].ReadyAt.Equal(wantReady) {
+		t.Fatalf("candidate ready_at = %v, want %v", cands[0].ReadyAt, wantReady)
+	}
+}

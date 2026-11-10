@@ -150,13 +150,11 @@ func Select(input SelectInput) []Decision {
 }
 
 // effectivePriority ages a candidate's priority by the whole minutes it has
-// been waiting past its ready time, capped at 100. A future ready time
-// counts as no wait.
+// been waiting past its ready time, capped at 100. Select only calls it on
+// gate-eligible candidates, whose ready time has passed, so the wait is
+// never negative.
 func effectivePriority(candidate Candidate, now time.Time) int {
 	wait := now.Sub(candidate.ReadyAt)
-	if wait < 0 {
-		wait = 0
-	}
 	priority := candidate.Priority + int(wait.Minutes())
 	if priority > 100 {
 		priority = 100

@@ -536,7 +536,8 @@ func TestSelectRevisionPassedThrough(t *testing.T) {
 // TestSelectHoldsFutureReadyCandidates proves a candidate whose readiness
 // time is in the future — a re-armed retry backoff — is not dispatchable
 // until the readiness time passes, while an already-ready candidate is
-// unaffected.
+// unaffected. The boundary is exact: a candidate whose readiness time equals
+// Now is dispatchable.
 func TestSelectHoldsFutureReadyCandidates(t *testing.T) {
 	t.Parallel()
 	input := SelectInput{
@@ -554,5 +555,16 @@ func TestSelectHoldsFutureReadyCandidates(t *testing.T) {
 	input.Now = now.Add(21 * time.Minute)
 	if got := ids(Select(input)); got != "wf2/n2/a2,wf1/n1/a1" {
 		t.Fatalf("Select() after the readiness time passed = %s, want both candidates", got)
+	}
+
+	// A candidate whose readiness time has just arrived is dispatchable.
+	boundary := SelectInput{
+		ControllerID: "ctrl",
+		Now:          now,
+		MaxInflight:  10,
+		Candidates:   []Candidate{cand("wf3", "n3", "a3", withReadyAt(now))},
+	}
+	if got := ids(Select(boundary)); got != "wf3/n3/a3" {
+		t.Fatalf("Select() with ReadyAt == Now = %s, want the candidate selected", got)
 	}
 }

@@ -1440,3 +1440,36 @@ func TestRunnerInFlightErrorKeepsRunningAndRecovers(t *testing.T) {
 		t.Fatal("runner not leading after recovery")
 	}
 }
+
+// TestRunnerRetryBackoffHoldWakesAndLabels proves a candidate held by its
+// future readiness time (a retry backoff) is never dispatched early, the
+// loop wakes at the readiness time instead of the anti-entropy cadence, and
+// a fully-held pass reports "retry_backoff" rather than "idle".
+func TestRunnerRetryBackoffHoldWakesAndLabels(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	readyAt := time.Now().Add(300 * time.Millisecond)
+	held := runnerCand("wf1", "start", "a1")
+	held.ReadyAt = readyAt
+	deps.setCandidates([]Candidate{held})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+
+	changeCh := make(chan struct{}, 1)
+	r := startRunner(t, store, deps, 10*time.Second, 10*time.Second, 10*time.Millisecond, changeCh, nil)
+
+	// The held pass reports the retry backoff and dispatches nothing.
+	waitUntil(t, "retry_backoff labeled", func() bool { return r.Status().LastOutcome == "retry_backoff" })
+	if n := deps.dispatchCount(); n != 0 {
+		t.Fatalf("dispatch count while held = %d, want 0", n)
+	}
+
+	// The loop wakes at the readiness time, not the 10s anti-entropy
+	// cadence, and dispatches then.
+	start := time.Now()
+	waitUntil(t, "dispatch after readiness time", func() bool { return deps.dispatchCount() >= 1 })
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("dispatch waited %s — the wake depended on the anti-entropy cadence", elapsed)
+	}
+	waitUntil(t, "dispatched outcome", func() bool { return r.Status().LastOutcome == "dispatched" })
+}
