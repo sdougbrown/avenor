@@ -6246,7 +6246,7 @@ func (s *Supervisor) reconcileWorkflowControllers(store *workflowcontroller.Cont
 		}
 		if def.DesiredState != "" && rec.DesiredState != def.DesiredState {
 			if _, err := store.SetDesiredState(def.ControllerID, def.DesiredState, fmt.Sprintf("controller definition %s", def.File)); err != nil {
-				log.Printf("workflow: controller definition %s not applied: %v", def.File, err)
+				log.Printf("workflow: controller definition %s partially applied (max_inflight reconciled, desired_state failed): %v", def.File, err)
 				continue
 			}
 			log.Printf("workflow: controller %s desired_state reconciled from definition %s to %s", def.ControllerID, def.File, def.DesiredState)
