@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -116,7 +117,10 @@ func loadControllerDefinition(path string) (ControllerDefinition, error) {
 	if err := dec.Decode(&def); err != nil {
 		return def, fmt.Errorf("parse: %w", err)
 	}
-	if dec.More() {
+	// More() reports false for a trailing } or ], so a second decode is the
+	// deterministic trailing-data check: only EOF may follow the object.
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
 		return def, fmt.Errorf("trailing data after JSON object")
 	}
 	def.File = filepath.Base(path)
