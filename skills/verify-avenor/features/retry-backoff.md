@@ -132,7 +132,9 @@ rm -rf "$SCRATCH"   # never delete "$EV"
   failure finalizes as `canceled`, which never retries.
 - The activation's `ready_at` is a **not-before** time, not an age stamp:
   `workflow ready` (advisory candidate query) lists it even while held; the
-  dispatch selection policy, not the candidate query, is what gates it.
+  dispatch selection policy, not the candidate query, is what gates it. A
+  manual claim overrides the gate by design; the declared cap is one year
+  (larger values are rejected by template validation and the profile schema).
 - `backoff_seconds` is optional and defaults to zero (immediate re-arm);
   negative values are rejected by template validation, not clamped.
 - Cleanup is `control shutdown graceful` + the recorded `STABLE_PID` only —

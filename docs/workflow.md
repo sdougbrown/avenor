@@ -761,7 +761,9 @@ occupies one retry-budget slot, and `workflow.unblock` re-arms it.
 `ready` but is not dispatchable until its not-before readiness time passes
 (one backoff interval after the failed attempt), so a retry budget cannot be
 spent inside one transient outage. The readiness time is persisted with the
-activation and survives a supervisor restart.
+activation and survives a supervisor restart. The gate applies to automatic
+dispatch; a manual claim overrides it, so an operator can run the node before
+the readiness time passes. Values above one year are rejected.
 
 A retry retains the activation and loop iteration, consumes only the retry
 budget, and cannot follow a semantic branch or checkpoint. Exhaustion applies
