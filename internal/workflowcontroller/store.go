@@ -297,6 +297,35 @@ func (s *ControllerStore) SetDesiredState(controllerID string, desired DesiredSt
 	return rec, nil
 }
 
+// SetMaxInflight updates a controller's in-flight limit. Updating the current
+// value is a no-op returning the existing record.
+func (s *ControllerStore) SetMaxInflight(controllerID string, maxInflight int) (ControllerRecord, error) {
+	if err := validateControllerID(controllerID); err != nil {
+		return ControllerRecord{}, err
+	}
+	if maxInflight <= 0 {
+		return ControllerRecord{}, fmt.Errorf("%w: max_inflight must be positive, got %d", ErrInvalidController, maxInflight)
+	}
+	unlock, err := s.lockController(controllerID)
+	if err != nil {
+		return ControllerRecord{}, err
+	}
+	defer unlock()
+	rec, err := s.loadForCommand(controllerID)
+	if err != nil {
+		return ControllerRecord{}, err
+	}
+	if rec.MaxInflight == maxInflight {
+		return rec, nil
+	}
+	seq := rec.Revision + 1
+	event := ControllerEvent{Kind: EventMaxInflightChanged, Seq: seq, Time: s.now().UTC(), MaxInflight: maxInflight}
+	if err := s.commitLocked(controllerID, &rec, []ControllerEvent{event}); err != nil {
+		return ControllerRecord{}, err
+	}
+	return rec, nil
+}
+
 // AcquireLease grants leadership to ownerID when the controller is enabled and
 // its current lease (if any) has expired. It reports whether the lease was
 // granted; requesting leadership while disabled fails with ErrDisabled.

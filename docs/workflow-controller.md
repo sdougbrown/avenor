@@ -29,12 +29,22 @@ cp templates/software-factory/adapters/*.json ~/.avenor/adapters/
 $EDITOR ~/.avenor/adapters/*.json
 
 avenor stable --workflow-root /path/to/workflows \
-  --workflow-adapter-dir ~/.avenor/adapters
+  --workflow-adapter-dir ~/.avenor/adapters \
+  --workflow-controller-dir ~/.avenor/controllers
 ```
 
 The registry load applies trust checks (ownership, modes, strict manifest
 shape) at startup and before every adapter execution. A failed load disables
 controller activity for that process; workflow RPCs keep serving.
+
+A controller can also be declared ahead of time instead of created through
+the socket: with `--workflow-controller-dir` pointing at a directory of
+controller definition files (`{"controller_id": ..., "max_inflight": ...}`,
+an optional `desired_state`), the startup barrier reconciles each definition
+into the store — creating, updating (`max_inflight_changed`), and enabling or
+disabling as the files declare. Editing the file and restarting the
+supervisor is the apply path; removing a file leaves the controller alone.
+See [docs/stable.md](stable.md) for the reconciliation rules.
 
 ## 2. Register the templates and instantiate issues ad hoc
 

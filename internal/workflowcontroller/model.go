@@ -25,20 +25,23 @@ const (
 // its 1-based position in the per-controller log; the snapshot's Revision is
 // the last applied seq.
 const (
-	EventCreated         = "created"
-	EventEnabled         = "enabled"
-	EventDisabled        = "disabled"
-	EventLeaderAcquired  = "leader_acquired"
-	EventLeaderRenewed   = "leader_renewed"
-	EventLeaderReleased  = "leader_released"
-	EventLeaderExpired   = "leader_expired"
-	EventCapacityBlocked = "capacity_blocked"
-	EventCapacityCleared = "capacity_cleared"
-	EventPollCommitted   = "poll_committed"
-	EventPollScheduled   = "poll_scheduled"
-	EventPollCleared     = "poll_cleared"
-	EventDiagRecorded    = "diagnostic_recorded"
-	EventDiagCleared     = "diagnostic_cleared"
+	EventCreated  = "created"
+	EventEnabled  = "enabled"
+	EventDisabled = "disabled"
+	// EventMaxInflightChanged records a controller definition reconciliation
+	// applying a new max_inflight to an existing controller.
+	EventMaxInflightChanged = "max_inflight_changed"
+	EventLeaderAcquired     = "leader_acquired"
+	EventLeaderRenewed      = "leader_renewed"
+	EventLeaderReleased     = "leader_released"
+	EventLeaderExpired      = "leader_expired"
+	EventCapacityBlocked    = "capacity_blocked"
+	EventCapacityCleared    = "capacity_cleared"
+	EventPollCommitted      = "poll_committed"
+	EventPollScheduled      = "poll_scheduled"
+	EventPollCleared        = "poll_cleared"
+	EventDiagRecorded       = "diagnostic_recorded"
+	EventDiagCleared        = "diagnostic_cleared"
 )
 
 // Sentinel errors returned by the controller store.
@@ -231,6 +234,8 @@ func applyEvent(rec *ControllerRecord, e ControllerEvent) error {
 		rec.DesiredState = DesiredDisabled
 		rec.DisabledReason = e.Reason
 		rec.CapacityBlocked = ""
+	case EventMaxInflightChanged:
+		rec.MaxInflight = e.MaxInflight
 	case EventLeaderAcquired:
 		rec.OwnerEpoch = e.OwnerEpoch
 		rec.Leader = &LeaderLease{
