@@ -938,7 +938,10 @@ type Activation struct {
 	// ReadyAt is the timestamp of the most recent transition into a claimable
 	// state, copied from the event's explicit timestamp during replay. A nil
 	// ReadyAt (legacy activations) falls back to CreatedAt for advisory
-	// display only and is never auto-selectable.
+	// display only and is never auto-selectable. After a retry backoff re-arm
+	// the field is instead a not-before gate: dispatch skips the activation
+	// until that time passes (the kernel's claim path ignores it; the
+	// dispatch selection enforces it).
 	// CausedBy carries the causal provenance of a transition-created
 	// activation: the ID(s) of the activation(s) whose resolution caused this
 	// visit. Bound gate references resolve only along this chain, never from

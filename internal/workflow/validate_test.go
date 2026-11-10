@@ -846,3 +846,34 @@ func TestValidateTemplateRejectsOversizedBackoff(t *testing.T) {
 		t.Fatalf("ValidateTemplate() error = %v, want oversized backoff_seconds rejection", err)
 	}
 }
+
+// TestMaxRetryBackoffSecondsMatchesSchema pins the typed layer's backoff cap
+// to the profile schema's declared maximum: both bounds gate the same
+// document in the same pipeline, so raising one without the other would
+// accept a template at one layer and reject it at the other.
+func TestMaxRetryBackoffSecondsMatchesSchema(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("../../schemas/workflow.profile.json")
+	if err != nil {
+		t.Fatalf("read schema: %v", err)
+	}
+	var schema struct {
+		ValueSchema struct {
+			Defs map[string]struct {
+				Properties map[string]struct {
+					Maximum *float64 `json:"maximum"`
+				} `json:"properties"`
+			} `json:"$defs"`
+		} `json:"valueSchema"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	maximum := schema.ValueSchema.Defs["retry_policy"].Properties["backoff_seconds"].Maximum
+	if maximum == nil {
+		t.Fatalf("schema declares no maximum for backoff_seconds")
+	}
+	if int64(*maximum) != maxRetryBackoffSeconds {
+		t.Fatalf("schema maximum = %d, typed cap = %d — raise both together", int64(*maximum), maxRetryBackoffSeconds)
+	}
+}
