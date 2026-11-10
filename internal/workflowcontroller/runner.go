@@ -299,6 +299,7 @@ func (r *Runner) clearLeadStatus() {
 		s.CapacityBlocked = ""
 		s.CapacityDetail = ""
 		s.DispatchBackoffUntil = time.Time{}
+		s.RetryBackoffUntil = time.Time{}
 	})
 }
 

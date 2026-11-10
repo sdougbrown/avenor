@@ -38,3 +38,40 @@ func TestControllerStatusMapDispatchBackoffUntil(t *testing.T) {
 		}
 	})
 }
+
+// TestControllerStatusMapRetryBackoffStatus asserts the status RPC
+// visibility contract for the runner's retry backoff hold and outcome
+// label, mirroring the dispatch-backoff assertions: a held readiness time
+// and the outcome label surface to the operator, and a cleared hold or an
+// empty outcome report nil.
+func TestControllerStatusMapRetryBackoffStatus(t *testing.T) {
+	rec := workflowcontroller.ControllerRecord{ControllerID: "c1"}
+	next := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+
+	t.Run("surfaces a held retry backoff and outcome", func(t *testing.T) {
+		runner := &workflowcontroller.RunnerStatus{RetryBackoffUntil: next, LastOutcome: "retry_backoff"}
+		got := controllerStatusMap(rec, "self", runner, nil)
+		if v, ok := got["retry_backoff_until"].(time.Time); !ok || !v.Equal(next) {
+			t.Fatalf("retry_backoff_until = %#v, want %v", got["retry_backoff_until"], next)
+		}
+		if v, ok := got["last_outcome"].(string); !ok || v != "retry_backoff" {
+			t.Fatalf("last_outcome = %#v, want retry_backoff", got["last_outcome"])
+		}
+	})
+
+	t.Run("nil when no hold and no outcome", func(t *testing.T) {
+		runner := &workflowcontroller.RunnerStatus{}
+		got := controllerStatusMap(rec, "self", runner, nil)
+		// Key presence is part of the RPC shape (see the dispatch-backoff
+		// test): the assertion pins the key existing with a nil value.
+		for _, key := range []string{"retry_backoff_until", "last_outcome"} {
+			v, ok := got[key]
+			if !ok {
+				t.Fatalf("%s key missing from the status map; want present with a nil value", key)
+			}
+			if v != nil {
+				t.Fatalf("%s = %#v, want nil", key, v)
+			}
+		}
+	})
+}

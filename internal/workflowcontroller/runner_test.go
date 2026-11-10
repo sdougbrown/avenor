@@ -1484,3 +1484,35 @@ func TestRunnerRetryBackoffHoldWakesAndLabels(t *testing.T) {
 	}
 	waitUntil(t, "dispatched outcome", func() bool { return r.Status().LastOutcome == "dispatched" })
 }
+
+// TestRunnerRetryBackoffMixedPassStaysIdle proves the retry_backoff label is
+// claimed only when the readiness hold is the whole reason a pass dispatched
+// nothing: with one candidate held by its readiness time and one kept out by
+// an in-flight key, the pass reports "idle", not "retry_backoff".
+func TestRunnerRetryBackoffMixedPassStaysIdle(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 4)
+	deps := newFakeDeps(store, "c1")
+	held := runnerCand("wf1", "n1", "a1")
+	held.ReadyAt = time.Now().Add(30 * time.Second)
+	keyed := runnerCandWithKey("wf2", "n2", "a2", "k")
+	deps.setCandidates([]Candidate{held, keyed})
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	// A live attempt holds the keyed candidate's concurrency key, so the
+	// pass dispatches nothing while the readiness hold keeps wf1 parked.
+	deps.setInFlight([]InFlightAttempt{
+		inf("wf3", "n3", "a3", withInfController("c1"), withInfKey("k")),
+	})
+
+	changeCh := make(chan struct{}, 1)
+	r := startRunner(t, store, deps, 10*time.Second, 10*time.Second, 10*time.Millisecond, changeCh, nil)
+	waitUntil(t, "idle labeled for the mixed pass", func() bool { return r.Status().LastOutcome == "idle" })
+	if s := r.Status(); s.LastOutcome != "idle" {
+		t.Fatalf("LastOutcome = %q, want idle for a mixed held pass", s.LastOutcome)
+	}
+	// The retry-backoff hold is still surfaced: wf1's readiness time is
+	// real even though the label defers to the mixed pass.
+	if s := r.Status(); s.RetryBackoffUntil.IsZero() {
+		t.Fatal("RetryBackoffUntil zero during a mixed pass with a held candidate")
+	}
+}
