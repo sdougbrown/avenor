@@ -65,6 +65,7 @@ func TestLoadControllerDefinitionsValidation(t *testing.T) {
 	writeDefinition(t, dir, "bad-state.json", `{"controller_id": "x", "max_inflight": 1, "desired_state": "paused"}`)
 	writeDefinition(t, dir, "unknown-field.json", `{"controller_id": "x", "max_inflight": 1, "extra": true}`)
 	writeDefinition(t, dir, "not-json.json", `nope`)
+	writeDefinition(t, dir, "trailing.json", `{"controller_id": "x", "max_inflight": 1} trailing junk`)
 
 	loaded, err := LoadControllerDefinitions(dir)
 	if err != nil {
@@ -73,12 +74,12 @@ func TestLoadControllerDefinitionsValidation(t *testing.T) {
 	if len(loaded.Definitions) != 0 {
 		t.Fatalf("definitions = %+v, want none", loaded.Definitions)
 	}
-	if len(loaded.Failures) != 4 {
-		t.Fatalf("failures = %d, want 4: %v", len(loaded.Failures), loaded.Failures)
+	if len(loaded.Failures) != 5 {
+		t.Fatalf("failures = %d, want 5: %v", len(loaded.Failures), loaded.Failures)
 	}
 	for _, failure := range loaded.Failures {
 		if !errors.Is(failure, ErrInvalidController) && !strings.Contains(failure.Err.Error(), "parse") &&
-			!strings.Contains(failure.Err.Error(), "unknown field") {
+			!strings.Contains(failure.Err.Error(), "unknown field") && !strings.Contains(failure.Err.Error(), "trailing data") {
 			t.Fatalf("unexpected failure %v", failure)
 		}
 	}
