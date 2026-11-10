@@ -451,7 +451,8 @@ At startup the supervisor reconciles each definition into its controller store: 
 - `last_reconcile` — the latest reconcile pass of the leading runner.
 - `capacity_blocked` — present when dispatch is suppressed by admission capacity (`local` runtime slots or `tree` budget), with a detail string.
 - `dispatch_backoff_until` — the next retry time of the most recently failed dispatch, present while that candidate is held in backoff; null otherwise.
-- `last_reconcile` outcome labels include `retry_backoff`: every ready candidate is held by its future readiness time (a retry backoff), so the pass dispatched nothing but work is pending, not absent. The leading runner wakes at the earliest readiness time rather than the anti-entropy cadence.
+- `retry_backoff_until` — the earliest readiness time at which a candidate held by its retry backoff becomes dispatchable; null when no candidate is held. While it is set, `last_outcome` reports `retry_backoff`: the pass dispatched nothing but work is pending, not absent, and the leading runner wakes at that time rather than on the anti-entropy cadence.
+- `last_outcome` — the leading runner's latest reconcile-pass outcome: `dispatched`, `idle`, `dispatch_backoff` (every ready candidate held in dispatch-failure backoff), `retry_backoff`, or an error label such as `dispatch_error`.
 - `next_poll_at` — the next scheduled external-gate poll time.
 
 The host tools render these fields in a compact controller view (Pi render hooks and OpenCode prose) that appears only when controllers exist on the supervisor; with no controller support the tools report `method not found` and nothing else changes.

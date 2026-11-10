@@ -405,6 +405,8 @@ describe('OpenCode Avenor result renderers', () => {
       candidate_count: 5,
       capacity_blocked: { source: 'local', detail: 'no runtime slots' },
       dispatch_backoff_until: '2026-01-01T00:00:07Z',
+      retry_backoff_until: '2026-01-01T00:00:12Z',
+      last_outcome: 'retry_backoff',
       next_poll_at: '2026-01-01T00:00:09Z',
     }
     const statusOutput = formatWorkflowControllerStatusOutput({ controller_id: 'call-ctl' }, status)
@@ -416,8 +418,10 @@ describe('OpenCode Avenor result renderers', () => {
         'Candidates: 5 (advisory)',
         'In-flight: 2 of 3',
         'Last reconcile: 2026-01-01T00:00:01Z',
+        'Last outcome: retry_backoff',
         'Capacity blocked: local — no runtime slots',
         'Dispatch backoff: 2026-01-01T00:00:07Z',
+        'Retry backoff: 2026-01-01T00:00:12Z',
         'Next external poll: 2026-01-01T00:00:09Z',
         'Guidance: Call avenor_workflow with action "controller_status" and no controller_id to review all controllers.',
       ].join('\n'),

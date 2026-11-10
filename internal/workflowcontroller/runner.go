@@ -84,6 +84,9 @@ type RunnerStatus struct {
 	// DispatchBackoffUntil is the next retry time of the most recently
 	// failed dispatch; zero when no dispatch error has been seen.
 	DispatchBackoffUntil time.Time
+	// RetryBackoffUntil is the earliest time a candidate held by its retry
+	// backoff becomes dispatchable; zero when no candidate is held.
+	RetryBackoffUntil time.Time
 }
 
 // DefaultAntiEntropy is the cadence at which a leading runner refreshes the
@@ -974,6 +977,9 @@ func (r *Runner) dispatchPass(s *leaderState, rec ControllerRecord, wait time.Du
 	r.setStatus(func(s *RunnerStatus) {
 		s.LastReconcile = reconciledAt
 		s.Inflight = activeCount(view, r.controllerID)
+		// RetryBackoffUntil is recomputed every pass, so it never outlives
+		// the hold it names; zero clears a stale timestamp.
+		s.RetryBackoffUntil = readyHold
 		if len(decisions) == 0 && s.CapacityBlocked == "" {
 			// Claim the backoff label only when suppression is the whole
 			// reason: a non-suppressed candidate held out by in-flight

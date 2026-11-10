@@ -6717,6 +6717,8 @@ func controllerLeaderMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity string, runner *workflowcontroller.RunnerStatus, nextPollAt any) map[string]any {
 	var lastReconcile any
 	var dispatchBackoffUntil any
+	var retryBackoffUntil any
+	var lastOutcome any
 	inflight := 0
 	var capacityBlocked any
 	if runner != nil {
@@ -6725,6 +6727,12 @@ func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 		}
 		if !runner.DispatchBackoffUntil.IsZero() {
 			dispatchBackoffUntil = runner.DispatchBackoffUntil
+		}
+		if !runner.RetryBackoffUntil.IsZero() {
+			retryBackoffUntil = runner.RetryBackoffUntil
+		}
+		if runner.LastOutcome != "" {
+			lastOutcome = runner.LastOutcome
 		}
 		inflight = runner.Inflight
 		if runner.CapacityBlocked != "" {
@@ -6742,9 +6750,11 @@ func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 		"owner_epoch":            rec.OwnerEpoch,
 		"leader":                 controllerLeaderMap(rec, ownIdentity),
 		"last_reconcile":         lastReconcile,
+		"last_outcome":           lastOutcome,
 		"inflight":               inflight,
 		"capacity_blocked":       capacityBlocked,
 		"dispatch_backoff_until": dispatchBackoffUntil,
+		"retry_backoff_until":    retryBackoffUntil,
 		"next_poll_at":           nextPollAt,
 	}
 }

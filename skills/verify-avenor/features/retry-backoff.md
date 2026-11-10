@@ -112,7 +112,9 @@ rm -rf "$SCRATCH"   # never delete "$EV"
 ## Observable end state (the proof)
 
 - Negative template: create fails with
-  `invalid workflow template: node "start" retry_policy: backoff_seconds must not be negative`.
+  `minimum at /nodes/0/retry_policy/backoff_seconds` (the profile schema's
+  structural validator; the typed layer's
+  `backoff_seconds must not be negative` backs it up).
 - `workflow-status.json`: `"status": "blocked"` (exhaustion `block` after the
   second failed attempt).
 - `workflow-inspect.json`: exactly **two** attempts, both `failed`; the
