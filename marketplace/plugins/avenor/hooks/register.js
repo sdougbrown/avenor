@@ -31,6 +31,10 @@
 //   under `mcp__avenor__*` would be refused as a replacement for it. A failed
 //   ask renders the shared ask sentences (wire.js mirrors
 //   schemas/message.outcome.json), never raw wire text.
+// - Session name: a `command.run` hook on the built-in `/rename` awaits the
+//   command, then publishes the title the host recorded to `POST
+//   /session_name`, so peers see the name the person gave the session. A
+//   provisioned run publishes none: its label is the supervisor's.
 //
 // - Identity: a run id and an attach credential in the environment are a
 //   provisioned identity — a spawned child joins the broker as the run its
@@ -79,6 +83,7 @@ const FLOOR_PATCH = 311
 const OFF = { enabled: false, reason: "the avenor peer layer has not started" }
 const layer = { ...OFF }
 let broker = null
+let provisionedRun = false
 let busyTurns = 0
 const pendingReplies = new Map()
 const MAX_REMEMBERED_MESSAGES = 128
@@ -94,6 +99,77 @@ export async function register(on) {
 
   await on("tool.call", { tool: "mcp__avenor__message" }, async (d, e) => serveMessageHook(d, e))
   await on("tool.call", { tool: "mcp__plugin_avenor_avenor__message" }, async (d, e) => serveMessageHook(d, e))
+
+  await on("command.run", { command: "rename" }, async (d, e, next) => followRename(d, e, next))
+}
+
+// --- command.run: the person's own name for the session ---
+
+/**
+ * The built-in /rename runs first; the peer record then follows the name the
+ * host recorded. The broker ranks a harness name above any model or launch
+ * label, so a human rename is what peers see.
+ */
+async function followRename(d, e, next) {
+  const ran = await next(e)
+  if (layer.enabled && broker !== null && !provisionedRun) {
+    await publishSessionTitle(d, e.args)
+  }
+  return ran
+}
+
+/**
+ * Publishes the session's host-side title to the broker as the harness name.
+ * The title comes from the transcript's last custom-title record, which is
+ * there as soon as /rename returns, including for a bare /rename whose
+ * generated name appears nowhere else; the typed argument stands in when the
+ * transcript cannot be read. A session with no title says nothing.
+ */
+async function publishSessionTitle(d, typedName) {
+  let name = await transcriptTitle(d)
+  if (name === null) {
+    name = typeof typedName === "string" ? typedName.trim() : ""
+  }
+  if (name === "") {
+    return
+  }
+  try {
+    await brokerPost(d, "/session_name", { name: Array.from(name).slice(0, 64).join("") })
+  } catch (err) {
+    await logLayer(d, "publishing the session name failed: " + errorText(err))
+  }
+}
+
+async function transcriptTitle(d) {
+  try {
+    const id = await d.session.id()
+    const root = await d.session.root()
+    const configured = await d.env.get("CLAUDE_CONFIG_DIR")
+    const home = await d.env.get("HOME")
+    const base = typeof configured === "string" && configured !== ""
+      ? configured
+      : (typeof home === "string" ? home : "") + "/.claude"
+    const path = base + "/projects/" + root.replace(/[^A-Za-z0-9]/g, "-") + "/" + id + ".jsonl"
+    const lines = String(await d.fs.read(path)).split("\n")
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (lines[i].indexOf('"custom-title"') === -1) {
+        continue
+      }
+      let record
+      try {
+        record = JSON.parse(lines[i])
+      } catch (err) {
+        continue
+      }
+      if (record !== null && typeof record === "object" && record.type === "custom-title" &&
+        record.sessionId === id && typeof record.customTitle === "string") {
+        return record.customTitle.trim()
+      }
+    }
+    return null
+  } catch (err) {
+    return null
+  }
 }
 
 // --- session.send: outbound brokerage ---
@@ -223,6 +299,7 @@ async function selfRegister(d) {
   // mint a record for a run the launcher no longer holds (a supervisor
   // restart), leaving behind a peer nothing routes to.
   const provisioned = envRunID !== "" && envToken !== ""
+  provisionedRun = provisioned
   try {
     const registered = provisioned
       ? await attachRun(d, brokerURL, envRunID, envToken)
@@ -246,6 +323,12 @@ async function selfRegister(d) {
         await logLayer(d, "rename failed: " + errorText(err))
       }
     }
+  }
+  // A resumed session already carries the name its person gave it. A
+  // provisioned run keeps the supervisor's label: its transcript opens with
+  // that label as the launch name, which no person chose.
+  if (!provisioned) {
+    await publishSessionTitle(d, "")
   }
   const path = provisioned ? "provisioned run " : "self-registered run "
   await logLayer(d, "peer layer on (" + path + broker.runID + ", broker " + broker.url + ")")
