@@ -54,6 +54,7 @@
 // top-level function declarations; pass-through is returning undefined,
 // never calling `next`.
 
+import { defaultHostLabel, pickLabel } from "./label.js"
 import { parseAvenorAddress, parseMessageTarget, parseTellTarget, matchSession } from "./addresses.js"
 import {
   mintMessageID,
@@ -315,9 +316,16 @@ async function selfRegister(d) {
     return false
   }
   // A provisioned run keeps its supervisor-assigned label. A self-registered
-  // run uses /rename so its environment name does not shadow later renames.
+  // run uses /rename so its environment name does not shadow later renames;
+  // without one it takes a label from the work it is in.
   if (!provisioned) {
-    const name = await envSessionName(d)
+    const envName = await envSessionName(d)
+    // A resumed session's own title outranks a default label, so it is not
+    // derived, listed and renamed first for nothing.
+    const resumed = await transcriptTitle(d)
+    const name = envName !== ""
+      ? envName
+      : resumed !== null && resumed !== "" ? "" : await defaultSessionLabel(d)
     if (name !== "") {
       try {
         await brokerPost(d, "/rename", { name: name })
@@ -335,6 +343,45 @@ async function selfRegister(d) {
   const path = provisioned ? "provisioned run " : "self-registered run "
   await logLayer(d, "peer layer on (" + path + broker.runID + ", broker " + broker.url + ")")
   return true
+}
+
+/**
+ * The label a session takes when nobody named it: "claude-<repo>[@branch]"
+ * from the session's directory, suffixed -2 … -9 when another peer holds it.
+ * Empty means no label derives, and the run keeps its minted id.
+ */
+async function defaultSessionLabel(d) {
+  try {
+    const dir = await d.session.root()
+    const toplevel = await gitAnswer(d, dir, ["rev-parse", "--show-toplevel"])
+    const branch = toplevel === "" ? "" : await gitAnswer(d, dir, ["branch", "--show-current"])
+    const base = defaultHostLabel("claude", dir, toplevel, branch)
+    return base === "" ? "" : pickLabel(base, await takenLabels(d))
+  } catch (err) {
+    return ""
+  }
+}
+
+async function gitAnswer(d, dir, args) {
+  try {
+    const ran = await d.process.run(["git", "-C", dir, ...args], { timeoutMs: 5000 })
+    return ran.exitCode === 0 ? ran.stdout.trim() : ""
+  } catch (err) {
+    return ""
+  }
+}
+
+/** The labels the broker lists, or null when the listing is unreadable or partial. */
+async function takenLabels(d) {
+  try {
+    const body = await brokerGet(d, "/sessions")
+    if (body === null || typeof body !== "object" || typeof body.peers_error === "string" || !Array.isArray(body.sessions)) {
+      return null
+    }
+    return new Set(body.sessions.map((row) => row && row.label).filter((label) => typeof label === "string"))
+  } catch (err) {
+    return null
+  }
 }
 
 /**

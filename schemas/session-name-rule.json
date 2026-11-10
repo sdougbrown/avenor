@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Shared conformance fixture for the one session display-name rule. This is NOT a wire schema: it pins the rule values and case tables that both the Go side (messaging.ValidSessionName and messaging.StripDisallowedIdentifierRunes in internal/messaging, the label sanitation in internal/stable) and the TypeScript side (the label pipeline in packages/opencode/src/label.ts plus the core rune helpers it imports) must reproduce, so a change on either side that the other does not follow fails a test instead of leaving conversations silently unnamed. 'cases' holds names the rule accepts or refuses; 'disallowedRunes' marks the cases whose input holds runes no identifier may hold, which is what the strip path must remove. 'sanitizeCases' holds inputs mapped to the exact label the derivation must produce. Non-ascii runes are spelled as escapes so the fixture stays diffable.",
+  "description": "Shared conformance fixture for the one session display-name rule. This is NOT a wire schema: it pins the rule values and case tables that both the Go side (messaging.ValidSessionName and messaging.StripDisallowedIdentifierRunes in internal/messaging, the label sanitation in internal/stable) and the TypeScript side (the label pipeline in packages/opencode/src/label.ts plus the core rune helpers it imports) must reproduce, so a change on either side that the other does not follow fails a test instead of leaving conversations silently unnamed. 'cases' holds names the rule accepts or refuses; 'disallowedRunes' marks the cases whose input holds runes no identifier may hold, which is what the strip path must remove. 'sanitizeCases' holds inputs mapped to the exact label the derivation must produce. Non-ascii runes are spelled as escapes so the fixture stays diffable. It also pins the work-derived default label: deriveCases (git top-level and branch to the bare label, shared by every derivation) and hostCases (the host prefix a harness-side default adds).",
   "limit": 64,
   "reservedReferences": [
     "self",
@@ -231,6 +231,70 @@
       "name": "truncation keeps whole astral runes",
       "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83c\udf82\ud83c\udf82",
       "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ud83c\udf82"
+    }
+  ],
+  "deriveCases": [
+    {
+      "name": "default branch carries no suffix",
+      "toplevel": "/home/u/Code/avenor",
+      "branch": "main",
+      "label": "avenor"
+    },
+    {
+      "name": "master is a default branch too",
+      "toplevel": "/home/u/Code/avenor",
+      "branch": "master",
+      "label": "avenor"
+    },
+    {
+      "name": "detached HEAD carries no suffix",
+      "toplevel": "/home/u/Code/avenor",
+      "branch": "",
+      "label": "avenor"
+    },
+    {
+      "name": "another branch is carried after an @",
+      "toplevel": "/home/u/Code/avenor",
+      "branch": "feat/work-names",
+      "label": "avenor@feat-work-names"
+    },
+    {
+      "name": "a linked worktree is named by its own directory",
+      "toplevel": "/home/u/Code/_wt/avenor-rename-sync",
+      "branch": "feat/claude-rename-sync",
+      "label": "avenor-rename-sync@feat-claude-rename-sync"
+    },
+    {
+      "name": "a trailing separator on the top-level is ignored",
+      "toplevel": "/home/u/Code/avenor/",
+      "branch": "main",
+      "label": "avenor"
+    },
+    {
+      "name": "a repository name with spaces is sanitized",
+      "toplevel": "/home/u/my repo",
+      "branch": "",
+      "label": "my-repo"
+    }
+  ],
+  "hostCases": [
+    {
+      "name": "host prefixes the work label",
+      "host": "claude",
+      "work": "avenor",
+      "label": "claude-avenor"
+    },
+    {
+      "name": "host prefixes a branch label",
+      "host": "codex",
+      "work": "avenor@feat-x",
+      "label": "codex-avenor@feat-x"
+    },
+    {
+      "name": "no work yields no label",
+      "host": "claude",
+      "work": "",
+      "label": ""
     }
   ]
 }
