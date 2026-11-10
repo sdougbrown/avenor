@@ -1,18 +1,14 @@
 import { execFile } from 'node:child_process'
 import * as nodePath from 'node:path'
-import {
-  MAX_SESSION_NAME_RUNES,
-  RESERVED_SESSION_REFERENCES,
-  boundedRunes,
-  stripDisallowedSessionNameRunes,
-} from '@dougbots/avenor-core'
+import { MAX_SESSION_NAME_RUNES, RESERVED_SESSION_REFERENCES, stripDisallowedSessionNameRunes } from './message.js'
+import { boundedRunes } from './messaging-text.js'
 
 /**
- * The work-derived default display label for a bound conversation: the base
- * name of the git top-level of the session's directory, plus "@<branch>" when
- * the checked-out branch is not one of the conventional default names. It
- * mirrors the supervisor's own session-label derivation so a conversation that
- * never carries a native title still appears under the work it serves.
+ * The work-derived default display label for a session: the base name of the
+ * git top-level of the session's directory, plus "@<branch>" when the
+ * checked-out branch is not one of the conventional default names. It mirrors
+ * the supervisor's own session-label derivation so a session that never
+ * carries a native title still appears under the work it serves.
  */
 
 // The repository's real default branch would mean resolving origin/HEAD — a
@@ -76,4 +72,36 @@ export async function sessionLabel(dir: string | undefined, git: GitReader = def
   }
   const fallback = sanitizeSessionLabel(nodePath.basename(dir))
   return labelUsable(fallback) ? fallback : ''
+}
+
+/** The label a host's session registers under, or "" when nothing usable derives. */
+export function hostLabel(host: string, work: string): string {
+  const label = sanitizeSessionLabel(`${host}-${work}`)
+  return work !== '' && labelUsable(label) ? label : ''
+}
+
+// The highest -N collision suffix a default label carries, and that suffix
+// spelled out: the room a truncation must leave for one.
+const MAX_LABEL_SUFFIX = 9
+const MAX_LABEL_SUFFIX_TEXT = '-9'
+
+/**
+ * The label a session publishes for its derived base: the base itself when no
+ * peer holds it, then the base-2 … base-9 suffixed variants, the base cut to
+ * leave room for the longest suffix once suffixing starts. When every variant
+ * is taken, or the peers read returned no information (undefined), the
+ * unsuffixed base is kept rather than a name invented.
+ */
+export function pickSessionLabel(base: string, taken: Set<string> | undefined): string {
+  if (!taken || !taken.has(base)) return base
+  let stem = boundedRunes(base, MAX_SESSION_NAME_RUNES - MAX_LABEL_SUFFIX_TEXT.length)
+  // A dash at the cut boundary would double with the appended separator.
+  stem = stem.replace(/-+$/, '')
+  if (stem !== '') {
+    for (let n = 2; n <= MAX_LABEL_SUFFIX; n++) {
+      const candidate = `${stem}-${n}`
+      if (!taken.has(candidate)) return candidate
+    }
+  }
+  return base
 }

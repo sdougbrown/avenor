@@ -3,7 +3,7 @@ import * as nodeChildProcess from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 
 import plugin, { createV2EventHandler, evaluatePermissionAsk, permissionAskFromEvent, setupAvenor, stepEndedInfo, toV2ToolResult, v2Host, v2ToolEntry } from './index.js'
-import { sanitizeSessionLabel, sessionLabel } from './label.js'
+import { sanitizeSessionLabel, sessionLabel } from '@dougbots/avenor-core'
 
 // The git reader's contract — resolve '' on any error or timeout, never
 // reject — is what makes the once-per-session attempt mark safe, so the real

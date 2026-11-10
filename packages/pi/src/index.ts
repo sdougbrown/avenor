@@ -29,6 +29,7 @@ import {
   eventsTool,
   extractTurnText,
   getSupervisorClient,
+  hostLabel,
   inspectTool,
   installAskClaims,
   isClosedSocketError,
@@ -39,6 +40,7 @@ import {
   observeRun,
   peersDetails,
   peersTool,
+  pickSessionLabel,
   renderPeerList,
   resultOutput,
   resultTool,
@@ -50,6 +52,7 @@ import {
   THINKING_LEVELS,
   validateSpawnSelection,
   runWorkflowTool,
+  sessionLabel,
   type AskClaims,
   type Client,
   type InspectResult,
@@ -679,6 +682,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let centralTurnSequence = 0
     let centralPendingTurn: { sequence: number; generation: number; final_output: string; stop_reason: string; truncated: boolean } | null = null
     let topLevelRegistered = false
+    let defaultLabelPosted = false
     let topLevelError: Error | null = null
     let topLevelTerminal = false
     let peerPollAbort: AbortController | null = null
@@ -1803,6 +1807,37 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let combinedProvider: MessageProvider | null = null
     let combinedLocalProvider: MessageProvider | null = null
 
+    /**
+     * A top-level session that neither Pi nor the environment named registers
+     * under its minted run id. It takes `pi-<repo>[@branch]` from its working
+     * directory instead, through the replaceable /rename route: a Pi session
+     * name published later through /session_name still outranks it.
+     */
+    async function publishDefaultLabel(ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
+      const env = topLevelEnv
+      const provider = centralProvider
+      if (!env || !provider || defaultLabelPosted) return
+      const manager = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } }).sessionManager
+      if (!manager || typeof manager.getSessionName !== 'function') return
+      const named = () => manager.getSessionName?.() || process.env.AVENOR_SESSION_NAME || process.env.AVENOR_LABEL
+      if (named()) return
+      try {
+        const base = hostLabel('pi', await sessionLabel(ctx.cwd))
+        if (base === '') return
+        const listing = await provider.peers()
+        const taken = listing.detail === undefined
+          ? new Set(listing.peers.filter(peer => peer.run_id !== env.runId).map(peer => peer.label ?? ''))
+          : undefined
+        // A name landing during the reads is the person's and wins.
+        if (signal.aborted || env !== topLevelEnv || named()) return
+        await provider.rename({ name: pickSessionLabel(base, taken) })
+        defaultLabelPosted = true
+      } catch {
+        // The label is cosmetic: the run stays reachable under its minted id,
+        // and the next session start tries again.
+      }
+    }
+
     async function registerCentralPeer(signal: AbortSignal): Promise<void> {
       if (!topLevelEnv) return
       try {
@@ -1811,7 +1846,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         topLevelRegistered = true
         topLevelError = null
         clearPeerFailure('register')
-        if (sessionCtx) await publishSessionName(sessionCtx)
+        if (sessionCtx) {
+          await publishSessionName(sessionCtx)
+          await publishDefaultLabel(sessionCtx, signal)
+        }
         await publishCentralTurn()
       } catch (error) {
         if (signal.aborted) return
@@ -2162,6 +2200,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       peerFailureReported.clear()
       topLevelEnv = null
       topLevelRegistered = false
+      defaultLabelPosted = false
       topLevelTerminal = false
       topLevelError = null
       centralProvider = null

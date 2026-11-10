@@ -1,15 +1,8 @@
-import { describe, expect, it, mock } from 'bun:test'
+import { describe, expect, it } from 'bun:test'
 
-// The label pipeline imports '@dougbots/avenor-core', which bun cannot resolve
-// to source on its own, so the shared core module is registered from core's
-// source before label.ts loads — the same seam plugin.test.ts uses.
-import * as coreModule from '../../core/src/index.js'
-import { MAX_SESSION_NAME_RUNES, stripDisallowedSessionNameRunes } from '../../core/src/message.js'
 import fixture from '../../../schemas/session-name-rule.json'
-
-mock.module('@dougbots/avenor-core', () => ({ ...coreModule }))
-
-const { labelUsable, sanitizeSessionLabel, sessionLabel } = await import('./label.js')
+import { MAX_SESSION_NAME_RUNES, stripDisallowedSessionNameRunes } from './message.js'
+import { hostLabel, labelUsable, sanitizeSessionLabel, sessionLabel } from './session-label.js'
 
 type NameRuleFixture = {
   limit: number
@@ -17,6 +10,7 @@ type NameRuleFixture = {
   cases: Array<{ name: string; input: string; valid: boolean; disallowedRunes: boolean }>
   sanitizeCases: Array<{ name: string; input: string; label: string }>
   deriveCases: Array<{ name: string; toplevel: string; branch: string; label: string }>
+  hostCases: Array<{ name: string; host: string; work: string; label: string }>
 }
 
 const rule = fixture as NameRuleFixture
@@ -59,6 +53,12 @@ describe('session name rule conformance', () => {
     it(`derives case: ${c.name}`, async () => {
       const git = async (_dir: string, args: string[]) => (args[0] === 'rev-parse' ? c.toplevel : c.branch)
       expect(await sessionLabel('/work', git)).toBe(c.label)
+    })
+  }
+
+  for (const c of rule.hostCases) {
+    it(`prefixes host case: ${c.name}`, () => {
+      expect(hostLabel(c.host, c.work)).toBe(c.label)
     })
   }
 })

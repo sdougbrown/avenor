@@ -105,6 +105,8 @@ export {
   stripDisallowedSessionNameRunes,
 } from './message.js'
 export type { MessageInput, PeersInput, PeersRouterResult } from './message.js'
+export { hostLabel, labelUsable, pickSessionLabel, sanitizeSessionLabel, sessionLabel } from './session-label.js'
+export type { GitReader } from './session-label.js'
 export { messageTool, createMessageTool } from './tools/message.js'
 export type {
   MessageProvider,
