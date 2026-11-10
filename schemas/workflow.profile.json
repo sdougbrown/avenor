@@ -430,6 +430,7 @@
           },
           "backoff_seconds": {
             "type": "integer",
+            "minimum": 0,
             "maximum": 31536000
           }
         },

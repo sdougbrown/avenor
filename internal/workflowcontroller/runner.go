@@ -947,7 +947,7 @@ func (r *Runner) dispatchPass(s *leaderState, rec ControllerRecord, wait time.Du
 	readyHold := time.Time{}
 	futureHeld := 0
 	for _, c := range candidates {
-		if c.ReadyAt.After(r.now()) {
+		if heldByReadiness(c, r.now()) {
 			futureHeld++
 			if readyHold.IsZero() || c.ReadyAt.Before(readyHold) {
 				readyHold = c.ReadyAt
