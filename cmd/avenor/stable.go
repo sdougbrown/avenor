@@ -77,6 +77,7 @@ func handleStable(ctx context.Context, inv clicontract.Invocation, stderr io.Wri
 		PermissionClaimTimeout:     inv.Durations["permission-claim-timeout"],
 		WorkflowRoot:               inv.Flags["workflow-root"],
 		WorkflowAdapterDir:         inv.Flags["workflow-adapter-dir"],
+		WorkflowControllerDir:      inv.Flags["workflow-controller-dir"],
 		MCPLaunchWrapperPolicy:     mcpPolicy,
 		BrokerParentURL:            parentURL,
 		BrokerParentToken:          credential,

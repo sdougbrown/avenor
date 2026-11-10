@@ -88,6 +88,16 @@ type Config struct {
 	// $HOME/.config/avenor/workflow-adapters).
 	WorkflowAdapterDir string
 
+	// WorkflowControllerDir is the host-owned directory of controller
+	// definition files ({"controller_id", "max_inflight", "desired_state"}).
+	// At startup the supervisor reconciles each definition into its controller
+	// store: a new definition creates the controller, a changed one updates it
+	// with a recorded event, and a controller whose file was removed is left
+	// alone — never deleted. When empty it defaults to
+	// $XDG_CONFIG_HOME/avenor/workflow-controllers (or
+	// $HOME/.config/avenor/workflow-controllers).
+	WorkflowControllerDir string
+
 	// WorkflowLeaseSweepInterval is the cadence of the supervisor's live
 	// workflow lease-expiry sweep (Manager.ExpireStaleLeases): an activation
 	// whose lease stopped being heartbeated while the supervisor is running
@@ -6164,6 +6174,17 @@ func resolveWorkflowAdapterDir(configured string) string {
 	return filepath.Join(appdir.ConfigHome(), "workflow-adapters")
 }
 
+// resolveWorkflowControllerDir returns the configured controller definition
+// directory, or the default under the shared avenor config home
+// (XDG_CONFIG_HOME/avenor, falling back to ~/.config/avenor) when unset. It
+// never creates directories.
+func resolveWorkflowControllerDir(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return filepath.Join(appdir.ConfigHome(), "workflow-controllers")
+}
+
 // loadWorkflowAdapters loads the adapter manifest registry from the
 // configured (or default) adapter directory into the supervisor's immutable
 // registry slot. A directory-level load failure leaves the registry nil —
@@ -6183,6 +6204,54 @@ func (s *Supervisor) loadWorkflowAdapters() {
 		log.Printf("workflow: adapter manifest %s not loaded: %v", loadErr.File, loadErr.Err)
 	}
 	s.workflowAdapters.Store(reg)
+}
+
+// reconcileWorkflowControllers reconciles the host-owned controller definition
+// directory into the store. A definition for an unknown controller creates it
+// (disabled unless the definition says otherwise); a definition whose
+// max_inflight or desired_state differs from the record updates it with a
+// recorded event; a controller whose definition was removed is left alone,
+// never deleted. Directory-level and per-definition failures are logged and
+// skip only their own controller: definitions are host configuration and a
+// broken one must not disable the other controllers.
+func (s *Supervisor) reconcileWorkflowControllers(store *workflowcontroller.ControllerStore) {
+	dir := resolveWorkflowControllerDir(s.config.WorkflowControllerDir)
+	defs, err := workflowcontroller.LoadControllerDefinitions(dir)
+	if err != nil {
+		log.Printf("workflow: controller definition load from %s failed (existing controllers keep their recorded state): %v", dir, err)
+		return
+	}
+	for _, failure := range defs.Failures {
+		log.Printf("workflow: controller definition %s not applied: %v", failure.File, failure.Err)
+	}
+	for _, def := range defs.Definitions {
+		rec, ok, err := store.Get(def.ControllerID)
+		if err != nil {
+			log.Printf("workflow: controller definition %s not applied: %v", def.File, err)
+			continue
+		}
+		if !ok {
+			rec, err = store.Create(def.ControllerID, def.MaxInflight)
+			if err != nil {
+				log.Printf("workflow: controller definition %s not applied: %v", def.File, err)
+				continue
+			}
+			log.Printf("workflow: controller %s created from definition %s (max_inflight=%d, desired_state=%s)", def.ControllerID, def.File, def.MaxInflight, rec.DesiredState)
+		} else if rec.MaxInflight != def.MaxInflight {
+			if rec, err = store.SetMaxInflight(def.ControllerID, def.MaxInflight); err != nil {
+				log.Printf("workflow: controller definition %s not applied: %v", def.File, err)
+				continue
+			}
+			log.Printf("workflow: controller %s max_inflight reconciled from definition %s to %d", def.ControllerID, def.File, def.MaxInflight)
+		}
+		if def.DesiredState != "" && rec.DesiredState != def.DesiredState {
+			if _, err := store.SetDesiredState(def.ControllerID, def.DesiredState, fmt.Sprintf("controller definition %s", def.File)); err != nil {
+				log.Printf("workflow: controller definition %s not applied: %v", def.File, err)
+				continue
+			}
+			log.Printf("workflow: controller %s desired_state reconciled from definition %s to %s", def.ControllerID, def.File, def.DesiredState)
+		}
+	}
 }
 
 // workflowManager returns the workflow manager for the configured workflow
@@ -6265,9 +6334,21 @@ func (s *Supervisor) runWorkflowStartupBarrier() {
 			for _, failure := range recovered.Failures {
 				log.Printf("workflow: controller recovery skipped: %v", failure)
 			}
-			for _, rec := range recovered.Records {
-				if rec.DesiredState == workflowcontroller.DesiredEnabled {
-					s.startControllerLoop(s.workflowControllers, rec.ControllerID)
+			// Reconcile the host-owned controller definitions before starting
+			// leader loops, so a definition's desired_state and max_inflight
+			// land before any loop observes the record.
+			s.reconcileWorkflowControllers(s.workflowControllers)
+			// Read the post-reconcile records: a definition may have created
+			// or enabled a controller Recover did not see enabled.
+			records, err := s.workflowControllers.List()
+			if err != nil {
+				barrierErr = fmt.Errorf("workflow controller listing: %w", err)
+			}
+			if barrierErr == nil {
+				for _, rec := range records.Records {
+					if rec.DesiredState == workflowcontroller.DesiredEnabled {
+						s.startControllerLoop(s.workflowControllers, rec.ControllerID)
+					}
 				}
 			}
 		}

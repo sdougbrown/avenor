@@ -435,6 +435,14 @@ Status and list are readable through the MCP `workflow` tool with `action: "cont
 
 Pass `--workflow-adapter-dir` to the stable command to point the supervisor at a directory of external-gate adapter manifests (default: `$XDG_CONFIG_HOME/avenor/workflow-adapters`, falling back to `~/.config/avenor/workflow-adapters`).
 
+Pass `--workflow-controller-dir` to point the supervisor at a directory of controller definition files, so a host can change a controller's settings declaratively instead of editing store state by hand (default: `$XDG_CONFIG_HOME/avenor/workflow-controllers`, falling back to `~/.config/avenor/workflow-controllers`). Each `*.json` file is one definition:
+
+```json
+{ "controller_id": "review-pr-auto", "max_inflight": 3, "desired_state": "enabled" }
+```
+
+At startup the supervisor reconciles each definition into its controller store: a definition for an unknown controller creates it (disabled unless `desired_state` says otherwise), a definition whose `max_inflight` or `desired_state` differs from the record updates it with a recorded event (`max_inflight_changed`, `enabled`/`disabled`), and a controller whose definition file was removed is left alone — never deleted. Runtime fields (leader lease, revision, poll cursors) stay in the store. Editing the definition file and restarting the supervisor is the whole apply path; a broken file is logged and skips only its own controller, and duplicate controller IDs across files reject every file declaring the ID.
+
 `avenor workflow controller status` reports:
 
 - `desired_state` — `enabled` or `disabled`; disabled controllers stop future dispatch and polling but never cancel running attempts.

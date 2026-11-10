@@ -958,3 +958,51 @@ func TestControllerStateFilesAreOwnerOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestSetMaxInflight(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStore(t)
+	mustCreate(t, s, "alpha", 4)
+
+	// Same value: a no-op that appends nothing.
+	rec, err := s.SetMaxInflight("alpha", 4)
+	if err != nil {
+		t.Fatalf("no-op SetMaxInflight: %v", err)
+	}
+	if rec.MaxInflight != 4 {
+		t.Fatalf("no-op SetMaxInflight max_inflight = %d, want 4", rec.MaxInflight)
+	}
+	if got := len(eventKinds(t, s, "alpha")); got != 1 {
+		t.Fatalf("no-op SetMaxInflight appended events, log has %d lines", got)
+	}
+
+	// A change appends one event and is visible through recovery.
+	if _, err := s.SetMaxInflight("alpha", 6); err != nil {
+		t.Fatalf("SetMaxInflight: %v", err)
+	}
+	kinds := eventKinds(t, s, "alpha")
+	if len(kinds) != 2 || kinds[1] != EventMaxInflightChanged {
+		t.Fatalf("event kinds = %v, want [created %s]", kinds, EventMaxInflightChanged)
+	}
+	recovered, err := NewStoreWithClock(s.Root(), time.Now).Recover()
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	var got *ControllerRecord
+	for _, r := range recovered.Records {
+		if r.ControllerID == "alpha" {
+			got = &r
+		}
+	}
+	if got == nil || got.MaxInflight != 6 {
+		t.Fatalf("recovered alpha = %+v, want max_inflight 6", got)
+	}
+
+	// Validation: bad limit and unknown controller.
+	if _, err := s.SetMaxInflight("alpha", 0); !errors.Is(err, ErrInvalidController) {
+		t.Fatalf("SetMaxInflight 0: got err=%v, want ErrInvalidController", err)
+	}
+	if _, err := s.SetMaxInflight("no-such", 4); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetMaxInflight unknown: got err=%v, want ErrNotFound", err)
+	}
+}

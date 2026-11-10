@@ -831,3 +831,78 @@ func TestControllerRenewFailureYieldsAndReacquires(t *testing.T) {
 		t.Fatalf("A re-acquired epoch = %d, want %d", recA2.Leader.OwnerEpoch, epochB+1)
 	}
 }
+
+// TestControllerDefinitionReconcileAtStartup proves the startup barrier
+// reconciles the host-owned controller definition directory into the store: a
+// new definition creates its controller, a changed definition updates
+// max_inflight and desired_state with recorded events, and a controller whose
+// definition was removed is left alone.
+func TestControllerDefinitionReconcileAtStartup(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "wfroot")
+	prev := workflowcontroller.NewStore(root)
+	if _, err := prev.Create("c1", 3); err != nil {
+		t.Fatalf("seed create c1: %v", err)
+	}
+	if _, err := prev.SetDesiredState("c1", workflowcontroller.DesiredEnabled, ""); err != nil {
+		t.Fatalf("seed enable c1: %v", err)
+	}
+	if _, err := prev.Create("removed", 5); err != nil {
+		t.Fatalf("seed create removed: %v", err)
+	}
+
+	defsDir := filepath.Join(t.TempDir(), "defs")
+	writeControllerDefinition(t, defsDir, "c1.json", `{"controller_id": "c1", "max_inflight": 9, "desired_state": "disabled"}`)
+	writeControllerDefinition(t, defsDir, "c2.json", `{"controller_id": "c2", "max_inflight": 2, "desired_state": "enabled"}`)
+
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:         newStableSocketPath(t, "wfctl-defs"),
+		WorkflowRoot:          root,
+		WorkflowControllerDir: defsDir,
+	})
+	stopLoopsAtCleanup(t, sup)
+	t.Cleanup(func() { _ = sup.Shutdown("graceful") })
+	done := make(chan int, 1)
+	go func() { done <- sup.Run() }()
+
+	store := workflowcontroller.NewStore(root)
+	waitForControllerLeader(t, store, "c2", func(rec workflowcontroller.ControllerRecord) bool {
+		return rec.Leader.OwnerID == sup.supervisorIdentity()
+	})
+
+	rec, ok, err := store.Get("c1")
+	if err != nil || !ok {
+		t.Fatalf("get c1: ok=%v err=%v", ok, err)
+	}
+	if rec.MaxInflight != 9 || rec.DesiredState != workflowcontroller.DesiredDisabled {
+		t.Fatalf("c1 = max_inflight %d desired %s, want 9/disabled", rec.MaxInflight, rec.DesiredState)
+	}
+	sup.controllerLoopsMu.Lock()
+	_, c1Loop := sup.controllerLoops["c1"]
+	_, c2Loop := sup.controllerLoops["c2"]
+	sup.controllerLoopsMu.Unlock()
+	if c1Loop {
+		t.Fatal("c1 has a leader loop after its definition disabled it")
+	}
+	if !c2Loop {
+		t.Fatal("c2 has no leader loop after its definition enabled it")
+	}
+
+	rec, ok, err = store.Get("removed")
+	if err != nil || !ok {
+		t.Fatalf("get removed: ok=%v err=%v", ok, err)
+	}
+	if rec.MaxInflight != 5 || rec.DesiredState != workflowcontroller.DesiredDisabled {
+		t.Fatalf("removed controller changed: max_inflight %d desired %s, want untouched 5/disabled", rec.MaxInflight, rec.DesiredState)
+	}
+}
+
+func writeControllerDefinition(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
