@@ -1823,6 +1823,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * under its minted run id. It takes `[<hostname>-]pi-<repo>` from its
      * working directory instead, through the replaceable /rename route: a Pi
      * session name published later through /session_name still outranks it.
+     * The request marks the name as Pi's own default, so a broker that checks
+     * names follows a taken one with the run's tail instead of refusing it.
      */
     async function publishDefaultLabel(ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
       const env = topLevelEnv
@@ -1840,7 +1842,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (signal.aborted || env !== topLevelEnv || named()) return
         const name = defaultHostLabel({ host: 'pi', hostname, brokerUrl: env.brokerUrl, dir: ctx.cwd, toplevel, runId: env.runId, taken })
         if (name === '') return
-        await provider.rename({ name })
+        await provider.rename({ name, default: true })
         defaultLabelPosted = true
       } catch {
         // The label is cosmetic: the run stays reachable under its minted id,

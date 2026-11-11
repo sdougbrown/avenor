@@ -69,10 +69,14 @@ async function registerAndWrite() {
 
   const registered = await registerOrAttach(plan);
   // A self-registered run nobody named takes a label from the work it is in.
+  // Only that derived label is the harness's own; a launch label from the
+  // environment is the person's, and is renamed as an explicit choice.
+  let derived = false;
   if (plan.kind === "register" && registered.label === "") {
     const cwd = typeof input.cwd === "string" && input.cwd !== "" ? input.cwd : process.cwd();
     registered.label = await defaultSessionLabel(cwd, registered);
-    if (registered.label === "") logLine(sessionID, "no default label derived; keeping " + registered.run_id);
+    derived = registered.label !== "";
+    if (!derived) logLine(sessionID, "no default label derived; keeping " + registered.run_id);
   }
   const record = {
     version: RECORD_VERSION,
@@ -91,10 +95,12 @@ async function registerAndWrite() {
   }
   // Name a self-registered run through /rename, the same label field a later
   // `peers rename` writes. /session_name would record a harness name that the
-  // broker resolves ahead of the label and a rename could never replace.
+  // broker resolves ahead of the label and a rename could never replace. A
+  // derived label says so in the body, so a broker that checks names follows a
+  // taken one with the run's tail instead of refusing it.
   if (!record.provisioned && record.label !== "") {
     try {
-      await postAuthed(record.broker_url, "/rename", record, { name: record.label });
+      await postAuthed(record.broker_url, "/rename", record, derived ? { name: record.label, default: true } : { name: record.label });
     } catch (err) {
       logLine(sessionID, "initial rename failed: " + (err instanceof Error ? err.message : String(err)));
     }

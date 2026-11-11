@@ -448,12 +448,16 @@ async function selfRegister(d) {
   if (!provisioned) {
     const envName = await envSessionName(d)
     const resumed = await transcriptTitle(d)
-    const name = envName !== ""
+    const named = envName !== ""
+    const name = named
       ? envName
       : resumed !== null && resumed !== "" ? "" : await defaultSessionLabel(d)
     if (name !== "") {
       try {
-        await brokerPost(d, "/rename", { name: name })
+        // A derived label is marked as the harness's own, so a broker that
+        // checks names follows a taken one with the run's tail instead of
+        // refusing it. A name from the environment is the person's.
+        await brokerPost(d, "/rename", named ? { name } : { name, default: true })
       } catch (err) {
         await logLayer(d, "rename failed: " + errorText(err))
       }

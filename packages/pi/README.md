@@ -132,7 +132,9 @@ directory name outside a repository). The machine's short name leads
 (`<hostname>-pi-<repo>`) only when the broker is on another machine. A six
 character run-id tail is added when another session already holds the label,
 when the broker's session list cannot be read in full, or when there is no
-repository. A Pi session name set later replaces the default. Use the existing
+repository. The label is posted as Pi's own default, so a broker that checks
+names follows a taken one with the tail instead of refusing the rename. A Pi
+session name set later replaces the default. Use the existing
 tools:
 
 ```json
