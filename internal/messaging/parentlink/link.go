@@ -613,16 +613,26 @@ func (l *Link) Peers(ctx context.Context) (messaging.PeersResult, error) {
 	return result, nil
 }
 
+// ErrParentReadFailed reports a read the parent broker could not answer: it was
+// unreachable or failed. Unlike ErrParentUnavailable it does not classify as
+// ErrTargetUnavailable, so a caller never reads an outage as a run the parent
+// does not hold.
+var ErrParentReadFailed = errors.New("the parent broker could not answer the read")
+
 // Last reads one run's recorded last turn from the parent broker. The route is
 // side-effect free and universally visible there, so the branch authenticates
 // with the credential it already holds for one of its own runs, as it does to
-// list peers.
+// list peers. A run the parent does not hold is ErrTargetUnavailable; a parent
+// that could not answer is ErrParentReadFailed.
 func (l *Link) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
 	status, raw, err := l.read(ctx, pathLast+"?"+url.Values{"target": {runID}}.Encode())
-	if err != nil {
-		return messaging.PeerLast{}, err
+	if err == nil {
+		_, err = decode(status, raw)
 	}
-	if _, err := decode(status, raw); err != nil {
+	if errors.Is(err, ErrParentUnavailable) {
+		return messaging.PeerLast{}, fmt.Errorf("%w: %v", ErrParentReadFailed, err)
+	}
+	if err != nil {
 		return messaging.PeerLast{}, err
 	}
 	var body struct {

@@ -2,6 +2,7 @@ package parentlink
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -643,14 +644,28 @@ func TestIdleBranchReRegistersWithAReplacedParent(t *testing.T) {
 
 // TestLinkLastReadsTheTargetsTurnFromTheParent pins the read: the link asks the
 // parent's /last_message route for the named run, authenticated with the
-// credential of a run the parent accepted, and returns the recorded turn.
+// credential of a run the parent accepted, and returns the turn the recorded
+// protocol's answer carries.
 func TestLinkLastReadsTheTargetsTurnFromTheParent(t *testing.T) {
+	var documented string
+	for _, response := range loadParentWireDoc(t).Responses {
+		if response.Name == "a_last_turn" {
+			raw, err := json.Marshal(response.Body)
+			if err != nil {
+				t.Fatalf("marshal the recorded answer: %v", err)
+			}
+			documented = string(raw)
+		}
+	}
+	if documented == "" {
+		t.Fatal("the parent protocol records no last-turn answer")
+	}
 	stub := newStubBroker(t, func(req stubRequest) (int, string) {
 		switch req.Path {
 		case pathRegister:
 			return http.StatusOK, `{"generation":"gen-a"}`
 		case pathLast:
-			return http.StatusOK, `{"run_id":"run-b","label":"beta","has_record":true,"final_output":"shipped","stop_reason":"end_turn","at":1700000000}`
+			return http.StatusOK, documented
 		}
 		return http.StatusOK, `{}`
 	})
@@ -660,7 +675,7 @@ func TestLinkLastReadsTheTargetsTurnFromTheParent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Last: %v", err)
 	}
-	want := messaging.PeerLast{RunID: "run-b", Label: "beta", HasRecord: true, Text: "shipped", StopReason: "end_turn", At: 1700000000}
+	want := messaging.PeerLast{RunID: "run-b", Label: "beta", HasRecord: true, Text: "shipped", StopReason: "end_turn", Truncated: true, At: 1700000000}
 	if last != want {
 		t.Fatalf("Last = %+v, want %+v", last, want)
 	}
@@ -688,5 +703,27 @@ func TestLinkLastClassifiesAnUnknownRunAsUnavailable(t *testing.T) {
 
 	if _, err := link.Last(testContext(t), "run-x"); !errors.Is(err, messaging.ErrTargetUnavailable) {
 		t.Fatalf("Last error = %v, want ErrTargetUnavailable", err)
+	}
+}
+
+// TestLinkLastReportsAFailedParentApartFromAMissingRun pins the other
+// classification: a parent that answers with a server error or cannot be
+// reached is a parent failure, never a missing run, so a caller does not read an
+// outage as an unknown target.
+func TestLinkLastReportsAFailedParentApartFromAMissingRun(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathLast:
+			return http.StatusInternalServerError, `{}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newTestLink(t, stub, "gen-a")
+
+	err := func() error { _, err := link.Last(testContext(t), "run-b"); return err }()
+	if !errors.Is(err, ErrParentReadFailed) || errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Last error = %v, want ErrParentReadFailed and not target-unavailable", err)
 	}
 }

@@ -283,7 +283,6 @@ func (s *stubMessenger) Preflight(_ context.Context) (messaging.PreflightResult,
 
 func (s *stubMessenger) Close() error { return nil }
 
-// sentRuns reports the runs the local seam was asked to send to.
 // lastTargets reports the runs the local seam was asked to read a last turn for.
 func (s *stubMessenger) lastTargets() []string {
 	s.mu.Lock()
@@ -291,6 +290,7 @@ func (s *stubMessenger) lastTargets() []string {
 	return append([]string(nil), s.lasts...)
 }
 
+// sentRuns reports the runs the local seam was asked to send to.
 func (s *stubMessenger) sentRuns() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

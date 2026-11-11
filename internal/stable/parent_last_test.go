@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -70,5 +71,65 @@ func TestSupervisorLastReadsARunItsParentHolds(t *testing.T) {
 	var toolErr *router.ToolError
 	if !errors.As(err, &toolErr) || toolErr.Code != "unknown_target" {
 		t.Fatalf("SessionLast(unknown run) error = %v, want unknown_target", err)
+	}
+}
+
+// TestSupervisorLastRefusesARunAnotherBranchOwns pins the limit of the parent
+// read: the hub holds a sibling branch's run only as an adopted record, whose
+// turn lives on the owning branch. Answering from that record would report "no
+// turn recorded" for a run that has one, so the read refuses it as unknown.
+func TestSupervisorLastRefusesARunAnotherBranchOwns(t *testing.T) {
+	t.Parallel()
+	parentBroker, _ := startTestParentBroker(t)
+	siblingBroker, _, _ := startTestBranch(t, parentBroker, "rt_remote")
+	if err := siblingBroker.SetLastAgentMessage("rt_remote", "built on the sibling", "end_turn", false); err != nil {
+		t.Fatalf("record the sibling run's turn: %v", err)
+	}
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:     newStableSocketPath(t, "sib"),
+		MaxRuntimes:       2,
+		BrokerParentURL:   "http://" + parentBroker.Addr(),
+		BrokerParentToken: testLinkToken,
+	})
+	t.Cleanup(func() { _ = sup.Shutdown("kill") })
+
+	record, ok, err := sup.SessionLast(branchKey(siblingBroker, "rt_remote"))
+	var toolErr *router.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "unknown_target" {
+		t.Fatalf("SessionLast(sibling branch's run) = (%+v, %v, %v), want unknown_target", record, ok, err)
+	}
+}
+
+// TestSupervisorLastReportsAnUnreachableParentApartFromAMissingRun pins the
+// failure class end to end: a parent that has gone away is a failed read, not an
+// unknown target, and its reason names no parent address.
+func TestSupervisorLastReportsAnUnreachableParentApartFromAMissingRun(t *testing.T) {
+	t.Parallel()
+	parentBroker, _ := startTestParentBroker(t)
+	if _, err := parentBroker.CreateRun("hub-run", "hub"); err != nil {
+		t.Fatalf("create the parent's run: %v", err)
+	}
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:     newStableSocketPath(t, "gone"),
+		MaxRuntimes:       2,
+		BrokerParentURL:   "http://" + parentBroker.Addr(),
+		BrokerParentToken: testLinkToken,
+	})
+	t.Cleanup(func() { _ = sup.Shutdown("kill") })
+	parentURL := parentBroker.Addr()
+	if err := parentBroker.Stop(); err != nil {
+		t.Fatalf("stop the parent: %v", err)
+	}
+
+	_, _, err := sup.SessionLast("hub-run")
+	if err == nil {
+		t.Fatal("SessionLast with the parent gone succeeded")
+	}
+	var toolErr *router.ToolError
+	if errors.As(err, &toolErr) {
+		t.Fatalf("SessionLast with the parent gone = %v, want a failed read, not the typed %q refusal", err, toolErr.Code)
+	}
+	if strings.Contains(err.Error(), parentURL) {
+		t.Fatalf("the failure %q names the parent's address", err)
 	}
 }

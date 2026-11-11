@@ -77,8 +77,8 @@
     },
     {
       "name": "a_last_turn",
-      "fields": ["run_id", "label", "has_record", "final_output", "stop_reason", "at"],
-      "body": {"run_id": "run-b", "label": "beta", "has_record": true, "final_output": "shipped", "stop_reason": "end_turn", "at": 1700000000},
+      "fields": ["run_id", "label", "has_record", "final_output", "stop_reason", "final_output_truncated", "at"],
+      "body": {"run_id": "run-b", "label": "beta", "has_record": true, "final_output": "shipped", "stop_reason": "end_turn", "final_output_truncated": true, "at": 1700000000},
       "outcome": ""
     },
     {

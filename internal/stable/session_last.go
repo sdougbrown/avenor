@@ -27,7 +27,7 @@ func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, er
 		return broker.LastAgentMessage{}, false, unknownTargetError(rtID)
 	}
 	if err != nil {
-		return broker.LastAgentMessage{}, false, err
+		return broker.LastAgentMessage{}, false, errors.New("the parent broker could not answer the read")
 	}
 	return broker.LastAgentMessage{
 		RunID:      last.RunID,

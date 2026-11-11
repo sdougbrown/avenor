@@ -2065,6 +2065,10 @@ func writeRenameError(w http.ResponseWriter, err error) {
 	}
 }
 
+// parentReadFailed is the reason a read the parent could not answer carries on
+// the wire.
+const parentReadFailed = "the parent broker could not answer the read"
+
 // handleLastMessage reports any known run's recorded last turn, this broker's
 // or its parent's. The target is not required to be the authenticated caller:
 // this read is universally visible and side-effect free.
@@ -2083,7 +2087,9 @@ func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 		writeCodedError(w, http.StatusNotFound, "run not found: "+target, "target-unavailable")
 		return
 	case err != nil:
-		writeJSONBody(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		// The reason names no parent address or dial error: a client's tool result
+		// carries it to a model.
+		writeJSONBody(w, http.StatusBadGateway, map[string]any{"error": parentReadFailed})
 		return
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
