@@ -4,7 +4,6 @@ import { tool } from '@opencode-ai/plugin'
 import * as readline from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
 import { spawnAvenorProcess as defaultSpawnProcess, runAvenorCommand as defaultRunCommand } from './process.js'
-import { sessionLabel } from './label.js'
 import {
   formatAnswerPermissionOutput,
   formatEventsOutput,
@@ -40,8 +39,9 @@ import {
   postBroker,
   publishHarnessName,
   publishLastTurn,
-  boundedRunes,
-  MAX_SESSION_NAME_RUNES,
+  pickSessionLabel,
+  sessionLabel,
+  takenLabelsFromListing,
   resultTool,
   sanitize,
   type MessageProvider,
@@ -140,7 +140,7 @@ export interface AvenorCoreOptions {
     signal?: AbortSignal,
     stdin?: string,
   ) => Promise<{ code: number | null; stdout: string; stderr: string }>
-  /** Derive a session's default display label; defaults to the git-based rule in ./label.js. */
+  /** Derive a session's default display label; defaults to the git-based rule in the shared core. */
   sessionLabel?: (dir: string | undefined) => Promise<string>
 }
 
@@ -1673,31 +1673,6 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     await publishSessionTitle(sessionID, title)
   }
 
-  // The highest -N collision suffix a conversation default label carries, and
-  // that suffix spelled out: the room a truncation must leave for one.
-  const MAX_LABEL_SUFFIX = 9
-  const MAX_LABEL_SUFFIX_TEXT = '-9'
-
-  /**
-   * The label a conversation publishes for its derived base: the base itself
-   * when no peer holds it, then the base-2 … base-9 suffixed variants, the
-   * base cut to leave room for the longest suffix once suffixing starts. When
-   * every variant is taken, or the peers read returned no information, the
-   * unsuffixed base is kept rather than a name invented.
-   */
-  function pickConversationLabel(base: string, taken: Set<string> | undefined): string {
-    if (!taken || !taken.has(base)) return base
-    let stem = boundedRunes(base, MAX_SESSION_NAME_RUNES - MAX_LABEL_SUFFIX_TEXT.length)
-    // A dash at the cut boundary would double with the appended separator.
-    stem = stem.replace(/-+$/, '')
-    if (stem !== '') {
-      for (let n = 2; n <= MAX_LABEL_SUFFIX; n++) {
-        const candidate = `${stem}-${n}`
-        if (!taken.has(candidate)) return candidate
-      }
-    }
-    return base
-  }
 
   /**
    * The labels the broker already holds, read through the conversation's own
@@ -1709,13 +1684,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     const provider = conversationProviders.get(sessionId)
     if (!provider) return undefined
     try {
-      const listing = await provider.peers()
-      if (listing.detail !== undefined) return undefined
-      const taken = new Set<string>()
-      for (const peer of listing.peers) {
-        if (peer.label) taken.add(peer.label)
-      }
-      return taken
+      return takenLabelsFromListing(await provider.peers())
     } catch {
       return undefined
     }
@@ -1759,7 +1728,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       // title landing during it must not be overwritten either.
       const taken = await takenSessionLabels(sessionID)
       if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
-      await publishSessionTitle(sessionID, pickConversationLabel(label, taken))
+      await publishSessionTitle(sessionID, pickSessionLabel(label, taken))
     })
     // A failed naming step must not hold later conversations' labels: the
     // chain keeps a resolved tail while the caller still sees the rejection.

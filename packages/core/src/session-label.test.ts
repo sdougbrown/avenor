@@ -1,15 +1,8 @@
-import { describe, expect, it, mock } from 'bun:test'
+import { describe, expect, it } from 'bun:test'
 
-// The label pipeline imports '@dougbots/avenor-core', which bun cannot resolve
-// to source on its own, so the shared core module is registered from core's
-// source before label.ts loads — the same seam plugin.test.ts uses.
-import * as coreModule from '../../core/src/index.js'
-import { MAX_SESSION_NAME_RUNES, stripDisallowedSessionNameRunes } from '../../core/src/message.js'
 import fixture from '../../../schemas/session-name-rule.json'
-
-mock.module('@dougbots/avenor-core', () => ({ ...coreModule }))
-
-const { labelUsable, sanitizeSessionLabel, sessionLabel } = await import('./label.js')
+import { MAX_SESSION_NAME_RUNES, stripDisallowedSessionNameRunes } from './message.js'
+import { defaultHostLabel, labelUsable, pickSessionLabel, sanitizeSessionLabel, sessionLabel, takenLabelsFromListing } from './session-label.js'
 
 type NameRuleFixture = {
   limit: number
@@ -17,6 +10,18 @@ type NameRuleFixture = {
   cases: Array<{ name: string; input: string; valid: boolean; disallowedRunes: boolean }>
   sanitizeCases: Array<{ name: string; input: string; label: string }>
   deriveCases: Array<{ name: string; toplevel: string; branch: string; label: string }>
+  hostLabelCases: Array<{
+    name: string
+    host: string
+    hostname: string
+    brokerUrl: string
+    dir: string
+    toplevel: string
+    runId: string
+    taken: string[] | null
+    label: string
+  }>
+  pickCases: Array<{ name: string; base: string; taken: string[]; label: string }>
 }
 
 const rule = fixture as NameRuleFixture
@@ -61,4 +66,38 @@ describe('session name rule conformance', () => {
       expect(await sessionLabel('/work', git)).toBe(c.label)
     })
   }
+
+  for (const c of rule.hostLabelCases) {
+    it(`derives host label case: ${c.name}`, () => {
+      const { name: _name, label, taken, ...input } = c
+      expect(defaultHostLabel({ ...input, taken: taken === null ? null : new Set(taken) })).toBe(label)
+    })
+  }
+
+  for (const c of rule.pickCases) {
+    it(`picks case: ${c.name}`, () => {
+      expect(pickSessionLabel(c.base, new Set(c.taken))).toBe(c.label)
+    })
+  }
+})
+
+describe('takenLabelsFromListing', () => {
+  const peers = [
+    { run_id: 'a', label: 'one' },
+    { run_id: 'b', label: 'two' },
+    { run_id: 'c' },
+    { run_id: 'd', label: '' },
+  ]
+
+  it('collects the labels the listed peers hold', () => {
+    expect(takenLabelsFromListing({ peers })).toEqual(new Set(['one', 'two']))
+  })
+
+  it('leaves out the excluded run', () => {
+    expect(takenLabelsFromListing({ peers }, 'a')).toEqual(new Set(['two']))
+  })
+
+  it('is no information when the listing is marked incomplete', () => {
+    expect(takenLabelsFromListing({ peers, detail: 'one host did not answer' })).toBeUndefined()
+  })
 })

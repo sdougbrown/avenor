@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
+import { hostname as osHostname } from 'node:os'
 import { combinePeerProviders } from './peer-provider.js'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
@@ -29,6 +30,9 @@ import {
   eventsTool,
   extractTurnText,
   getSupervisorClient,
+  brokerIsLocal,
+  defaultHostLabel,
+  gitToplevel,
   inspectTool,
   installAskClaims,
   isClosedSocketError,
@@ -50,6 +54,7 @@ import {
   THINKING_LEVELS,
   validateSpawnSelection,
   runWorkflowTool,
+  takenLabelsFromListing,
   type AskClaims,
   type Client,
   type InspectResult,
@@ -423,6 +428,9 @@ export interface ExtensionOptions {
   subAgentEnv?: SubAgentEnv | null
   /** Explicit central broker configuration; null disables top-level participation. */
   topLevelBrokerUrl?: string | null
+  /** The machine's name for the default label, read only when the broker is on
+   * another machine; injectable so tests can name the machine. */
+  hostname?: () => string
 }
 
 export function createExtension(deps: ExtensionDeps = defaultDeps, options: ExtensionOptions = {}) {
@@ -679,6 +687,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let centralTurnSequence = 0
     let centralPendingTurn: { sequence: number; generation: number; final_output: string; stop_reason: string; truncated: boolean } | null = null
     let topLevelRegistered = false
+    let defaultLabelPosted = false
     let topLevelError: Error | null = null
     let topLevelTerminal = false
     let peerPollAbort: AbortController | null = null
@@ -716,6 +725,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // remembered and not republished; a different name is still sent.
     let refusedSessionName: string | null = null
 
+    // The name the harness gives this session: Pi's own session name, then the
+    // environment's for a top-level session.
+    function harnessSessionName(manager: { getSessionName?: () => string | undefined }): string | undefined {
+      return manager.getSessionName?.() ?? (topLevelEnv ? process.env.AVENOR_SESSION_NAME ?? process.env.AVENOR_LABEL : undefined)
+    }
+
     function publishSessionName(ctx: ExtensionContext): Promise<void> {
       const env = subAgentEnv ?? (topLevelRegistered ? topLevelEnv : null)
       if (!env) return publishChain
@@ -726,7 +741,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // present but reports undefined is a real clear and still publishes.
       const manager = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } }).sessionManager
       if (!manager || typeof manager.getSessionName !== 'function') return publishChain
-      const name = manager.getSessionName() ?? (topLevelEnv ? process.env.AVENOR_SESSION_NAME ?? process.env.AVENOR_LABEL : undefined)
+      const name = harnessSessionName(manager)
       if (publishedSessionName && publishedSessionName.name === name) return publishChain
       if (refusedSessionName === name) return publishChain
       // Record the attempt before it lands so a second read of the same name
@@ -1803,6 +1818,36 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let combinedProvider: MessageProvider | null = null
     let combinedLocalProvider: MessageProvider | null = null
 
+    /**
+     * A top-level session that neither Pi nor the environment named registers
+     * under its minted run id. It takes `[<hostname>-]pi-<repo>` from its
+     * working directory instead, through the replaceable /rename route: a Pi
+     * session name published later through /session_name still outranks it.
+     */
+    async function publishDefaultLabel(ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
+      const env = topLevelEnv
+      const provider = centralProvider
+      if (!env || !provider || defaultLabelPosted) return
+      const manager = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } }).sessionManager
+      if (!manager || typeof manager.getSessionName !== 'function') return
+      const named = () => (harnessSessionName(manager) ?? '') !== ''
+      if (named()) return
+      try {
+        const toplevel = await gitToplevel(ctx.cwd)
+        const hostname = brokerIsLocal(env.brokerUrl, '') ? '' : (options.hostname ?? osHostname)()
+        const taken = takenLabelsFromListing(await provider.peers(), env.runId) ?? null
+        // A name landing during the reads is the person's and wins.
+        if (signal.aborted || env !== topLevelEnv || named()) return
+        const name = defaultHostLabel({ host: 'pi', hostname, brokerUrl: env.brokerUrl, dir: ctx.cwd, toplevel, runId: env.runId, taken })
+        if (name === '') return
+        await provider.rename({ name })
+        defaultLabelPosted = true
+      } catch {
+        // The label is cosmetic: the run stays reachable under its minted id,
+        // and the next session start tries again.
+      }
+    }
+
     async function registerCentralPeer(signal: AbortSignal): Promise<void> {
       if (!topLevelEnv) return
       try {
@@ -1811,7 +1856,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         topLevelRegistered = true
         topLevelError = null
         clearPeerFailure('register')
-        if (sessionCtx) await publishSessionName(sessionCtx)
+        if (sessionCtx) {
+          await publishSessionName(sessionCtx)
+          await publishDefaultLabel(sessionCtx, signal)
+        }
         await publishCentralTurn()
       } catch (error) {
         if (signal.aborted) return
@@ -2162,6 +2210,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       peerFailureReported.clear()
       topLevelEnv = null
       topLevelRegistered = false
+      defaultLabelPosted = false
       topLevelTerminal = false
       topLevelError = null
       centralProvider = null

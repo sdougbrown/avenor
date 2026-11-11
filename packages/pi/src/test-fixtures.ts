@@ -16,6 +16,8 @@ export async function startExtensionHarness(options: {
   ui?: Record<string, any>
   /** The harness's user-defined session name, as pi's session manager reports it. */
   sessionName?: () => string | undefined
+  /** The session's working directory; defaults to /tmp. */
+  cwd?: string
   /** Replaces the whole session-manager mock; without it the default reports `sessionName`. */
   sessionManager?: unknown
   onEmit?: (channel: string, payload: unknown) => void
@@ -80,7 +82,7 @@ export async function startExtensionHarness(options: {
   await createExtension({ ...baseDeps, ...options.deps }, { pollIntervalMs: 5, subAgentEnv: null, ...options.extOptions })(mockPi as any)
 
   const ctx = {
-    cwd: '/tmp',
+    cwd: options.cwd ?? '/tmp',
     sessionManager: options.sessionManager ?? { getSessionName: options.sessionName ?? (() => undefined) },
     ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) },
     // Pi 1.4 ExtensionContext always exposes idle state; idle delivery reads it.

@@ -126,8 +126,14 @@ not acknowledge that capability. Leave `AVENOR_RUN_ID` and
 select the existing provisioned child mode. An incomplete pair is refused.
 
 Pi publishes its session name so other sessions can address `scout`. Without a
-Pi name, `AVENOR_SESSION_NAME` or `AVENOR_LABEL` supplies the display name. Use
-the existing tools:
+Pi name, `AVENOR_SESSION_NAME` or `AVENOR_LABEL` supplies the display name. With
+none of those, a top-level session takes `pi-<repo>` from its git top-level (the
+directory name outside a repository). The machine's short name leads
+(`<hostname>-pi-<repo>`) only when the broker is on another machine. A six
+character run-id tail is added when another session already holds the label,
+when the broker's session list cannot be read in full, or when there is no
+repository. A Pi session name set later replaces the default. Use the existing
+tools:
 
 ```json
 {"action":"ask","target":"scout","message":"Ready?","timeout_ms":30000}
