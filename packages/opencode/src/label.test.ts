@@ -9,13 +9,14 @@ import fixture from '../../../schemas/session-name-rule.json'
 
 mock.module('@dougbots/avenor-core', () => ({ ...coreModule }))
 
-const { labelUsable, sanitizeSessionLabel } = await import('./label.js')
+const { labelUsable, sanitizeSessionLabel, sessionLabel } = await import('./label.js')
 
 type NameRuleFixture = {
   limit: number
   reservedReferences: string[]
   cases: Array<{ name: string; input: string; valid: boolean; disallowedRunes: boolean }>
   sanitizeCases: Array<{ name: string; input: string; label: string }>
+  deriveCases: Array<{ name: string; toplevel: string; branch: string; label: string }>
 }
 
 const rule = fixture as NameRuleFixture
@@ -51,6 +52,13 @@ describe('session name rule conformance', () => {
       expect(sanitizeSessionLabel(c.input)).toBe(c.label)
       // Every label the derivation produces must itself pass the name rule.
       expect(labelUsable(c.label)).toBe(true)
+    })
+  }
+
+  for (const c of rule.deriveCases) {
+    it(`derives case: ${c.name}`, async () => {
+      const git = async (_dir: string, args: string[]) => (args[0] === 'rev-parse' ? c.toplevel : c.branch)
+      expect(await sessionLabel('/work', git)).toBe(c.label)
     })
   }
 })

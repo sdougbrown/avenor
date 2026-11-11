@@ -121,8 +121,14 @@ func derivedWorkLabel(dir string) string {
 	if toplevel == "" {
 		return ""
 	}
+	return joinWorkLabel(toplevel, gitOutput(dir, "branch", "--show-current"))
+}
+
+// joinWorkLabel is the pure half of the derivation: the top-level's base name,
+// plus "@<branch>" for a branch that is not a conventional default one.
+func joinWorkLabel(toplevel, branch string) string {
 	label := filepath.Base(toplevel)
-	if branch := gitOutput(dir, "branch", "--show-current"); branch != "" && !defaultBranchNames[branch] {
+	if branch != "" && !defaultBranchNames[branch] {
 		label += "@" + branch
 	}
 	return label

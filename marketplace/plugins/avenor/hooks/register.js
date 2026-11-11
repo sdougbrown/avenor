@@ -54,6 +54,7 @@
 // top-level function declarations; pass-through is returning undefined,
 // never calling `next`.
 
+import { brokerIsLocal, defaultHostLabel } from "./label.js"
 import { parseAvenorAddress, parseMessageTarget, parseTellTarget, matchSession } from "./addresses.js"
 import {
   mintMessageID,
@@ -123,12 +124,13 @@ async function followRename(d, e, next) {
  * The title comes from the transcript's last custom-title record, which is
  * there as soon as /rename returns, including for a bare /rename whose
  * generated name appears nowhere else; the typed argument stands in when the
- * transcript cannot be read. A session with no title says nothing. The
+ * transcript cannot be read; a caller that already read the title passes it in.
+ * A session with no title says nothing. The
  * broker owns the name rule, so a refused name is logged and the peer record
  * keeps its previous name.
  */
-async function publishSessionTitle(d, typedName) {
-  let name = await transcriptTitle(d)
+async function publishSessionTitle(d, typedName, readTitle) {
+  let name = readTitle !== undefined ? readTitle : await transcriptTitle(d)
   if (name === null) {
     name = typeof typedName === "string" ? typedName.trim() : ""
   }
@@ -314,10 +316,18 @@ async function selfRegister(d) {
     disableLayer("registering with the avenor broker " + brokerURL + " failed: " + errorText(err))
     return false
   }
-  // A provisioned run keeps its supervisor-assigned label. A self-registered
-  // run uses /rename so its environment name does not shadow later renames.
+  // A provisioned run keeps its supervisor-assigned label, and its transcript
+  // opens with that label as the launch name, which no person chose. A
+  // self-registered run uses /rename so its environment name does not shadow
+  // later renames; without one it takes a label from the work it is in. A
+  // resumed session's own title outranks both, so it is read once, ahead of
+  // the default, and published after the label.
   if (!provisioned) {
-    const name = await envSessionName(d)
+    const envName = await envSessionName(d)
+    const resumed = await transcriptTitle(d)
+    const name = envName !== ""
+      ? envName
+      : resumed !== null && resumed !== "" ? "" : await defaultSessionLabel(d)
     if (name !== "") {
       try {
         await brokerPost(d, "/rename", { name: name })
@@ -325,16 +335,68 @@ async function selfRegister(d) {
         await logLayer(d, "rename failed: " + errorText(err))
       }
     }
-  }
-  // A resumed session already carries the name its person gave it. A
-  // provisioned run keeps the supervisor's label: its transcript opens with
-  // that label as the launch name, which no person chose.
-  if (!provisioned) {
-    await publishSessionTitle(d, "")
+    await publishSessionTitle(d, "", resumed)
   }
   const path = provisioned ? "provisioned run " : "self-registered run "
   await logLayer(d, "peer layer on (" + path + broker.runID + ", broker " + broker.url + ")")
   return true
+}
+
+/**
+ * The label a session takes when nobody named it: "[<hostname>-]claude-<repo>"
+ * from the session's directory, with a run-id tail where the name alone is not
+ * unique (see hooks/label.js). Empty means no label derives, and the run keeps
+ * its minted id.
+ */
+async function defaultSessionLabel(d) {
+  try {
+    const dir = await d.session.root()
+    const toplevel = await gitAnswer(d, dir, ["rev-parse", "--show-toplevel"])
+    // The machine's name matters only when the broker is on another machine.
+    const hostname = brokerIsLocal(broker.url, "") ? "" : await hostnameOf(d)
+    return defaultHostLabel({
+      host: "claude",
+      hostname: hostname,
+      brokerUrl: broker.url,
+      dir: dir,
+      toplevel: toplevel,
+      runId: broker.runID,
+      taken: await takenLabels(d),
+    })
+  } catch (err) {
+    return ""
+  }
+}
+
+async function hostnameOf(d) {
+  try {
+    const ran = await d.process.run(["hostname"], { timeoutMs: 5000 })
+    return ran.exitCode === 0 ? ran.stdout.trim() : ""
+  } catch (err) {
+    return ""
+  }
+}
+
+async function gitAnswer(d, dir, args) {
+  try {
+    const ran = await d.process.run(["git", "-C", dir, ...args], { timeoutMs: 5000 })
+    return ran.exitCode === 0 ? ran.stdout.trim() : ""
+  } catch (err) {
+    return ""
+  }
+}
+
+/** The labels the broker lists, or null when the listing is unreadable or partial. */
+async function takenLabels(d) {
+  try {
+    const listing = await readListing(d)
+    if (listing.incomplete !== "" || listing.sessions === null) {
+      return null
+    }
+    return new Set(listing.sessions.map((row) => row && row.label).filter((label) => typeof label === "string"))
+  } catch (err) {
+    return null
+  }
 }
 
 /**
@@ -760,23 +822,37 @@ function toolError(refusal) {
  * TS resolvers apply the same rule to the same field.
  */
 async function resolveTarget(d, ref, allowSelf = false) {
-  const body = await brokerGet(d, "/sessions")
-  const answer = body === null || typeof body !== "object" ? {} : body
-  const incomplete = typeof answer.peers_error === "string" ? answer.peers_error : ""
-  if (incomplete !== "") {
-    return { match: "incomplete", runId: "", candidates: [], generation: "", incomplete: incomplete }
+  const listing = await readListing(d)
+  if (listing.incomplete !== "") {
+    return { match: "incomplete", runId: "", candidates: [], generation: "", incomplete: listing.incomplete }
   }
-  const sessions = Array.isArray(answer.sessions) ? answer.sessions : []
   const targetRef = allowSelf && ref === "self" && broker !== null ? broker.runID : ref
   const excludeRunId = allowSelf || broker === null ? "" : broker.runID
-  const hit = matchSession(sessions, targetRef, excludeRunId)
+  const hit = matchSession(listing.sessions ?? [], targetRef, excludeRunId)
   return {
     match: hit.match,
     runId: hit.runId,
     candidates: hit.candidates,
     label: hit.match === "unique" ? hit.label : "",
-    generation: typeof answer.generation === "string" ? answer.generation : "",
+    generation: listing.generation,
     incomplete: "",
+  }
+}
+
+/**
+ * One fresh read of the broker's /sessions listing, shared by every caller
+ * that must not trust a subset: `incomplete` is the broker's `peers_error`
+ * (empty for a whole listing), `sessions` is the rows or null when the body
+ * carried none, and `generation` is the ask generation the listing advertises.
+ * A transport failure throws.
+ */
+async function readListing(d) {
+  const body = await brokerGet(d, "/sessions")
+  const answer = body === null || typeof body !== "object" ? {} : body
+  return {
+    incomplete: typeof answer.peers_error === "string" ? answer.peers_error : "",
+    sessions: Array.isArray(answer.sessions) ? answer.sessions : null,
+    generation: typeof answer.generation === "string" ? answer.generation : "",
   }
 }
 
