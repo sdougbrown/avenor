@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Shared conformance fixture for the one session display-name rule. This is NOT a wire schema: it pins the rule values and case tables that both the Go side (messaging.ValidSessionName and messaging.StripDisallowedIdentifierRunes in internal/messaging, the label sanitation in internal/stable) and the TypeScript side (the label pipeline in packages/opencode/src/label.ts plus the core rune helpers it imports) must reproduce, so a change on either side that the other does not follow fails a test instead of leaving conversations silently unnamed. 'cases' holds names the rule accepts or refuses; 'disallowedRunes' marks the cases whose input holds runes no identifier may hold, which is what the strip path must remove. 'sanitizeCases' holds inputs mapped to the exact label the derivation must produce. Non-ascii runes are spelled as escapes so the fixture stays diffable. It also pins the work-derived default label: deriveCases (git top-level and branch to the bare label, shared by every derivation) and hostCases (the host prefix a harness-side default adds). pickCases pins the collision suffixing every derivation shares for a base and the labels already taken; the exhausted case (base and -2 to -9 all taken) is deliberately absent because the hosts differ there.",
+  "description": "Shared conformance fixture for the one session display-name rule. This is NOT a wire schema: it pins the rule values and case tables that both the Go side (messaging.ValidSessionName and messaging.StripDisallowedIdentifierRunes in internal/messaging, the label sanitation in internal/stable) and the TypeScript side (the label pipeline in packages/opencode/src/label.ts plus the core rune helpers it imports) must reproduce, so a change on either side that the other does not follow fails a test instead of leaving conversations silently unnamed. 'cases' holds names the rule accepts or refuses; 'disallowedRunes' marks the cases whose input holds runes no identifier may hold, which is what the strip path must remove. 'sanitizeCases' holds inputs mapped to the exact label the derivation must produce. Non-ascii runes are spelled as escapes so the fixture stays diffable. It also pins the work-derived default label: deriveCases (git top-level and branch to the bare label, shared by the supervisor and OpenCode) and, for the harness defaults, hostLabelCases (host, hostname, broker URL, directory, top-level, run id and taken labels to the label).",
   "limit": 64,
   "reservedReferences": [
     "self",
@@ -277,26 +277,6 @@
       "label": "my-repo"
     }
   ],
-  "hostCases": [
-    {
-      "name": "host prefixes the work label",
-      "host": "claude",
-      "work": "avenor",
-      "label": "claude-avenor"
-    },
-    {
-      "name": "host prefixes a branch label",
-      "host": "codex",
-      "work": "avenor@feat-x",
-      "label": "codex-avenor@feat-x"
-    },
-    {
-      "name": "no work yields no label",
-      "host": "claude",
-      "work": "",
-      "label": ""
-    }
-  ],
   "pickCases": [
     {
       "name": "a free base is kept",
@@ -359,6 +339,214 @@
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bb"
       ],
       "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2"
+    }
+  ],
+  "hostLabelCases": [
+    {
+      "name": "a repo on a local broker is the agent and the repo",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-avenor"
+    },
+    {
+      "name": "a loopback name is local",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://localhost:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-avenor"
+    },
+    {
+      "name": "an IPv6 loopback is local",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://[::1]:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-avenor"
+    },
+    {
+      "name": "the machine's own name is local",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "https://fenwick.home.example.com",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-avenor"
+    },
+    {
+      "name": "a broker on another machine adds the hostname",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "https://broker.home.example.com",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "fenwick-claude-avenor"
+    },
+    {
+      "name": "the hostname loses its domain",
+      "host": "claude",
+      "hostname": "fenwick.lan",
+      "brokerUrl": "https://broker.example.com",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "fenwick-claude-avenor"
+    },
+    {
+      "name": "an unknown hostname adds no prefix",
+      "host": "claude",
+      "hostname": "",
+      "brokerUrl": "https://broker.example.com",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-avenor"
+    },
+    {
+      "name": "a linked worktree is named by its own directory",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/_wt/avenor-rename-sync",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-avenor-rename-sync"
+    },
+    {
+      "name": "another host's agent name leads the repo",
+      "host": "codex",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "codex-avenor"
+    },
+    {
+      "name": "a taken label gets the run tail",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [
+        "claude-avenor"
+      ],
+      "label": "claude-avenor-a001f5"
+    },
+    {
+      "name": "a taken label elsewhere is irrelevant",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": [
+        "claude-other"
+      ],
+      "label": "claude-avenor"
+    },
+    {
+      "name": "an unreadable listing gets the run tail",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "claude-a001f5",
+      "taken": null,
+      "label": "claude-avenor-a001f5"
+    },
+    {
+      "name": "no repo names the directory and adds the run tail",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/home/u/notes",
+      "toplevel": "",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-notes-a001f5"
+    },
+    {
+      "name": "a top-level with no usable name falls back to the directory",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/home/u/notes",
+      "toplevel": "/",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-notes-a001f5"
+    },
+    {
+      "name": "the tail is the last six characters of the run id",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/avenor",
+      "runId": "rt_child_0123456789",
+      "taken": [
+        "claude-avenor"
+      ],
+      "label": "claude-avenor-456789"
+    },
+    {
+      "name": "a long name is cut to leave room for the tail",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/Code/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runId": "claude-a001f5",
+      "taken": [
+        "claude-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "label": "claude-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a001f5"
+    },
+    {
+      "name": "nothing to name yields nothing",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/",
+      "toplevel": "",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": ""
+    },
+    {
+      "name": "a name with a space is sanitized",
+      "host": "claude",
+      "hostname": "fenwick",
+      "brokerUrl": "http://127.0.0.1:8787",
+      "dir": "/work/x",
+      "toplevel": "/home/u/my repo",
+      "runId": "claude-a001f5",
+      "taken": [],
+      "label": "claude-my-repo"
     }
   ]
 }

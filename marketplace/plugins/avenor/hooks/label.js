@@ -1,12 +1,12 @@
-// The default display label for a session that no person has named: the host,
-// the git top-level's base name, and "@<branch>" off the default branches.
-// The sanitizing and the work label mirror internal/stable/sessiondefault.go
-// and packages/opencode/src/label.ts; schemas/session-name-rule.json pins all
-// three to the same answers.
+// The default display label for a session that no person has named:
+// "[<hostname>-]<agent>-<repo>", with a short run-id tail where the name alone
+// cannot be trusted to be unique. The sanitizing mirrors
+// internal/stable/sessiondefault.go and packages/core/src/session-label.ts;
+// schemas/session-name-rule.json pins them to the same answers, and its
+// hostLabelCases pin this derivation to the TypeScript one.
 
 const MAX_NAME_RUNES = 64
-const MAX_SUFFIX = 9
-const DEFAULT_BRANCHES = ["main", "master"]
+const TAIL_RUNES = 6
 const RESERVED = ["self", "supervisor"]
 const DISALLOWED = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu
 
@@ -32,44 +32,59 @@ export function baseName(path) {
   return parts.length === 0 ? "" : parts[parts.length - 1]
 }
 
-/** "<repo>" or "<repo>@<branch>" for a git top-level and its checked-out branch. */
-export function workLabel(toplevel, branch) {
-  const repo = baseName(toplevel)
-  const carried = branch !== "" && !DEFAULT_BRANCHES.includes(branch)
-  return sanitizeSessionLabel(carried ? repo + "@" + branch : repo)
-}
-
-/** The label a host's session registers under, or "" when nothing usable derives. */
-export function hostLabel(host, work) {
-  const label = sanitizeSessionLabel(host + "-" + work)
-  return work !== "" && labelUsable(label) ? label : ""
+/** A machine name without its domain: "grace.home.example.com" is "grace". */
+export function shortHost(name) {
+  return name.trim().split(".")[0]
 }
 
 /**
- * The host's default label for a session in dir: the git top-level and branch
- * when git answered, and the directory's own name when it did not or when the
- * top-level yields no usable label.
+ * Whether the broker runs on this machine: a loopback address, or the
+ * machine's own name. An unparseable URL counts as local, so no prefix is
+ * added on a guess.
  */
-export function defaultHostLabel(host, dir, toplevel, branch) {
-  const fromGit = toplevel === "" ? "" : hostLabel(host, workLabel(toplevel, branch))
-  return fromGit !== "" ? fromGit : hostLabel(host, workLabel(dir, ""))
+export function brokerIsLocal(brokerUrl, hostname) {
+  const match = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?(\[[^\]]+\]|[^:/?#]+)/i.exec(brokerUrl)
+  if (match === null) {
+    return true
+  }
+  const host = match[1].toLowerCase()
+  if (host === "localhost" || host === "[::1]" || /^127(\.\d{1,3}){3}$/.test(host)) {
+    return true
+  }
+  return hostname !== "" && shortHost(host) === shortHost(hostname).toLowerCase()
 }
 
-/**
- * The first of base, base-2 … base-9 that no listed peer holds. A listing the
- * caller could not read (null) keeps the base: guessing at unlisted labels
- * would invent names.
- */
-export function pickLabel(base, taken) {
-  if (taken === null || !taken.has(base)) {
+/** The last characters of a run id that tell it from another run's. */
+export function runTail(runId) {
+  return runId.replace(/[^A-Za-z0-9]/g, "").slice(-TAIL_RUNES)
+}
+
+function withTail(base, tail) {
+  if (tail === "") {
     return base
   }
-  const stem = boundedRunes(base, MAX_NAME_RUNES - String(MAX_SUFFIX).length - 1).replace(/-+$/, "")
-  for (let n = 2; n <= MAX_SUFFIX && stem !== ""; n += 1) {
-    const candidate = stem + "-" + n
-    if (!taken.has(candidate)) {
-      return candidate
-    }
+  const stem = boundedRunes(base, MAX_NAME_RUNES - 1 - tail.length).replace(/-+$/, "")
+  return stem === "" ? "" : stem + "-" + tail
+}
+
+/**
+ * The default label for a session of agent `host` in `dir`:
+ * "[<hostname>-]<host>-<repo>". The repo is the git top-level's base name,
+ * which for a linked worktree is the worktree's own directory. The hostname
+ * leads only when the broker is on another machine. The run-id tail is added
+ * when there is no repo to name (the directory stands in), when another peer
+ * holds the label, and when the listing could not be read (`taken` null).
+ * Empty means nothing usable derives and the run keeps its minted id.
+ */
+export function defaultHostLabel({ host, hostname, brokerUrl, dir, toplevel, runId, taken }) {
+  const repo = toplevel === "" ? "" : sanitizeSessionLabel(baseName(toplevel))
+  const work = repo !== "" ? repo : sanitizeSessionLabel(baseName(dir))
+  if (work === "") {
+    return ""
   }
-  return base
+  const prefix = brokerIsLocal(brokerUrl, hostname) ? "" : sanitizeSessionLabel(shortHost(hostname))
+  const base = sanitizeSessionLabel([prefix, host, work].filter((part) => part !== "").join("-"))
+  const crowded = repo === "" || taken === null || taken.has(base)
+  const label = crowded ? withTail(base, runTail(runId)) : base
+  return labelUsable(label) ? label : ""
 }

@@ -54,7 +54,7 @@
 // top-level function declarations; pass-through is returning undefined,
 // never calling `next`.
 
-import { defaultHostLabel, pickLabel } from "./label.js"
+import { brokerIsLocal, defaultHostLabel } from "./label.js"
 import { parseAvenorAddress, parseMessageTarget, parseTellTarget, matchSession } from "./addresses.js"
 import {
   mintMessageID,
@@ -343,17 +343,35 @@ async function selfRegister(d) {
 }
 
 /**
- * The label a session takes when nobody named it: "claude-<repo>[@branch]"
- * from the session's directory, suffixed -2 … -9 when another peer holds it.
- * Empty means no label derives, and the run keeps its minted id.
+ * The label a session takes when nobody named it: "[<hostname>-]claude-<repo>"
+ * from the session's directory, with a run-id tail where the name alone is not
+ * unique (see hooks/label.js). Empty means no label derives, and the run keeps
+ * its minted id.
  */
 async function defaultSessionLabel(d) {
   try {
     const dir = await d.session.root()
     const toplevel = await gitAnswer(d, dir, ["rev-parse", "--show-toplevel"])
-    const branch = toplevel === "" ? "" : await gitAnswer(d, dir, ["branch", "--show-current"])
-    const base = defaultHostLabel("claude", dir, toplevel, branch)
-    return base === "" ? "" : pickLabel(base, await takenLabels(d))
+    // The machine's name matters only when the broker is on another machine.
+    const hostname = brokerIsLocal(broker.url, "") ? "" : await hostnameOf(d)
+    return defaultHostLabel({
+      host: "claude",
+      hostname: hostname,
+      brokerUrl: broker.url,
+      dir: dir,
+      toplevel: toplevel,
+      runId: broker.runID,
+      taken: await takenLabels(d),
+    })
+  } catch (err) {
+    return ""
+  }
+}
+
+async function hostnameOf(d) {
+  try {
+    const ran = await d.process.run(["hostname"], { timeoutMs: 5000 })
+    return ran.exitCode === 0 ? ran.stdout.trim() : ""
   } catch (err) {
     return ""
   }

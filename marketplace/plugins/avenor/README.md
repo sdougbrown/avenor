@@ -120,13 +120,19 @@ already uses for its peers:
   joined it.
 
 A self-registered session with no `AVENOR_SESSION_NAME` or `AVENOR_LABEL`
-registers under a label from the work it is in: `claude-<repo>`, plus
-`@<branch>` when the checked-out branch is not `main` or `master`. The repo is
-the base name of the git top-level of the session's project root, or of the
-root itself outside a repository. Another peer's label of the same name moves
-the session to `-2` … `-9`. The label goes through `/rename`, so a person's
-`/rename` replaces it, and it is chosen once at start. The derivation mirrors
-the supervisor's and OpenCode's, pinned by `schemas/session-name-rule.json`.
+registers under a label from the work it is in: `claude-<repo>`, where `<repo>`
+is the base name of the git top-level of the session's project root (for a
+linked worktree, the worktree's own directory). The branch is not part of the
+label, so it never goes stale. A broker on another machine puts this machine's
+short hostname first (`<hostname>-claude-<repo>`); a loopback broker, or one
+reached by this machine's own name, adds none. A six-character run-id tail
+(`claude-notes-a001f5`) is added where the name alone cannot be trusted to be
+unique: outside a repository (the directory stands in for the repo), when a
+listed peer already holds the label, and when the listing cannot be read. The
+label goes through `/rename`, so a person's `/rename` replaces it, and it is
+chosen once at start. Two sessions that start at the same moment can still both
+read a free label and take it. The derivation is pinned by
+`schemas/session-name-rule.json`.
 
 A self-registered session's name follows Claude Code's `/rename`. After the built-in
 command runs, the layer reads the title it recorded (the last `custom-title`
