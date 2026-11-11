@@ -175,11 +175,36 @@ func shortHost(name string) string {
 	return short
 }
 
+// interfaceAddrs lists this machine's own addresses; tests replace it.
+var interfaceAddrs = net.InterfaceAddrs
+
+// ownsAddress reports whether ip is one of this machine's interface addresses.
+func ownsAddress(ip net.IP) bool {
+	addrs, err := interfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		switch a := addr.(type) {
+		case *net.IPNet:
+			if a.IP.Equal(ip) {
+				return true
+			}
+		case *net.IPAddr:
+			if a.IP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // brokerIsLocal reports whether the broker at rawURL runs on this machine: a
-// loopback address, or the machine's own name. An empty or unparseable URL
-// counts as local, so no prefix is added on a guess. The Claude, Pi and Codex
-// harness defaults apply the same rule to the broker they register on
-// (marketplace/plugins/avenor/hooks/label.js, packages/core/src/session-label.ts).
+// loopback address, one of this machine's own addresses, or the machine's own
+// name. An IP literal is never compared by short name. An empty or unparseable
+// URL counts as local, so no prefix is added on a guess. The harness label
+// defaults (Claude, Pi and Codex) apply the same rule to the broker they
+// register on.
 func brokerIsLocal(rawURL, hostname string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil || parsed.Hostname() == "" {
@@ -189,19 +214,33 @@ func brokerIsLocal(rawURL, hostname string) bool {
 	if host == "localhost" {
 		return true
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return true
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ownsAddress(ip)
 	}
 	return hostname != "" && shortHost(host) == strings.ToLower(shortHost(hostname))
 }
 
 // hostPrefixedLabel leads label with the machine's short hostname, sanitized
-// and cut to the name limit. A hostname that yields nothing usable leaves the
-// label as it was.
+// and cut to the name limit. When the prefix leaves too little room, the repo
+// part of a "<repo>@<branch>" label gives way before the branch does. A
+// hostname that yields nothing usable, or an empty label, leaves the label as
+// it was.
 func hostPrefixedLabel(label, hostname string) string {
 	short := sanitizeSessionLabel(shortHost(hostname))
-	if short == "" {
+	if short == "" || label == "" {
 		return label
+	}
+	room := messaging.MaxSessionNameRunes - len([]rune(short)) - 1
+	if len([]rune(label)) > room {
+		if at := strings.LastIndex(label, "@"); at > 0 {
+			repo, branch := []rune(label[:at]), []rune(label[at:])
+			if repoRoom := room - len(branch); repoRoom > 0 {
+				if len(repo) > repoRoom {
+					repo = repo[:repoRoom]
+				}
+				label = string(repo) + string(branch)
+			}
+		}
 	}
 	if prefixed := sanitizeSessionLabel(short + "-" + label); labelUsable(prefixed) {
 		return prefixed

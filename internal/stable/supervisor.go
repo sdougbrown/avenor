@@ -154,10 +154,9 @@ type Config struct {
 	// working directory.
 	WorkingDir string
 
-	// Hostname is the machine name the supervisor's display label leads with
-	// when its parent broker is on another machine. Empty reads the operating
-	// system's hostname.
-	Hostname string
+	// hostname overrides the operating system's machine name for the display
+	// label rule. Only tests set it.
+	hostname string
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
@@ -2375,7 +2374,9 @@ func (s *Supervisor) parentRunClaims() []messaging.RunClaim {
 // under: the work-derived default for Config.WorkingDir (the process working
 // directory when unset), led by the machine's short hostname when the parent
 // broker is on another machine, collision-suffixed and validated by
-// pickSessionLabel. The run id stays supervisor either way.
+// pickSessionLabel. Only the supervisor's own label takes the prefix: a run
+// this branch owns reaches the parent under the label it holds locally. The run
+// id stays supervisor either way.
 func (s *Supervisor) supervisorRunLabel() string {
 	workingDir, err := s.workingDir()
 	if err != nil {
@@ -2388,11 +2389,11 @@ func (s *Supervisor) supervisorRunLabel() string {
 	return pickSessionLabel(label, s.labelHeldByAnotherRun)
 }
 
-// hostname is the machine name for the label rule: Config.Hostname, else the
+// hostname is the machine name for the label rule: the test override, else the
 // operating system's. An unreadable name is empty, which adds no prefix.
 func (s *Supervisor) hostname() string {
-	if s.config.Hostname != "" {
-		return s.config.Hostname
+	if s.config.hostname != "" {
+		return s.config.hostname
 	}
 	name, err := os.Hostname()
 	if err != nil {

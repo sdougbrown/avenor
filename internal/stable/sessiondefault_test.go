@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -315,6 +316,12 @@ func TestAttemptSpawnDirSharesTheSupervisorWorkingDir(t *testing.T) {
 }
 
 func TestBrokerIsLocal(t *testing.T) {
+	// 192.0.2.10 is this machine's LAN address for the test.
+	own := &net.IPNet{IP: net.ParseIP("192.0.2.10"), Mask: net.CIDRMask(24, 32)}
+	previous := interfaceAddrs
+	interfaceAddrs = func() ([]net.Addr, error) { return []net.Addr{own}, nil }
+	t.Cleanup(func() { interfaceAddrs = previous })
+
 	rows := []struct {
 		url, hostname string
 		local         bool
@@ -326,11 +333,13 @@ func TestBrokerIsLocal(t *testing.T) {
 		{"http://localhost:8787", "fenwick", true},
 		{"http://LOCALHOST:8787", "fenwick", true},
 		{"http://[::1]:8787", "fenwick", true},
+		{"http://192.0.2.10:8787", "fenwick", true},
 		{"https://fenwick.lan:8443", "fenwick.home", true},
 		{"https://FENWICK.lan:8443", "fenwick", true},
+		{"http://192.0.2.11:8787", "fenwick", false},
+		{"http://10.0.0.5:8787", "10", false},
 		{"https://broker.example.com", "fenwick", false},
 		{"https://broker.example.com", "", false},
-		{"http://10.0.0.5:8787", "fenwick", false},
 	}
 	for _, row := range rows {
 		if got := brokerIsLocal(row.url, row.hostname); got != row.local {
@@ -340,16 +349,24 @@ func TestBrokerIsLocal(t *testing.T) {
 }
 
 func TestHostPrefixedLabel(t *testing.T) {
-	if got := hostPrefixedLabel("avenor@feat-x", "grace.home.example.com"); got != "grace-avenor@feat-x" {
-		t.Fatalf("prefixed label = %q", got)
+	rows := []struct{ name, label, hostname, want string }{
+		{"the hostname loses its domain and leads", "avenor@feat-x", "grace.home.example.com", "grace-avenor@feat-x"},
+		{"an unknown hostname changes nothing", "avenor", "", "avenor"},
+		{"an empty label stays empty", "", "fenwick", ""},
+		{"a label that fits is kept whole", strings.Repeat("a", 58), "grace", "grace-" + strings.Repeat("a", 58)},
+		{"the repo gives way before the branch", strings.Repeat("a", 60) + "@feat-x", "grace", "grace-" + strings.Repeat("a", 51) + "@feat-x"},
+		{"a label with no branch is cut from the right", strings.Repeat("a", 70), "grace", "grace-" + strings.Repeat("a", 58)},
 	}
-	if got := hostPrefixedLabel("avenor", ""); got != "avenor" {
-		t.Fatalf("an unknown hostname changed the label to %q", got)
-	}
-	long := strings.Repeat("a", 70)
-	got := hostPrefixedLabel(long, "grace")
-	if n := len([]rune(got)); n != messaging.MaxSessionNameRunes || !messaging.ValidSessionName(got) {
-		t.Fatalf("a long label became %q (%d runes)", got, n)
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			got := hostPrefixedLabel(row.label, row.hostname)
+			if got != row.want {
+				t.Fatalf("hostPrefixedLabel(%q, %q) = %q, want %q", row.label, row.hostname, got, row.want)
+			}
+			if got != "" && !messaging.ValidSessionName(got) {
+				t.Fatalf("%q does not pass the name rule", got)
+			}
+		})
 	}
 }
 
@@ -365,7 +382,7 @@ func TestSupervisorLabelLeadsWithTheHostnameForARemoteParent(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := Config{WorkingDir: repo, Hostname: "fenwick.lan"}
+			cfg := Config{WorkingDir: repo, hostname: "fenwick.lan"}
 			if c.parent != "" {
 				cfg.BrokerParentURL = c.parent
 				cfg.BrokerParentToken = "parent-token"
@@ -375,5 +392,21 @@ func TestSupervisorLabelLeadsWithTheHostnameForARemoteParent(t *testing.T) {
 				t.Fatalf("supervisor display name = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestSupervisorWithNoUsableLabelKeepsTheFallbackForARemoteParent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "supervisor")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sup := newTestSupervisor(t, Config{
+		WorkingDir:        dir,
+		hostname:          "fenwick",
+		BrokerParentURL:   "https://broker.example.com",
+		BrokerParentToken: "parent-token",
+	})
+	if got := sup.broker.DisplayName(messaging.SupervisorRunID); got != "session" {
+		t.Fatalf("supervisor display name = %q, want the fallback label %q", got, "session")
 	}
 }
