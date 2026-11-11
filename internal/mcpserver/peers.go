@@ -13,11 +13,11 @@ import (
 // owns only its rendering: the list block, the rename triple, or last's text
 // plus structured object.
 func (s *Server) handleAvenorPeers(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	raw, peerFile, err := splitCodexPeerFile(toolArguments(req))
+	raw, binding, err := splitPeerFile(toolArguments(req))
 	if err != nil {
 		return toolErrorResult(&router.ToolError{Code: "invalid_request", Message: err.Error(), Facts: map[string]string{}})
 	}
-	surface, err := s.messageSurfaceFor(ctx, raw, peerFile, true)
+	surface, err := s.messageSurfaceFor(ctx, raw, binding, true)
 	if err != nil {
 		return toolErrorResult(err)
 	}
@@ -37,11 +37,11 @@ func (s *Server) handleAvenorPeers(ctx context.Context, req *mcp.CallToolRequest
 // The rendered sentence is the tool's text content and the result object is its
 // structured content, matching the other surfaces that answer this tool.
 func (s *Server) handleAvenorMessage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	raw, peerFile, err := splitCodexPeerFile(toolArguments(req))
+	raw, binding, err := splitPeerFile(toolArguments(req))
 	if err != nil {
 		return toolErrorResult(&router.ToolError{Code: "invalid_request", Message: err.Error(), Facts: map[string]string{}})
 	}
-	surface, err := s.messageSurfaceFor(ctx, raw, peerFile, messageAction(raw) != "resume")
+	surface, err := s.messageSurfaceFor(ctx, raw, messageBinding(binding), messageAction(raw) != "resume")
 	if err != nil {
 		return toolErrorResult(err)
 	}
@@ -187,4 +187,15 @@ func (s *Server) supervisorForPeerKey(key string) string {
 		return info.SupervisorID
 	}
 	return ""
+}
+
+// messageBinding is the peer binding the message tool honors: the one whose
+// host binds that tool, and none otherwise.
+func messageBinding(binding peerBinding) peerBinding {
+	for _, h := range peerHosts {
+		if h.host == binding.host && !h.message {
+			return peerBinding{}
+		}
+	}
+	return binding
 }

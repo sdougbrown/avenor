@@ -22,16 +22,42 @@ import (
 // carries the session record; the hook sets this property after the model's
 // arguments and the model never needs to know it exists. It names a file, never
 // a credential: the record under it is mode 0600 and the broker token stays
-// inside this process.
-const codexPeerFileArg = "codex_peer_file"
+// inside this process. claudePeerFileArg does the same for a Claude Code
+// session, whose plugin hook writes the record.
+const (
+	codexPeerFileArg  = "codex_peer_file"
+	claudePeerFileArg = "claude_peer_file"
+)
 
-// codexPeerRecordVersion is the only record shape this reader understands.
-const codexPeerRecordVersion = 1
+// peerBinding is the session record one call names: the host that wrote it
+// and the file. The zero value is an unbound call, served as the supervisor.
+type peerBinding struct {
+	host string
+	file string
+}
 
-// codexPeerRecord is the identity the session-start hook writes once per Codex
-// thread: the broker run the thread acts as, its own credential, and the broker
-// that minted it.
-type codexPeerRecord struct {
+// peerHosts lists each host that binds a call, keyed by the directory
+// its records live under and the property that names them.
+var peerHosts = []struct {
+	host  string
+	arg   string
+	title string
+	// message reports whether the message tool honors this host's binding.
+	// The Claude plugin serves its own tell, ask and reply and binds only the
+	// peers tool.
+	message bool
+}{
+	{"codex", codexPeerFileArg, "Codex", true},
+	{"claude", claudePeerFileArg, "Claude", false},
+}
+
+// peerRecordVersion is the only record shape this reader understands.
+const peerRecordVersion = 1
+
+// peerRecord is the identity a host's session-start hook writes for one
+// session, in the shape both the Codex and Claude writers emit: the broker run
+// the session acts as, its own credential, and the broker that minted it.
+type peerRecord struct {
 	Version   int    `json:"version"`
 	SessionID string `json:"session_id"`
 	BrokerURL string `json:"broker_url"`
@@ -40,26 +66,31 @@ type codexPeerRecord struct {
 	Label     string `json:"label"`
 }
 
-// codexPeer is one validated record plus the directory its poller owns.
-type codexPeer struct {
-	record codexPeerRecord
+// hostPeer is one validated record plus the directory its poller owns.
+type hostPeer struct {
+	record peerRecord
 	dir    string
 }
 
 // readCodexPeerRecord validates the shape before trusting a byte of it: a
-// regular owner-only file at <root>/peers/codex/<session>/identity.json whose
+// regular owner-only file at <root>/peers/<host>/<session>/identity.json whose
 // record names the same session. Containment is structural rather than rooted
 // at a resolved AVENOR_HOME because the host spawns its MCP server with a
 // narrow environment that need not carry the variable the hook saw.
-func readCodexPeerRecord(file string) (*codexPeer, error) {
+func readCodexPeerRecord(file string) (*hostPeer, error) {
+	return readPeerRecord(file, "codex")
+}
+
+// readPeerRecord reads one host's record under the same checks for every host.
+func readPeerRecord(file, host string) (*hostPeer, error) {
 	clean := filepath.Clean(file)
 	if filepath.Base(clean) != "identity.json" {
-		return nil, fmt.Errorf("not a Codex peer record")
+		return nil, fmt.Errorf("not a peer record")
 	}
 	dir := filepath.Dir(clean)
 	session := filepath.Base(dir)
-	if filepath.Base(filepath.Dir(dir)) != "codex" || filepath.Base(filepath.Dir(filepath.Dir(dir))) != "peers" {
-		return nil, fmt.Errorf("not under the Codex peer records")
+	if filepath.Base(filepath.Dir(dir)) != host || filepath.Base(filepath.Dir(filepath.Dir(dir))) != "peers" {
+		return nil, fmt.Errorf("not under the %s peer records", host)
 	}
 	info, err := os.Lstat(clean)
 	if err != nil {
@@ -75,11 +106,11 @@ func readCodexPeerRecord(file string) (*codexPeer, error) {
 	if err != nil {
 		return nil, err
 	}
-	var record codexPeerRecord
+	var record peerRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("peer record is not valid JSON")
 	}
-	if record.Version != codexPeerRecordVersion {
+	if record.Version != peerRecordVersion {
 		return nil, fmt.Errorf("unsupported peer record version %d", record.Version)
 	}
 	if record.SessionID != session {
@@ -97,7 +128,7 @@ func readCodexPeerRecord(file string) (*codexPeer, error) {
 	if parsed.Scheme == "http" && !loopbackHost(parsed.Hostname()) {
 		return nil, fmt.Errorf("peer record carries a non-loopback plaintext broker URL")
 	}
-	return &codexPeer{record: record, dir: dir}, nil
+	return &hostPeer{record: record, dir: dir}, nil
 }
 
 func loopbackHost(host string) bool {
@@ -110,9 +141,9 @@ func loopbackHost(host string) bool {
 
 // provider builds the shared broker-authenticated provider over this peer's own
 // credentials, so tell, ask, reply, withdraw, peers and last all speak as the
-// Codex session rather than as the supervisor. A reply claims the ask record the
+// bound session rather than as the supervisor. A reply claims the ask record the
 // poller wrote under the peer's asks directory.
-func (p *codexPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
+func (p *hostPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
 	shared, err := childmessaging.NewMessageProvider(messaging.SurfaceMCP, childmessaging.Options{
 		RunID:     p.record.RunID,
 		Token:     p.record.RunToken,
@@ -128,28 +159,39 @@ func (p *codexPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
 	return &askclaim.Provider{MessageProvider: shared, Dir: filepath.Join(p.dir, "asks")}, nil
 }
 
-// splitCodexPeerFile removes the hook's binding from the router's input. The
+// splitPeerFile removes the hook's binding from the router's input. The
 // router validates a closed property set, so the binding never reaches it; a
 // malformed envelope is left alone for the router to report in its own words.
-func splitCodexPeerFile(raw json.RawMessage) (json.RawMessage, string, error) {
+// A call naming two bindings is refused: it would have no single identity.
+func splitPeerFile(raw json.RawMessage) (json.RawMessage, peerBinding, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return raw, "", nil
+		return raw, peerBinding{}, nil
 	}
-	binding, ok := fields[codexPeerFileArg]
-	if !ok {
-		return raw, "", nil
+	var binding peerBinding
+	for _, h := range peerHosts {
+		value, ok := fields[h.arg]
+		if !ok {
+			continue
+		}
+		delete(fields, h.arg)
+		var file string
+		if err := json.Unmarshal(value, &file); err != nil {
+			return nil, peerBinding{}, fmt.Errorf("%s must be a string", h.arg)
+		}
+		if binding.host != "" {
+			return nil, peerBinding{}, fmt.Errorf("a call may carry only one peer binding")
+		}
+		binding = peerBinding{host: h.host, file: file}
 	}
-	delete(fields, codexPeerFileArg)
-	var file string
-	if err := json.Unmarshal(binding, &file); err != nil {
-		return nil, "", fmt.Errorf("codex_peer_file must be a string")
+	if binding.host == "" {
+		return raw, peerBinding{}, nil
 	}
 	cleaned, err := json.Marshal(fields)
 	if err != nil {
-		return nil, "", err
+		return nil, peerBinding{}, err
 	}
-	return cleaned, file, nil
+	return cleaned, binding, nil
 }
 
 // messageSurface is the provider one merged-tool call routes through, plus the
@@ -160,26 +202,25 @@ type messageSurface struct {
 	cleanup        func()
 }
 
-// messageSurfaceFor chooses the caller's identity. A bound Codex call speaks as
-// its own run; resume keeps the owner path because a broker-authenticated run
-// may only continue a run it spawned.
-func (s *Server) messageSurfaceFor(ctx context.Context, raw json.RawMessage, peerFile string, peerAllowed bool) (messageSurface, error) {
-	if peerAllowed && peerFile != "" {
-		peer, err := readCodexPeerRecord(peerFile)
-		if err != nil {
-			return messageSurface{}, &router.ToolError{
+// messageSurfaceFor chooses the caller's identity. A bound Codex or Claude
+// call speaks as its own run; resume keeps the owner path because a
+// broker-authenticated run may only continue a run it spawned.
+func (s *Server) messageSurfaceFor(ctx context.Context, raw json.RawMessage, binding peerBinding, peerAllowed bool) (messageSurface, error) {
+	if peerAllowed && binding.file != "" {
+		refused := func(err error) error {
+			return &router.ToolError{
 				Code:    "refused",
-				Message: "the avenor Codex peer record cannot be used: " + err.Error(),
+				Message: "the avenor " + peerHostTitle(binding.host) + " peer record cannot be used: " + err.Error(),
 				Facts:   map[string]string{},
 			}
 		}
+		peer, err := readPeerRecord(binding.file, binding.host)
+		if err != nil {
+			return messageSurface{}, refused(err)
+		}
 		provider, err := peer.provider(ctx)
 		if err != nil {
-			return messageSurface{}, &router.ToolError{
-				Code:    "refused",
-				Message: "the avenor Codex peer record cannot be used: " + err.Error(),
-				Facts:   map[string]string{},
-			}
+			return messageSurface{}, refused(err)
 		}
 		return messageSurface{provider: provider, cleanup: func() { _ = provider.Close() }}, nil
 	}
@@ -193,6 +234,15 @@ func (s *Server) messageSurfaceFor(ctx context.Context, raw json.RawMessage, pee
 		return messageSurface{}, err
 	}
 	return messageSurface{provider: bound, supervisorPath: resolvedPath, cleanup: cleanup}, nil
+}
+
+func peerHostTitle(host string) string {
+	for _, h := range peerHosts {
+		if h.host == host {
+			return h.title
+		}
+	}
+	return host
 }
 
 // messageAction reads the action the router will route. An absent action is the

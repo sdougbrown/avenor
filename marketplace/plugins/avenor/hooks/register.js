@@ -84,6 +84,7 @@ const FLOOR_PATCH = 311
 const OFF = { enabled: false, reason: "the avenor peer layer has not started" }
 const layer = { ...OFF }
 let broker = null
+let peerRecordDir = ""
 let provisionedRun = false
 let busyTurns = 0
 const pendingReplies = new Map()
@@ -100,6 +101,11 @@ export async function register(on) {
 
   await on("tool.call", { tool: "mcp__avenor__message" }, async (d, e) => serveMessageHook(d, e))
   await on("tool.call", { tool: "mcp__plugin_avenor_avenor__message" }, async (d, e) => serveMessageHook(d, e))
+
+  await on("tool.call", { tool: "mcp__avenor__peers" }, async (d, e, next) => bindPeers(d, e, next))
+  await on("tool.call", { tool: "mcp__plugin_avenor_avenor__peers" }, async (d, e, next) => bindPeers(d, e, next))
+
+  await on("session.end", async (d, e) => removePeerRecord(d, e))
 
   await on("command.run", { command: "rename" }, async (d, e, next) => followRename(d, e, next))
 }
@@ -174,6 +180,123 @@ async function transcriptTitle(d) {
   } catch (err) {
     return null
   }
+}
+
+// --- tool.call on peers: the session's own identity ---
+
+const PEER_DIR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+// The URLs the MCP server accepts in a peer record: https anywhere, plaintext
+// only on this host (internal/mcpserver/peer_record.go readPeerRecord and
+// loopbackHost). Go lowercases the scheme and nothing else: the host must be
+// the lowercase name `localhost`, an IPv4 loopback with no leading zeros, or
+// `[::1]`. A record the server would refuse is not written, because a bound
+// call it refuses answers worse than the supervisor did.
+const LOOPBACK_OR_HTTPS = new RegExp(
+  "^(https://[^/\\s]+|http://(localhost|127(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}|\\[::1\\])(:\\d+)?)(/.*)?$",
+)
+
+function peerRecordUrlAccepted(url) {
+  return LOOPBACK_OR_HTTPS.test(url.replace(/^[A-Za-z][A-Za-z0-9+.-]*:/, (scheme) => scheme.toLowerCase()))
+}
+
+const PEER_BINDINGS = ["claude_peer_file", "codex_peer_file"]
+
+/**
+ * The avenor MCP server answers every peers call as the supervisor, so a
+ * session's own `peers last self` and a rename without a session id land on
+ * the supervisor. A self-registered session names its own record in the call,
+ * and the server then runs the shared router as this run, through the broker
+ * this run registered on. The record path is the only thing added; it is not
+ * a credential. A path the model supplied is never kept.
+ */
+async function bindPeers(d, e, next) {
+  const supplied = PEER_BINDINGS.filter((name) => Object.prototype.hasOwnProperty.call(e, name))
+  const bound = layer.enabled && broker !== null && peerRecordDir !== ""
+  if (!bound && supplied.length === 0) {
+    return undefined
+  }
+  const input = { ...e }
+  for (const name of supplied) {
+    delete input[name]
+  }
+  return next(bound ? { ...input, claude_peer_file: peerRecordDir + "/identity.json" } : input)
+}
+
+/**
+ * Writes this run's broker identity where the MCP server reads it:
+ * <AVENOR_HOME or ~/.avenor>/peers/claude/<run id>/identity.json, owner-only,
+ * through a shell that sets the umask because the host's file write takes no
+ * mode. The directory is keyed by the broker run, which no other process
+ * shares, and not by the Claude session id, which a resume can reuse. The
+ * token travels on standard input, never in an argument. The server refuses a
+ * plaintext broker URL that is not loopback, so none is written for one. A
+ * failure leaves peers calls on the supervisor, as before.
+ */
+async function writePeerRecord(d) {
+  try {
+    if (!PEER_DIR_ID.test(broker.runID) || !peerRecordUrlAccepted(broker.url)) {
+      await logLayer(d, "no peer record for " + broker.runID + ": the broker URL must be https or loopback")
+      return
+    }
+    const home = await envAvenorHome(d)
+    if (home === "") {
+      return
+    }
+    const dir = home + "/peers/claude/" + broker.runID
+    const record = JSON.stringify({
+      version: 1,
+      session_id: broker.runID,
+      broker_url: broker.url,
+      run_id: broker.runID,
+      run_token: broker.token,
+      label: "",
+    })
+    const ran = await d.process.run(
+      ["sh", "-c", 'umask 077 && mkdir -p "$1" && cat > "$1/identity.json.tmp" && mv "$1/identity.json.tmp" "$1/identity.json"', "sh", dir],
+      { stdin: record, timeoutMs: 5000 },
+    )
+    if (ran.exitCode === 0) {
+      peerRecordDir = dir
+    } else {
+      await logLayer(d, "writing the peer record failed: " + ran.stderr.trim())
+    }
+  } catch (err) {
+    await logLayer(d, "writing the peer record failed: " + errorText(err))
+  }
+}
+
+async function removePeerRecord(d, e) {
+  const ended = { sessionId: e.sessionId }
+  // A /clear or a resume ends the conversation and the process goes on as the
+  // same broker run under another session id, so its record stays bound.
+  const goesOn = e.reason === "clear" || e.reason === "resume"
+  if (peerRecordDir === "" || goesOn) {
+    return ended
+  }
+  const dir = peerRecordDir
+  peerRecordDir = ""
+  try {
+    await d.process.run(["rm", "-rf", "--", dir], { timeoutMs: 5000 })
+  } catch (err) {
+    // A crash or a failed removal leaves an owner-only record behind. Its run
+    // id is never reused, so no later session binds to it.
+  }
+  return ended
+}
+
+async function envAvenorHome(d) {
+  let configured
+  let home
+  try {
+    configured = await d.env.get("AVENOR_HOME")
+    home = await d.env.get("HOME")
+  } catch (err) {
+    return ""
+  }
+  if (typeof configured === "string" && configured !== "") {
+    return configured.replace(/\/+$/, "")
+  }
+  return typeof home === "string" && home !== "" ? home.replace(/\/+$/, "") + "/.avenor" : ""
 }
 
 // --- session.send: outbound brokerage ---
@@ -336,6 +459,9 @@ async function selfRegister(d) {
       }
     }
     await publishSessionTitle(d, "", resumed)
+  }
+  if (!provisioned) {
+    await writePeerRecord(d)
   }
   const path = provisioned ? "provisioned run " : "self-registered run "
   await logLayer(d, "peer layer on (" + path + broker.runID + ", broker " + broker.url + ")")

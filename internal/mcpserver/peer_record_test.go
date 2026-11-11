@@ -22,11 +22,16 @@ const testCodexSession = "01a1-test-session"
 
 func writeCodexPeerRecord(t *testing.T, brokerURL, runID, token string) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "peers", "codex", testCodexSession)
+	return writeHostPeerRecord(t, "codex", brokerURL, runID, token)
+}
+
+func writeHostPeerRecord(t *testing.T, host, brokerURL, runID, token string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "peers", host, testCodexSession)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	raw, err := json.Marshal(codexPeerRecord{
+	raw, err := json.Marshal(peerRecord{
 		Version:   1,
 		SessionID: testCodexSession,
 		BrokerURL: brokerURL,
@@ -61,7 +66,7 @@ func TestReadCodexPeerRecordRejectsUnsafeShapes(t *testing.T) {
 	if err := os.MkdirAll(sessionMismatch, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	raw, _ := json.Marshal(codexPeerRecord{
+	raw, _ := json.Marshal(peerRecord{
 		Version: 1, SessionID: testCodexSession, BrokerURL: "http://127.0.0.1:9",
 		RunID: "rt", RunToken: "tok",
 	})
@@ -76,7 +81,8 @@ func TestReadCodexPeerRecordRejectsUnsafeShapes(t *testing.T) {
 
 func TestSplitCodexPeerFile(t *testing.T) {
 	raw := json.RawMessage(`{"action":"tell","target":"claude-a","message":"hi","codex_peer_file":"/tmp/x"}`)
-	cleaned, file, err := splitCodexPeerFile(raw)
+	cleaned, binding, err := splitPeerFile(raw)
+	file := binding.file
 	if err != nil {
 		t.Fatalf("split: %v", err)
 	}
@@ -94,11 +100,72 @@ func TestSplitCodexPeerFile(t *testing.T) {
 		t.Fatalf("other arguments changed: %v", fields)
 	}
 
-	if _, file, err := splitCodexPeerFile(json.RawMessage(`{"action":"list"}`)); err != nil || file != "" {
-		t.Fatalf("absent binding: file=%q err=%v", file, err)
+	if _, binding, err := splitPeerFile(json.RawMessage(`{"action":"list"}`)); err != nil || binding != (peerBinding{}) {
+		t.Fatalf("absent binding: binding=%+v err=%v", binding, err)
 	}
-	if _, _, err := splitCodexPeerFile(json.RawMessage(`{"action":"list","codex_peer_file":123}`)); err == nil {
+	if _, _, err := splitPeerFile(json.RawMessage(`{"action":"list","codex_peer_file":123}`)); err == nil {
 		t.Fatal("a non-string binding was accepted")
+	}
+}
+
+func TestSplitPeerFileNamesTheHost(t *testing.T) {
+	cleaned, binding, err := splitPeerFile(json.RawMessage(`{"action":"list","claude_peer_file":"/tmp/y"}`))
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	if binding != (peerBinding{host: "claude", file: "/tmp/y"}) {
+		t.Fatalf("binding = %+v", binding)
+	}
+	if strings.Contains(string(cleaned), "peer_file") {
+		t.Fatalf("binding survived into the router input: %s", cleaned)
+	}
+	if _, _, err := splitPeerFile(json.RawMessage(`{"action":"list","claude_peer_file":"/a","codex_peer_file":"/b"}`)); err == nil {
+		t.Fatal("a call with two bindings was accepted")
+	}
+}
+
+func TestPeerSurfaceSpeaksAsTheClaudeSession(t *testing.T) {
+	var gotRunID string
+	broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRunID = r.Header.Get(messaging.HeaderRunID)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"messaging_protocol":1,"generation":"g1","sessions":[`+
+			`{"run_id":"claude-a001f5","label":"claude-avenor"},{"run_id":"rt_other","label":"other"}]}`)
+	}))
+	defer broker.Close()
+
+	file := writeHostPeerRecord(t, "claude", broker.URL, "claude-a001f5", "tok_secret")
+	server := &Server{}
+	raw := json.RawMessage(`{"action":"list"}`)
+	surface, err := server.messageSurfaceFor(context.Background(), raw, peerBinding{host: "claude", file: file}, true)
+	if err != nil {
+		t.Fatalf("messageSurfaceFor: %v", err)
+	}
+	defer surface.cleanup()
+	result, err := router.ExecutePeers(context.Background(), surface.provider, raw)
+	if err != nil {
+		t.Fatalf("ExecutePeers: %v", err)
+	}
+	if gotRunID != "claude-a001f5" {
+		t.Fatalf("broker saw run %q, want the Claude session's own", gotRunID)
+	}
+	var self []string
+	for _, peer := range result.Peers {
+		if peer.Self {
+			self = append(self, peer.RunID)
+		}
+	}
+	if len(self) != 1 || self[0] != "claude-a001f5" {
+		t.Fatalf("self marks = %v, want the Claude session's own run", self)
+	}
+}
+
+func TestPeerBindingRefusesAnotherHostsRecord(t *testing.T) {
+	file := writeHostPeerRecord(t, "codex", "http://127.0.0.1:9", "rt_codex", "tok")
+	server := &Server{}
+	_, err := server.messageSurfaceFor(context.Background(), json.RawMessage(`{"action":"list"}`), peerBinding{host: "claude", file: file}, true)
+	if err == nil || !strings.Contains(err.Error(), "Claude peer record cannot be used") {
+		t.Fatalf("a Codex record bound as a Claude one: err=%v", err)
 	}
 }
 
@@ -118,7 +185,7 @@ func TestPeerSurfaceSpeaksAsTheCodexSession(t *testing.T) {
 
 	file := writeCodexPeerRecord(t, broker.URL, "rt_codex", "tok_secret")
 	server := &Server{}
-	surface, err := server.messageSurfaceFor(context.Background(), json.RawMessage(`{"action":"list"}`), file, true)
+	surface, err := server.messageSurfaceFor(context.Background(), json.RawMessage(`{"action":"list"}`), peerBinding{host: "codex", file: file}, true)
 	if err != nil {
 		t.Fatalf("messageSurfaceFor: %v", err)
 	}
@@ -141,7 +208,7 @@ func TestPeerSurfaceSpeaksAsTheCodexSession(t *testing.T) {
 
 func TestMessageSurfaceRejectsAStaleCodexRecord(t *testing.T) {
 	server := &Server{}
-	if _, err := server.messageSurfaceFor(context.Background(), json.RawMessage(`{"action":"list"}`), "/tmp/peers/codex/x/identity.json", true); err == nil {
+	if _, err := server.messageSurfaceFor(context.Background(), json.RawMessage(`{"action":"list"}`), peerBinding{host: "codex", file: "/tmp/peers/codex/x/identity.json"}, true); err == nil {
 		t.Fatal("a missing record was accepted")
 	}
 }
@@ -156,7 +223,7 @@ func TestResumeIgnoresACodexPeerBinding(t *testing.T) {
 		},
 	}
 	raw := json.RawMessage(`{"action":"resume","target":"x","message":"y"}`)
-	if _, err := server.messageSurfaceFor(context.Background(), raw, file, false); err == nil {
+	if _, err := server.messageSurfaceFor(context.Background(), raw, peerBinding{host: "codex", file: file}, false); err == nil {
 		t.Fatal("resume used the peer binding")
 	} else if strings.Contains(err.Error(), "peer record") {
 		t.Fatalf("resume read the peer record: %v", err)
@@ -228,7 +295,7 @@ func TestCodexReplyClaimsThePollersAskRecord(t *testing.T) {
 
 	raw := json.RawMessage(`{"action":"reply","reply_to":"` + id + `","message":"codex answer"}`)
 	server := &Server{}
-	surface, err := server.messageSurfaceFor(t.Context(), raw, file, true)
+	surface, err := server.messageSurfaceFor(t.Context(), raw, peerBinding{host: "codex", file: file}, true)
 	if err != nil {
 		t.Fatalf("messageSurfaceFor: %v", err)
 	}
@@ -247,5 +314,63 @@ func TestCodexReplyClaimsThePollersAskRecord(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(asks, id+".claimed")); err != nil {
 		t.Fatalf("the poller's record was not claimed: %v", err)
+	}
+}
+
+func TestMessageDropsAClaudePeerBinding(t *testing.T) {
+	claude := peerBinding{host: "claude", file: "/tmp/peers/claude/x/identity.json"}
+	if got := messageBinding(claude); got != (peerBinding{}) {
+		t.Fatalf("message kept a Claude binding: %+v", got)
+	}
+	codex := peerBinding{host: "codex", file: "/tmp/peers/codex/x/identity.json"}
+	if got := messageBinding(codex); got != codex {
+		t.Fatalf("message dropped a Codex binding: %+v", got)
+	}
+}
+
+// TestReadCodexPeerRecordBrokerURLs pins the URL rows the Claude plugin's
+// peers-binding test repeats (marketplace/plugins/avenor/test): the hook may
+// write a record only for a URL this reader accepts.
+func TestReadCodexPeerRecordBrokerURLs(t *testing.T) {
+	rows := []struct {
+		url      string
+		accepted bool
+	}{
+		{"http://127.0.0.1:8080", true},
+		{"HTTP://127.0.0.1:8080", true},
+		{"http://127.255.255.254", true},
+		{"http://localhost:8787", true},
+		{"http://[::1]:8080", true},
+		{"https://broker.example.com", true},
+		{"http://Localhost:8787", false},
+		{"http://LOCALHOST:8787", false},
+		{"http://127.000.000.001:8080", false},
+		{"http://127.0.0.256", false},
+		{"http://128.0.0.1", false},
+		{"http://10.0.0.5:8787", false},
+		{"http://broker.example.com", false},
+	}
+	for _, row := range rows {
+		_, err := readPeerRecord(writeHostPeerRecord(t, "claude", row.url, "claude-a", "tok"), "claude")
+		if (err == nil) != row.accepted {
+			t.Errorf("%s: accepted=%v err=%v", row.url, err == nil, err)
+		}
+	}
+}
+
+// TestHooksStripEveryPeerBinding pins the properties the plugin hooks refuse or
+// replace to the ones the server reads (peerHosts): a host added to the table
+// must be named by each hook, or a model could supply that host's record path.
+func TestHooksStripEveryPeerBinding(t *testing.T) {
+	for _, hook := range []string{"hooks/register.js", "hooks/codex/pre-tool-use.mjs"} {
+		src, err := os.ReadFile(filepath.Join("..", "..", "marketplace", "plugins", "avenor", hook))
+		if err != nil {
+			t.Fatalf("read %s: %v", hook, err)
+		}
+		for _, h := range peerHosts {
+			if !strings.Contains(string(src), `"`+h.arg+`"`) {
+				t.Errorf("%s does not name the %s binding property %q", hook, h.host, h.arg)
+			}
+		}
 	}
 }
