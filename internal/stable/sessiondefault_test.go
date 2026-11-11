@@ -318,8 +318,9 @@ func TestAttemptSpawnDirSharesTheSupervisorWorkingDir(t *testing.T) {
 func TestBrokerIsLocal(t *testing.T) {
 	// 192.0.2.10 is this machine's LAN address for the test.
 	own := &net.IPNet{IP: net.ParseIP("192.0.2.10"), Mask: net.CIDRMask(24, 32)}
+	ownAddr := &net.IPAddr{IP: net.ParseIP("192.0.2.77")}
 	previous := interfaceAddrs
-	interfaceAddrs = func() ([]net.Addr, error) { return []net.Addr{own}, nil }
+	interfaceAddrs = func() ([]net.Addr, error) { return []net.Addr{own, ownAddr}, nil }
 	t.Cleanup(func() { interfaceAddrs = previous })
 
 	rows := []struct {
@@ -334,6 +335,7 @@ func TestBrokerIsLocal(t *testing.T) {
 		{"http://LOCALHOST:8787", "fenwick", true},
 		{"http://[::1]:8787", "fenwick", true},
 		{"http://192.0.2.10:8787", "fenwick", true},
+		{"http://192.0.2.77:8787", "fenwick", true},
 		{"https://fenwick.lan:8443", "fenwick.home", true},
 		{"https://FENWICK.lan:8443", "fenwick", true},
 		{"http://192.0.2.11:8787", "fenwick", false},
@@ -355,6 +357,8 @@ func TestHostPrefixedLabel(t *testing.T) {
 		{"an empty label stays empty", "", "fenwick", ""},
 		{"a label that fits is kept whole", strings.Repeat("a", 58), "grace", "grace-" + strings.Repeat("a", 58)},
 		{"the repo gives way before the branch", strings.Repeat("a", 60) + "@feat-x", "grace", "grace-" + strings.Repeat("a", 51) + "@feat-x"},
+		{"a branch too long for any repo is cut after the repo shrinks", "avenor@" + strings.Repeat("b", 80), "grace", "grace-avenor@" + strings.Repeat("b", 51)},
+		{"a long repo and a long branch keep eight runes of the repo", strings.Repeat("a", 30) + "@" + strings.Repeat("b", 60), "grace", "grace-" + strings.Repeat("a", 8) + "@" + strings.Repeat("b", 49)},
 		{"a label with no branch is cut from the right", strings.Repeat("a", 70), "grace", "grace-" + strings.Repeat("a", 58)},
 	}
 	for _, row := range rows {

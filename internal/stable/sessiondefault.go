@@ -220,9 +220,14 @@ func brokerIsLocal(rawURL, hostname string) bool {
 	return hostname != "" && shortHost(host) == strings.ToLower(shortHost(hostname))
 }
 
+// minRepoRunes is the least of a repo name that hostPrefixedLabel keeps when a
+// long branch has to be cut.
+const minRepoRunes = 8
+
 // hostPrefixedLabel leads label with the machine's short hostname, sanitized
 // and cut to the name limit. When the prefix leaves too little room, the repo
-// part of a "<repo>@<branch>" label gives way before the branch does. A
+// part of a "<repo>@<branch>" label gives way before the branch does, down to
+// minRepoRunes; a branch that still does not fit is cut after that. A
 // hostname that yields nothing usable, or an empty label, leaves the label as
 // it was.
 func hostPrefixedLabel(label, hostname string) string {
@@ -234,11 +239,12 @@ func hostPrefixedLabel(label, hostname string) string {
 	if len([]rune(label)) > room {
 		if at := strings.LastIndex(label, "@"); at > 0 {
 			repo, branch := []rune(label[:at]), []rune(label[at:])
-			if repoRoom := room - len(branch); repoRoom > 0 {
-				if len(repo) > repoRoom {
-					repo = repo[:repoRoom]
-				}
-				label = string(repo) + string(branch)
+			// The repo gives way first, down to minRepoRunes; a branch that
+			// still does not fit is cut after that.
+			repoKeep := min(len(repo), max(room-len(branch), minRepoRunes))
+			branchKeep := min(len(branch), room-repoKeep)
+			if branchKeep > 0 {
+				label = string(repo[:repoKeep]) + string(branch[:branchKeep])
 			}
 		}
 	}
