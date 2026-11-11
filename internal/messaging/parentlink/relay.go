@@ -100,20 +100,29 @@ func (r *relay) sender(from messaging.Identity) string {
 	return from.Sender
 }
 
+// resolve finds the child hop that owns target and the credential its claim
+// carried. The child authenticated the run when it registered it, so the
+// credential a relay presents is the one from the child's own claim, not a
+// second copy this broker keeps elsewhere.
+func (r *relay) resolve(target string) (Hop, error) {
+	next, ok := r.registry.Hop(target)
+	if !ok {
+		return Hop{}, fmt.Errorf("%w: no registered branch owns run %q", messaging.ErrTargetUnavailable, target)
+	}
+	if next.Token == "" {
+		return Hop{}, fmt.Errorf("%w: this broker has no credential for run %q", messaging.ErrTargetUnavailable, target)
+	}
+	return next, nil
+}
+
 // hop posts one relay to the child that owns the target run. The relay names
 // the run by its canonical run ID in that branch: a claim is addressed here
 // under the namespaced key and delivered there as the run the branch itself
 // knows.
 func (r *relay) hop(ctx context.Context, target string, req messaging.TellRequest, sender string, expectsReply bool) error {
-	next, ok := r.registry.Hop(target)
-	if !ok {
-		return fmt.Errorf("%w: no registered branch owns run %q", messaging.ErrTargetUnavailable, target)
-	}
-	// The child authenticated this run when it registered it, so the credential
-	// the relay posts is the one from the child's own claim, not a second copy
-	// this broker keeps elsewhere.
-	if next.Token == "" {
-		return fmt.Errorf("%w: this broker has no credential for run %q", messaging.ErrTargetUnavailable, target)
+	next, err := r.resolve(target)
+	if err != nil {
+		return err
 	}
 	body, err := json.Marshal(map[string]any{
 		"run_id":          next.RunID,
@@ -185,12 +194,9 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.TellReques
 // used, not by the run's canonical ID in the child. A read has no side effect on
 // the registry: the claim stays for the write relay to retire.
 func (r *relay) Last(ctx context.Context, target string) (messaging.PeerLast, error) {
-	next, ok := r.registry.Hop(target)
-	if !ok {
-		return messaging.PeerLast{}, fmt.Errorf("%w: no registered branch owns run %q", messaging.ErrTargetUnavailable, target)
-	}
-	if next.Token == "" {
-		return messaging.PeerLast{}, fmt.Errorf("%w: this broker has no credential for run %q", messaging.ErrTargetUnavailable, target)
+	next, err := r.resolve(target)
+	if err != nil {
+		return messaging.PeerLast{}, err
 	}
 	query := url.Values{"target": {next.RunID}}
 	httpReq, err := http.NewRequest(http.MethodGet, next.Endpoint+pathLast+"?"+query.Encode(), nil)

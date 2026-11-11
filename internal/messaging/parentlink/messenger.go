@@ -242,7 +242,7 @@ func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 // on the runs it holds.
 func (m *Messenger) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
 	if m.registry.Owns(runID) {
-		if caller, _ := messaging.CallerRun(ctx); m.registry.Owns(caller) {
+		if caller, _ := messaging.CallerRun(ctx); !m.registry.Visible(caller, runID) {
 			return messaging.PeerLast{}, fmt.Errorf("%w: run %q belongs to a child branch", messaging.ErrTargetUnavailable, runID)
 		}
 		return m.down.Last(ctx, runID)

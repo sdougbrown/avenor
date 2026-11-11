@@ -337,25 +337,34 @@ func (r *Registry) Hop(runID string) (Hop, bool) {
 
 // Export narrows a peer listing to what the authenticated caller may see. This
 // broker's own runs are always exported; a run a registered child owns is
-// exported to a caller in that child's own branch and to this broker's own
-// callers (its owned descendants), but never to a caller in a sibling branch.
+// exported to this broker's own callers and hidden from every descendant caller.
 func (r *Registry) Export(peers []messaging.Peer, caller string) []messaging.Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	// The caller's branch is read under the same lock as the peers' owners, so
 	// a registration that lands mid-listing cannot split what the caller is
 	// from what it is shown.
-	_, callerIsDescendant := r.owners[caller]
 	exported := make([]messaging.Peer, 0, len(peers))
 	for _, peer := range peers {
-		// A run a registered child owns is exported only to non-descendant
-		// callers, and is hidden from every descendant caller: a branch already
-		// lists its own runs under the canonical IDs it knows them by, and a
-		// sibling must not see another branch's runs at all.
-		if _, registered := r.owners[peer.RunID]; registered && callerIsDescendant {
-			continue
+		if r.visibleLocked(caller, peer.RunID) {
+			exported = append(exported, peer)
 		}
-		exported = append(exported, peer)
 	}
 	return exported
+}
+
+// Visible reports whether the authenticated caller may see runID. A run a
+// registered child owns is visible only to non-descendant callers: a branch
+// already lists its own runs under the canonical IDs it knows them by, and a
+// sibling must not see another branch's runs at all.
+func (r *Registry) Visible(caller, runID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.visibleLocked(caller, runID)
+}
+
+func (r *Registry) visibleLocked(caller, runID string) bool {
+	_, callerIsDescendant := r.owners[caller]
+	_, owned := r.owners[runID]
+	return !(owned && callerIsDescendant)
 }

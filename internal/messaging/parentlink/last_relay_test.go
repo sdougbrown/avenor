@@ -176,6 +176,35 @@ func TestRelayedReadLeavesTheRegistryUntouched(t *testing.T) {
 	}
 }
 
+// TestRelayedReadRefusesAClaimWithNoCredentialBeforeAnyHTTP pins that a
+// registered run whose claim carries no credential reads as unknown and the
+// relay sends nothing to the child.
+func TestRelayedReadRefusesAClaimWithNoCredentialBeforeAnyHTTP(t *testing.T) {
+	stub := newStubBroker(t, func(stubRequest) (int, string) { return http.StatusOK, `{}` })
+	registry := NewRegistry()
+	if _, err := registry.Register(messaging.DescendantRegistration{
+		ChildID:    "child-one",
+		Endpoint:   stub.URL(),
+		Generation: "gen-a",
+		Runs:       []messaging.RunClaim{{RunID: "run-b", Token: ""}},
+	}); err != nil {
+		t.Fatalf("register the tokenless claim: %v", err)
+	}
+	relay, err := newRelay(Options{Generation: func() string { return "gen-a" }}, registry)
+	if err != nil {
+		t.Fatalf("newRelay: %v", err)
+	}
+	t.Cleanup(func() { _ = relay.Close() })
+
+	_, err = relay.Last(testContext(t), ParentRunKey("child-one", "run-b"))
+	if !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("relay.Last = %v, want ErrTargetUnavailable", err)
+	}
+	if got := stub.countPath(pathLast); got != 0 {
+		t.Fatalf("the child saw %d reads, want the credential guard to fire before any HTTP call", got)
+	}
+}
+
 // TestRelayedReadKeepsAnUnreadableAnswerOutOfTheRunClasses pins that a child
 // whose answer is not a last-turn record is neither an unknown run nor a run
 // with no turn: it reports the protocol failure, which the edges refuse as a
