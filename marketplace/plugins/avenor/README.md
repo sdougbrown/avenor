@@ -146,7 +146,8 @@ writes an owner-only record of the session's broker identity to
 removes it when the session ends (a `/clear` or a resume keeps it, because the
 run goes on). The record is keyed by the broker run, and is written only for a
 loopback or `https` broker URL, the only ones the server accepts. A `tool.call` hook adds the record's path to each `peers` call
-as `claude_peer_file`, replacing any path the model supplied. The MCP server
+as `claude_peer_file`, replacing any path the model supplied. The Codex hook
+refuses a call that carries any host's peer binding argument. The MCP server
 then runs the shared router as that run, through the broker the run registered
 on. `peers last target=self` reads the session's own run, a `peers rename`
 without a `session_id` renames the session, and the list marks the session

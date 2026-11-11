@@ -16,11 +16,11 @@ const SESSION = "3f7e02b6-a704-40c3-8e42-1801ed21afbf"
 const RUN = "claude-abc123"
 const BROKER = "http://127.0.0.1:8787"
 
-async function session(tag, { env = {}, sessionId = SESSION, runExit = 0, brokerUrl = BROKER, rejects = false } = {}) {
+async function session(tag, { env = {}, sessionId = SESSION, runExit = 0, brokerUrl = BROKER, rejects = false, homeFallback = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), "peers-binding-"))
   const hooks = {}
   const calls = []
-  const fullEnv = { AVENOR_BROKER_URL: brokerUrl, AVENOR_HOME: home, ...env }
+  const fullEnv = { AVENOR_BROKER_URL: brokerUrl, ...(homeFallback ? { AVENOR_HOME: "", HOME: home } : { AVENOR_HOME: home }), ...env }
   const d = {
     env: { get: async (name) => fullEnv[name] },
     session: { version: async () => ({ version: "2.1.311", base: "2.1.311" }), id: async () => sessionId, root: async () => "/work/x" },
@@ -183,3 +183,11 @@ for (const [url, accepted] of URL_ROWS) {
     assert.equal(existsSync(file(s.home)), accepted)
   })
 }
+
+test("without AVENOR_HOME the record lands under ~/.avenor and binds peers calls", async () => {
+  const s = await session("home-fallback", { homeFallback: true })
+  const written = join(s.home, ".avenor", "peers", "claude", RUN, "identity.json")
+  assert.equal(existsSync(written), true)
+  assert.equal((statSync(written).mode & 0o777).toString(8), "600")
+  assert.deepEqual(await s.peers({ action: "list" }), { forwarded: { action: "list", claude_peer_file: written } })
+})

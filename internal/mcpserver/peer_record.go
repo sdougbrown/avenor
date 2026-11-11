@@ -51,13 +51,13 @@ var peerHosts = []struct {
 	{"claude", claudePeerFileArg, "Claude", false},
 }
 
-// codexPeerRecordVersion is the only record shape this reader understands.
-const codexPeerRecordVersion = 1
+// peerRecordVersion is the only record shape this reader understands.
+const peerRecordVersion = 1
 
-// codexPeerRecord is the identity the session-start hook writes once per Codex
-// thread: the broker run the thread acts as, its own credential, and the broker
-// that minted it.
-type codexPeerRecord struct {
+// peerRecord is the identity a host's session-start hook writes for one
+// session, in the shape both the Codex and Claude writers emit: the broker run
+// the session acts as, its own credential, and the broker that minted it.
+type peerRecord struct {
 	Version   int    `json:"version"`
 	SessionID string `json:"session_id"`
 	BrokerURL string `json:"broker_url"`
@@ -66,9 +66,9 @@ type codexPeerRecord struct {
 	Label     string `json:"label"`
 }
 
-// codexPeer is one validated record plus the directory its poller owns.
-type codexPeer struct {
-	record codexPeerRecord
+// hostPeer is one validated record plus the directory its poller owns.
+type hostPeer struct {
+	record peerRecord
 	dir    string
 }
 
@@ -77,12 +77,12 @@ type codexPeer struct {
 // record names the same session. Containment is structural rather than rooted
 // at a resolved AVENOR_HOME because the host spawns its MCP server with a
 // narrow environment that need not carry the variable the hook saw.
-func readCodexPeerRecord(file string) (*codexPeer, error) {
+func readCodexPeerRecord(file string) (*hostPeer, error) {
 	return readPeerRecord(file, "codex")
 }
 
 // readPeerRecord reads one host's record under the same checks for every host.
-func readPeerRecord(file, host string) (*codexPeer, error) {
+func readPeerRecord(file, host string) (*hostPeer, error) {
 	clean := filepath.Clean(file)
 	if filepath.Base(clean) != "identity.json" {
 		return nil, fmt.Errorf("not a peer record")
@@ -106,11 +106,11 @@ func readPeerRecord(file, host string) (*codexPeer, error) {
 	if err != nil {
 		return nil, err
 	}
-	var record codexPeerRecord
+	var record peerRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return nil, fmt.Errorf("peer record is not valid JSON")
 	}
-	if record.Version != codexPeerRecordVersion {
+	if record.Version != peerRecordVersion {
 		return nil, fmt.Errorf("unsupported peer record version %d", record.Version)
 	}
 	if record.SessionID != session {
@@ -128,7 +128,7 @@ func readPeerRecord(file, host string) (*codexPeer, error) {
 	if parsed.Scheme == "http" && !loopbackHost(parsed.Hostname()) {
 		return nil, fmt.Errorf("peer record carries a non-loopback plaintext broker URL")
 	}
-	return &codexPeer{record: record, dir: dir}, nil
+	return &hostPeer{record: record, dir: dir}, nil
 }
 
 func loopbackHost(host string) bool {
@@ -143,7 +143,7 @@ func loopbackHost(host string) bool {
 // credentials, so tell, ask, reply, withdraw, peers and last all speak as the
 // bound session rather than as the supervisor. A reply claims the ask record the
 // poller wrote under the peer's asks directory.
-func (p *codexPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
+func (p *hostPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
 	shared, err := childmessaging.NewMessageProvider(messaging.SurfaceMCP, childmessaging.Options{
 		RunID:     p.record.RunID,
 		Token:     p.record.RunToken,

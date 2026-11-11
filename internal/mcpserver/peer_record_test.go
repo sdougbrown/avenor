@@ -31,7 +31,7 @@ func writeHostPeerRecord(t *testing.T, host, brokerURL, runID, token string) str
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	raw, err := json.Marshal(codexPeerRecord{
+	raw, err := json.Marshal(peerRecord{
 		Version:   1,
 		SessionID: testCodexSession,
 		BrokerURL: brokerURL,
@@ -66,7 +66,7 @@ func TestReadCodexPeerRecordRejectsUnsafeShapes(t *testing.T) {
 	if err := os.MkdirAll(sessionMismatch, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	raw, _ := json.Marshal(codexPeerRecord{
+	raw, _ := json.Marshal(peerRecord{
 		Version: 1, SessionID: testCodexSession, BrokerURL: "http://127.0.0.1:9",
 		RunID: "rt", RunToken: "tok",
 	})
@@ -354,6 +354,23 @@ func TestReadCodexPeerRecordBrokerURLs(t *testing.T) {
 		_, err := readPeerRecord(writeHostPeerRecord(t, "claude", row.url, "claude-a", "tok"), "claude")
 		if (err == nil) != row.accepted {
 			t.Errorf("%s: accepted=%v err=%v", row.url, err == nil, err)
+		}
+	}
+}
+
+// TestHooksStripEveryPeerBinding pins the properties the plugin hooks refuse or
+// replace to the ones the server reads (peerHosts): a host added to the table
+// must be named by each hook, or a model could supply that host's record path.
+func TestHooksStripEveryPeerBinding(t *testing.T) {
+	for _, hook := range []string{"hooks/register.js", "hooks/codex/pre-tool-use.mjs"} {
+		src, err := os.ReadFile(filepath.Join("..", "..", "marketplace", "plugins", "avenor", hook))
+		if err != nil {
+			t.Fatalf("read %s: %v", hook, err)
+		}
+		for _, h := range peerHosts {
+			if !strings.Contains(string(src), `"`+h.arg+`"`) {
+				t.Errorf("%s does not name the %s binding property %q", hook, h.host, h.arg)
+			}
 		}
 	}
 }

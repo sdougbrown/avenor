@@ -1,6 +1,9 @@
 // PreToolUse: bind the avenor message and peers tools to this Codex thread.
 // The model's own arguments are passed through untouched; the added record path
-// is the only thing the MCP server reads, and it is not a credential.
+// is the only thing the MCP server reads, and it is not a credential. A peer
+// binding argument is the plugins' alone, whichever host owns it: a call that
+// carries one the model supplied is refused, so a model cannot point the server
+// at another session's record.
 
 import { peerDirFor, readHookInput, readRecord, recordPathFor } from "./common.mjs";
 
@@ -8,14 +11,31 @@ const input = await readHookInput();
 const sessionID = typeof input.session_id === "string" ? input.session_id : "";
 const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
 
-if (peerDirFor(undefined, sessionID) === "" || !/__(message|peers)$/.test(toolName)) {
+// Every property the MCP server reads as a host's record path (peerHosts in
+// internal/mcpserver/peer_record.go).
+const PEER_BINDINGS = ["codex_peer_file", "claude_peer_file"];
+
+if (!/__(message|peers)$/.test(toolName)) {
   passThrough();
 }
+
+const args = input.tool_input !== null && typeof input.tool_input === "object" ? input.tool_input : {};
+if (PEER_BINDINGS.some((name) => Object.prototype.hasOwnProperty.call(args, name))) {
+  process.stdout.write(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: "The avenor plugin sets the peer binding arguments itself; remove them from the call.",
+    },
+  }));
+  process.exit(0);
+}
+
+if (peerDirFor(undefined, sessionID) === "") passThrough();
 
 const record = readRecord(sessionID);
 if (record === null) passThrough();
 
-const args = input.tool_input !== null && typeof input.tool_input === "object" ? input.tool_input : {};
 // Resume is the supervisor's own authority; a broker-authenticated run cannot
 // continue a run it did not spawn, so the unbound surface keeps serving it.
 if (toolName.endsWith("__message") && args.action === "resume") passThrough();
