@@ -110,10 +110,8 @@ export {
   defaultHostLabel,
   gitToplevel,
   labelUsable,
-  pickSessionLabel,
   runTail,
   sanitizeSessionLabel,
-  sessionLabel,
   shortHost,
   takenLabelsFromListing,
 } from './session-label.js'

@@ -133,7 +133,11 @@ conversation's own broker run:
 - **Identity** — the conversation's native title publishes as its harness name
   (`/session_name`), and each settled turn publishes through the peer
   `/last_message` route in per-conversation order, so peers' name and last
-  reads see the conversation they name.
+  reads see the conversation they name. A conversation with no native title
+  takes `opencode-<repo>` from its directory instead — the machine's short
+  hostname first when the broker is on another machine, and a six-character
+  run-id tail where the name alone is not unique — and a later rename
+  outranks it.
 
 ## Child CLI messages
 

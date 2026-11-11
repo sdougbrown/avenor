@@ -3,7 +3,7 @@ import * as nodeChildProcess from 'node:child_process'
 import { tool } from '@opencode-ai/plugin'
 
 import plugin, { createV2EventHandler, evaluatePermissionAsk, permissionAskFromEvent, setupAvenor, stepEndedInfo, toV2ToolResult, v2Host, v2ToolEntry } from './index.js'
-import { sanitizeSessionLabel, sessionLabel } from '@dougbots/avenor-core'
+import { gitToplevel, sanitizeSessionLabel } from '@dougbots/avenor-core'
 
 // The git reader's contract — resolve '' on any error or timeout, never
 // reject — is what makes the once-per-session attempt mark safe, so the real
@@ -554,59 +554,11 @@ describe('toV2ToolResult', () => {
   })
 })
 
-describe('sessionLabel', () => {
-  const git = (answers: Record<string, string>) => async (_dir: string, args: string[]) => answers[args.join(' ')] ?? ''
-
-  test('derives the repo base name and carries a non-default branch', async () => {
-    const label = await sessionLabel('/repo', git({ 'rev-parse --show-toplevel': '/repo', 'branch --show-current': 'feat/561' }))
-    expect(label).toBe('repo@feat-561')
-  })
-
-  test('omits the conventional default branch names', async () => {
-    for (const branch of ['main', 'master']) {
-      const label = await sessionLabel('/repo', git({ 'rev-parse --show-toplevel': '/repo', 'branch --show-current': branch }))
-      expect(label).toBe('repo')
-    }
-  })
-
-  test('falls back to the directory base name when git fails', async () => {
-    const label = await sessionLabel('/home/me/avenor', git({}))
-    expect(label).toBe('avenor')
-  })
-
-  test('yields nothing without a directory', async () => {
-    expect(await sessionLabel(undefined, git({}))).toBe('')
-  })
-
-  test('falls back to the directory base name when the repo top level is a reserved reference', async () => {
-    // A repo named `self` with an ordinary working directory yields the
-    // directory's own base name, not nothing.
-    const label = await sessionLabel('/repos/self/work', git({ 'rev-parse --show-toplevel': '/repos/self', 'branch --show-current': 'main' }))
-    expect(label).toBe('work')
-  })
-
-  test('yields nothing for a reserved reference rather than a name the broker refuses', async () => {
-    // Both the derived repo name and the basename fallback hit the exclusion.
-    expect(await sessionLabel('/home/me/self', git({ 'rev-parse --show-toplevel': '/home/me/self', 'branch --show-current': 'main' }))).toBe('')
-    expect(await sessionLabel('/home/me/self', git({}))).toBe('')
-  })
-
+describe('sanitizeSessionLabel', () => {
   test('sanitizes separators and collapsing whitespace', async () => {
     expect(sanitizeSessionLabel('my repo\\dir name')).toBe('my-repo-dir-name')
     expect(sanitizeSessionLabel('--dashes--in--a--row--')).toBe('dashes-in-a-row')
     expect(sanitizeSessionLabel('a\u0000b')).toBe('ab')
-  })
-
-  test('accepts a 64-rune label containing an astral rune and never passes a longer one whole', async () => {
-    // 63 BMP runes plus one supplementary rune: 64 code points but 65 UTF-16
-    // code units, so a code-unit length check would refuse it.
-    const fits = await sessionLabel('/' + 'a'.repeat(63) + '𝄞', git({}))
-    expect(fits).toBe('a'.repeat(63) + '𝄞')
-    // A 65-rune name is beyond the broker's limit, so the derivation must not
-    // return it whole.
-    const tooLong = await sessionLabel('/' + 'a'.repeat(64) + '𝄞', git({}))
-    expect(Array.from(tooLong).length).toBeLessThanOrEqual(64)
-    expect(tooLong).not.toBe('a'.repeat(64) + '𝄞')
   })
 
   test('truncates to 64 runes without splitting a surrogate pair', async () => {
@@ -617,7 +569,7 @@ describe('sessionLabel', () => {
   })
 })
 
-describe('defaultGitReader', () => {
+describe('gitToplevel', () => {
   beforeEach(() => {
     execFileMock.mockImplementation((_file: string, _args: string[], _options: unknown, callback: (error: Error | null, stdout: string) => void) => {
       callback(new Error('git missing'), '')
@@ -628,19 +580,19 @@ describe('defaultGitReader', () => {
     execFileMock.mockClear()
   })
 
-  test('resolves an empty label when git errors, never rejecting', async () => {
-    // An error falls through to the directory base name; nothing here may
-    // reject, or the once-per-session attempt would leave a bound conversation
-    // unnamed forever.
-    await expect(sessionLabel('/repo/avenor')).resolves.toBe('avenor')
+  test('resolves an empty top-level when git errors, never rejecting', async () => {
+    // An error must land as an empty answer rather than a rejection, or the
+    // once-per-session attempt would leave a bound conversation unnamed
+    // forever: the caller names the directory instead of the repository.
+    await expect(gitToplevel('/repo/avenor')).resolves.toBe('')
   })
 
-  test('resolves an empty label when git is killed by its timeout', async () => {
+  test('resolves an empty top-level when git is killed by its timeout', async () => {
     execFileMock.mockImplementation((_file: string, _args: string[], options: unknown, callback: (error: Error | null, stdout: string) => void) => {
       // The reader bounds each git call at five seconds.
       expect((options as { timeout?: number }).timeout).toBe(5000)
       callback(Object.assign(new Error('command failed'), { killed: true, signal: 'SIGTERM' }), '')
     })
-    await expect(sessionLabel('/repo/avenor')).resolves.toBe('avenor')
+    await expect(gitToplevel('/repo/avenor')).resolves.toBe('')
   })
 })

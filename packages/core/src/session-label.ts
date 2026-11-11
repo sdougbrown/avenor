@@ -1,23 +1,14 @@
 import { execFile } from 'node:child_process'
-import * as nodePath from 'node:path'
 import { MAX_SESSION_NAME_RUNES, RESERVED_SESSION_REFERENCES, stripDisallowedSessionNameRunes } from './message.js'
 import type { PeersProviderResult } from './message.js'
 import { boundedRunes } from './messaging-text.js'
 
 /**
- * The work-derived default display labels for a session. `sessionLabel` and
- * `pickSessionLabel` serve OpenCode: the base name of the git top-level of the
- * session's directory, plus "@<branch>" when the checked-out branch is not one
- * of the conventional default names, mirroring the supervisor's own derivation.
- * `defaultHostLabel` serves Pi and mirrors the Claude plugin's
- * hooks/label.js: "[<hostname>-]<host>-<repo>" with no branch.
+ * The work-derived default display label for a session: `defaultHostLabel`
+ * serves Pi and OpenCode, and mirrors the Claude plugin's hooks/label.js —
+ * "[<hostname>-]<host>-<repo>" with no branch. The supervisor's own
+ * "<repo>[@branch]" label is derived on the Go side (internal/stable).
  */
-
-// The repository's real default branch would mean resolving origin/HEAD — a
-// config or network read on every derivation — so the derivation treats the
-// two conventional names as the default ones instead and carries any other
-// branch in the label.
-const DEFAULT_BRANCH_NAMES = new Set(['main', 'master'])
 
 const GIT_TIMEOUT_MS = 5_000
 
@@ -56,27 +47,10 @@ export function labelUsable(label: string): boolean {
 }
 
 /**
- * The default label for a session working in dir, or an empty string when
- * neither git nor the directory yield anything usable. Both answers come from
- * git itself, so GIT_DIR, linked worktrees and symlinked repositories resolve
- * exactly as git sees them; a missing or unreadable repository falls back to
- * the directory's own base name.
+ * The git top-level of dir, or an empty string when dir is not in a repository.
+ * The answer comes from git itself, so GIT_DIR, linked worktrees and symlinked
+ * repositories resolve exactly as git sees them.
  */
-export async function sessionLabel(dir: string | undefined, git: GitReader = defaultGitReader): Promise<string> {
-  if (!dir) return ''
-  const toplevel = await gitToplevel(dir, git)
-  if (toplevel) {
-    let label = nodePath.basename(toplevel)
-    const branch = await git(dir, ['branch', '--show-current'])
-    if (branch && !DEFAULT_BRANCH_NAMES.has(branch)) label += '@' + branch
-    const candidate = sanitizeSessionLabel(label)
-    if (labelUsable(candidate)) return candidate
-  }
-  const fallback = sanitizeSessionLabel(nodePath.basename(dir))
-  return labelUsable(fallback) ? fallback : ''
-}
-
-/** The git top-level of dir, or an empty string when dir is not in a repository. */
 export function gitToplevel(dir: string, git: GitReader = defaultGitReader): Promise<string> {
   return git(dir, ['rev-parse', '--show-toplevel'])
 }
@@ -150,16 +124,11 @@ export function defaultHostLabel(input: DefaultHostLabelInput): string {
   return labelUsable(label) ? label : ''
 }
 
-// The highest -N collision suffix a default label carries, and that suffix
-// spelled out: the room a truncation must leave for one.
-const MAX_LABEL_SUFFIX = 9
-const MAX_LABEL_SUFFIX_TEXT = '-9'
-
 /**
  * The labels the peers in a listing hold, leaving out the peer whose run id is
  * excludeRunId. A listing marked incomplete (detail set) is no information and
- * yields undefined, so the caller keeps its unsuffixed base rather than guess
- * at labels the listing did not carry.
+ * yields undefined, which the caller passes on as null so the label takes its
+ * run-id tail rather than guess at labels the listing did not carry.
  */
 export function takenLabelsFromListing(listing: PeersProviderResult, excludeRunId?: string): Set<string> | undefined {
   if (listing.detail !== undefined) return undefined
@@ -168,25 +137,4 @@ export function takenLabelsFromListing(listing: PeersProviderResult, excludeRunI
     if (peer.label && peer.run_id !== excludeRunId) taken.add(peer.label)
   }
   return taken
-}
-
-/**
- * The label a session publishes for its derived base: the base itself when no
- * peer holds it, then the base-2 … base-9 suffixed variants, the base cut to
- * leave room for the longest suffix once suffixing starts. When every variant
- * is taken, or the peers read returned no information (undefined), the
- * unsuffixed base is kept rather than a name invented.
- */
-export function pickSessionLabel(base: string, taken: Set<string> | undefined): string {
-  if (!taken || !taken.has(base)) return base
-  let stem = boundedRunes(base, MAX_SESSION_NAME_RUNES - MAX_LABEL_SUFFIX_TEXT.length)
-  // A dash at the cut boundary would double with the appended separator.
-  stem = stem.replace(/-+$/, '')
-  if (stem !== '') {
-    for (let n = 2; n <= MAX_LABEL_SUFFIX; n++) {
-      const candidate = `${stem}-${n}`
-      if (!taken.has(candidate)) return candidate
-    }
-  }
-  return base
 }
