@@ -124,12 +124,13 @@ async function followRename(d, e, next) {
  * The title comes from the transcript's last custom-title record, which is
  * there as soon as /rename returns, including for a bare /rename whose
  * generated name appears nowhere else; the typed argument stands in when the
- * transcript cannot be read. A session with no title says nothing. The
+ * transcript cannot be read; a caller that already read the title passes it in.
+ * A session with no title says nothing. The
  * broker owns the name rule, so a refused name is logged and the peer record
  * keeps its previous name.
  */
-async function publishSessionTitle(d, typedName) {
-  let name = await transcriptTitle(d)
+async function publishSessionTitle(d, typedName, readTitle) {
+  let name = readTitle !== undefined ? readTitle : await transcriptTitle(d)
   if (name === null) {
     name = typeof typedName === "string" ? typedName.trim() : ""
   }
@@ -315,13 +316,14 @@ async function selfRegister(d) {
     disableLayer("registering with the avenor broker " + brokerURL + " failed: " + errorText(err))
     return false
   }
-  // A provisioned run keeps its supervisor-assigned label. A self-registered
-  // run uses /rename so its environment name does not shadow later renames;
-  // without one it takes a label from the work it is in.
+  // A provisioned run keeps its supervisor-assigned label, and its transcript
+  // opens with that label as the launch name, which no person chose. A
+  // self-registered run uses /rename so its environment name does not shadow
+  // later renames; without one it takes a label from the work it is in. A
+  // resumed session's own title outranks both, so it is read once, ahead of
+  // the default, and published after the label.
   if (!provisioned) {
     const envName = await envSessionName(d)
-    // A resumed session's own title outranks a default label, so it is not
-    // derived, listed and renamed first for nothing.
     const resumed = await transcriptTitle(d)
     const name = envName !== ""
       ? envName
@@ -333,12 +335,7 @@ async function selfRegister(d) {
         await logLayer(d, "rename failed: " + errorText(err))
       }
     }
-  }
-  // A resumed session already carries the name its person gave it. A
-  // provisioned run keeps the supervisor's label: its transcript opens with
-  // that label as the launch name, which no person chose.
-  if (!provisioned) {
-    await publishSessionTitle(d, "")
+    await publishSessionTitle(d, "", resumed)
   }
   const path = provisioned ? "provisioned run " : "self-registered run "
   await logLayer(d, "peer layer on (" + path + broker.runID + ", broker " + broker.url + ")")
