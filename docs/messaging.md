@@ -40,7 +40,11 @@ The supervisor's display label is not its run id: it is derived from the
 supervisor's working directory (the base name of the git top-level, plus
 `@<branch>` when the checked-out branch is not `main` or `master` and HEAD
 is not detached), sanitized to the session-name rule, truncated to 64 runes,
-and suffixed `-2`…`-9` when another run already holds it. When the
+led by the machine's short hostname when the supervisor's parent broker is on
+another machine (a loopback address, one of this machine's own addresses, or its
+own name adds none), and suffixed `-2`…`-9` when another run already holds it.
+Only the supervisor's own label takes the prefix: a run its branch owns reaches
+the parent under the label it holds locally. When the
 derivation yields nothing usable the label falls back to the working
 directory's base name, then to the literal label `session`; the reserved
 references (the empty reference, `self`, `supervisor`) are never used as

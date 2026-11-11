@@ -2,6 +2,8 @@ package stable
 
 import (
 	"context"
+	"net"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -170,4 +172,90 @@ func sanitizeSessionLabel(label string) string {
 		label = strings.ReplaceAll(label, "--", "-")
 	}
 	return strings.Trim(truncateSessionLabel(label, messaging.MaxSessionNameRunes), "-")
+}
+
+// shortHost is a machine name without its domain: "grace.home.example.com" is
+// "grace".
+func shortHost(name string) string {
+	short, _, _ := strings.Cut(strings.TrimSpace(name), ".")
+	return short
+}
+
+// interfaceAddrs lists this machine's own addresses; tests replace it.
+var interfaceAddrs = net.InterfaceAddrs
+
+// ownsAddress reports whether ip is one of this machine's interface addresses.
+func ownsAddress(ip net.IP) bool {
+	addrs, err := interfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		switch a := addr.(type) {
+		case *net.IPNet:
+			if a.IP.Equal(ip) {
+				return true
+			}
+		case *net.IPAddr:
+			if a.IP.Equal(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// brokerIsLocal reports whether the broker at rawURL runs on this machine: a
+// loopback address, one of this machine's own addresses, or the machine's own
+// name. An IP literal is never compared by short name. An empty or unparseable
+// URL counts as local, so no prefix is added on a guess. The harness label
+// defaults (Claude, Pi and Codex) apply the same rule to the broker they
+// register on.
+func brokerIsLocal(rawURL, hostname string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Hostname() == "" {
+		return true
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ownsAddress(ip)
+	}
+	return hostname != "" && shortHost(host) == strings.ToLower(shortHost(hostname))
+}
+
+// minRepoRunes is the least of a repo name that hostPrefixedLabel keeps when a
+// long branch has to be cut.
+const minRepoRunes = 8
+
+// hostPrefixedLabel leads label with the machine's short hostname, sanitized
+// and cut to the name limit. When the prefix leaves too little room, the repo
+// part of a "<repo>@<branch>" label gives way before the branch does, down to
+// minRepoRunes; a branch that still does not fit is cut after that. A
+// hostname that yields nothing usable, or an empty label, leaves the label as
+// it was.
+func hostPrefixedLabel(label, hostname string) string {
+	short := sanitizeSessionLabel(shortHost(hostname))
+	if short == "" || label == "" {
+		return label
+	}
+	room := messaging.MaxSessionNameRunes - len([]rune(short)) - 1
+	if len([]rune(label)) > room {
+		if at := strings.LastIndex(label, "@"); at > 0 {
+			repo, branch := []rune(label[:at]), []rune(label[at:])
+			// The repo gives way first, down to minRepoRunes; a branch that
+			// still does not fit is cut after that.
+			repoKeep := min(len(repo), max(room-len(branch), minRepoRunes))
+			branchKeep := min(len(branch), room-repoKeep)
+			if branchKeep > 0 {
+				label = string(repo[:repoKeep]) + string(branch[:branchKeep])
+			}
+		}
+	}
+	if prefixed := sanitizeSessionLabel(short + "-" + label); labelUsable(prefixed) {
+		return prefixed
+	}
+	return label
 }

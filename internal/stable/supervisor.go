@@ -153,6 +153,10 @@ type Config struct {
 	// label from when it registers its own run. Empty uses the process
 	// working directory.
 	WorkingDir string
+
+	// hostname overrides the operating system's machine name for the display
+	// label rule. Only tests set it.
+	hostname string
 }
 
 // DefaultLeaseSweepInterval is the default live lease-expiry cadence: a
@@ -2368,14 +2372,34 @@ func (s *Supervisor) parentRunClaims() []messaging.RunClaim {
 
 // supervisorRunLabel picks the display label the supervisor run registers
 // under: the work-derived default for Config.WorkingDir (the process working
-// directory when unset), collision-suffixed and validated by pickSessionLabel.
-// The run id stays supervisor either way.
+// directory when unset), led by the machine's short hostname when the parent
+// broker is on another machine, collision-suffixed and validated by
+// pickSessionLabel. Only the supervisor's own label takes the prefix: a run
+// this branch owns reaches the parent under the label it holds locally. The run
+// id stays supervisor either way.
 func (s *Supervisor) supervisorRunLabel() string {
 	workingDir, err := s.workingDir()
 	if err != nil {
 		return pickSessionLabel("", s.labelHeldByAnotherRun)
 	}
-	return pickSessionLabel(DefaultSessionLabel(workingDir), s.labelHeldByAnotherRun)
+	label := DefaultSessionLabel(workingDir)
+	if host := s.hostname(); label != "" && !brokerIsLocal(s.config.BrokerParentURL, host) {
+		label = hostPrefixedLabel(label, host)
+	}
+	return pickSessionLabel(label, s.labelHeldByAnotherRun)
+}
+
+// hostname is the machine name for the label rule: the test override, else the
+// operating system's. An unreadable name is empty, which adds no prefix.
+func (s *Supervisor) hostname() string {
+	if s.config.hostname != "" {
+		return s.config.hostname
+	}
+	name, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return name
 }
 
 // labelHeldByAnotherRun reports whether any run other than the supervisor's

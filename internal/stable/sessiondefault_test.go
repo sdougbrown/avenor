@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -311,5 +312,105 @@ func TestAttemptSpawnDirSharesTheSupervisorWorkingDir(t *testing.T) {
 	}
 	if got != dir {
 		t.Fatalf("attempt spawn dir = %q, want the configured working directory %q", got, dir)
+	}
+}
+
+func TestBrokerIsLocal(t *testing.T) {
+	// 192.0.2.10 is this machine's LAN address for the test.
+	own := &net.IPNet{IP: net.ParseIP("192.0.2.10"), Mask: net.CIDRMask(24, 32)}
+	ownAddr := &net.IPAddr{IP: net.ParseIP("192.0.2.77")}
+	previous := interfaceAddrs
+	interfaceAddrs = func() ([]net.Addr, error) { return []net.Addr{own, ownAddr}, nil }
+	t.Cleanup(func() { interfaceAddrs = previous })
+
+	rows := []struct {
+		url, hostname string
+		local         bool
+	}{
+		{"", "fenwick", true},
+		{"not a url", "fenwick", true},
+		{"http://127.0.0.1:8787", "fenwick", true},
+		{"http://127.1.2.3", "fenwick", true},
+		{"http://localhost:8787", "fenwick", true},
+		{"http://LOCALHOST:8787", "fenwick", true},
+		{"http://[::1]:8787", "fenwick", true},
+		{"http://192.0.2.10:8787", "fenwick", true},
+		{"http://192.0.2.77:8787", "fenwick", true},
+		{"https://fenwick.lan:8443", "fenwick.home", true},
+		{"https://FENWICK.lan:8443", "fenwick", true},
+		{"http://192.0.2.11:8787", "fenwick", false},
+		{"http://10.0.0.5:8787", "10", false},
+		{"https://broker.example.com", "fenwick", false},
+		{"https://broker.example.com", "", false},
+	}
+	for _, row := range rows {
+		if got := brokerIsLocal(row.url, row.hostname); got != row.local {
+			t.Errorf("brokerIsLocal(%q, %q) = %v, want %v", row.url, row.hostname, got, row.local)
+		}
+	}
+}
+
+func TestHostPrefixedLabel(t *testing.T) {
+	rows := []struct{ name, label, hostname, want string }{
+		{"the hostname loses its domain and leads", "avenor@feat-x", "grace.home.example.com", "grace-avenor@feat-x"},
+		{"an unknown hostname changes nothing", "avenor", "", "avenor"},
+		{"an empty label stays empty", "", "fenwick", ""},
+		{"a label that fits is kept whole", strings.Repeat("a", 58), "grace", "grace-" + strings.Repeat("a", 58)},
+		{"the repo gives way before the branch", strings.Repeat("a", 60) + "@feat-x", "grace", "grace-" + strings.Repeat("a", 51) + "@feat-x"},
+		{"a branch too long for any repo is cut after the repo shrinks", "avenor@" + strings.Repeat("b", 80), "grace", "grace-avenor@" + strings.Repeat("b", 51)},
+		{"a long repo and a long branch keep eight runes of the repo", strings.Repeat("a", 30) + "@" + strings.Repeat("b", 60), "grace", "grace-" + strings.Repeat("a", 8) + "@" + strings.Repeat("b", 49)},
+		{"a label with no branch is cut from the right", strings.Repeat("a", 70), "grace", "grace-" + strings.Repeat("a", 58)},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			got := hostPrefixedLabel(row.label, row.hostname)
+			if got != row.want {
+				t.Fatalf("hostPrefixedLabel(%q, %q) = %q, want %q", row.label, row.hostname, got, row.want)
+			}
+			if got != "" && !messaging.ValidSessionName(got) {
+				t.Fatalf("%q does not pass the name rule", got)
+			}
+		})
+	}
+}
+
+func TestSupervisorLabelLeadsWithTheHostnameForARemoteParent(t *testing.T) {
+	repo := gitRepoWithBranch(t, "main")
+	cases := []struct {
+		name, parent, want string
+	}{
+		{"a remote parent adds the hostname", "https://broker.example.com", "fenwick-" + filepath.Base(repo)},
+		{"a loopback parent adds none", "http://127.0.0.1:8787", filepath.Base(repo)},
+		{"the machine's own name adds none", "https://fenwick.lan:8443", filepath.Base(repo)},
+		{"a root supervisor adds none", "", filepath.Base(repo)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{WorkingDir: repo, hostname: "fenwick.lan"}
+			if c.parent != "" {
+				cfg.BrokerParentURL = c.parent
+				cfg.BrokerParentToken = "parent-token"
+			}
+			sup := newTestSupervisor(t, cfg)
+			if got := sup.broker.DisplayName(messaging.SupervisorRunID); got != c.want {
+				t.Fatalf("supervisor display name = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestSupervisorWithNoUsableLabelKeepsTheFallbackForARemoteParent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "supervisor")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sup := newTestSupervisor(t, Config{
+		WorkingDir:        dir,
+		hostname:          "fenwick",
+		BrokerParentURL:   "https://broker.example.com",
+		BrokerParentToken: "parent-token",
+	})
+	if got := sup.broker.DisplayName(messaging.SupervisorRunID); got != "session" {
+		t.Fatalf("supervisor display name = %q, want the fallback label %q", got, "session")
 	}
 }
