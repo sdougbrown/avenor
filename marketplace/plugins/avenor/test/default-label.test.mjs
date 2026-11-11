@@ -18,6 +18,7 @@ async function session(tag, {
   argvs = [],
   rootRejects = false,
   logs = [],
+  bodies = [],
   brokerUrl = "http://127.0.0.1:8787",
   hostname = "fenwick",
 } = {}) {
@@ -71,13 +72,19 @@ async function session(tag, {
   })
   await hooks["session.start"](d, { cwd: "/work/avenor", isInteractive: true })
   await new Promise((resolve) => setImmediate(resolve))
-  return posts.filter((p) => p.path === "/rename").map((p) => p.body.name)
+  const renames = posts.filter((p) => p.path === "/rename")
+  bodies.push(...renames.map((p) => p.body))
+  return renames.map((p) => p.body.name)
 }
 
 test("the label is the agent and the repository, with no branch", async () => {
   const argvs = []
-  assert.deepEqual(await session("plain", { argvs }), ["claude-avenor"])
+  const bodies = []
+  assert.deepEqual(await session("plain", { argvs, bodies }), ["claude-avenor"])
   assert.deepEqual(argvs.map((a) => a.argv.slice(3).join(" ")), ["rev-parse --show-toplevel"])
+  // The harness-derived label says so; a broker that checks names makes it
+  // unique instead of refusing it.
+  assert.deepEqual(bodies, [{ name: "claude-avenor", default: true, run_id: RUN, token: "tok" }])
 })
 
 test("a broker on another machine puts the hostname first", async () => {
@@ -128,7 +135,10 @@ test("git runs in the session root with a bounded wait", async () => {
 })
 
 test("an environment name wins over the derived one", async () => {
-  assert.deepEqual(await session("env", { env: { AVENOR_SESSION_NAME: "chosen" } }), ["chosen"])
+  const bodies = []
+  assert.deepEqual(await session("env", { env: { AVENOR_SESSION_NAME: "chosen" }, bodies }), ["chosen"])
+  // A person's name is an explicit rename, so it carries no default marker.
+  assert.deepEqual(bodies, [{ name: "chosen", run_id: RUN, token: "tok" }])
 })
 
 test("a provisioned run keeps the supervisor's label", async () => {

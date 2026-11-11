@@ -135,9 +135,11 @@ reached by this machine's own name, adds none. A six-character run-id tail
 (`claude-notes-a001f5`) is added where the name alone cannot be trusted to be
 unique: outside a repository (the directory stands in for the repo), when a
 listed peer already holds the label, and when the listing cannot be read. The
-label goes through `/rename`, so a person's `/rename` replaces it, and it is
-chosen once at start. Two sessions that start at the same moment can still both
-read a free label and take it. The derivation is pinned by
+label goes through `/rename` marked as the harness's default rather than a
+person's choice, so a broker that checks names makes it unique instead of
+refusing it, and a person's `/rename` still replaces it; it is chosen once at
+start, so two sessions that start at the same moment can still both read a free
+label. The derivation is pinned by
 `schemas/session-name-rule.json`.
 
 A self-registered session answers its own `peers` calls. At start the layer

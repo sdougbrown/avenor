@@ -99,6 +99,18 @@ export interface PeersProviderResult {
 }
 
 /**
+ * One /rename request. `default` marks a label the harness derived rather than
+ * one a person chose: a broker that checks names follows a taken one with the
+ * run's tail instead of refusing it. A broker that predates the field ignores
+ * it, so naming a run this way is safe on either.
+ */
+export interface RenameRequest {
+  sessionId?: string
+  name: string
+  default?: boolean
+}
+
+/**
  * What one bound surface supplies to the router: who it speaks as, how it
  * resolves and reads state, and the action methods only it can perform.
  */
@@ -126,7 +138,8 @@ export interface MessageProvider {
     label?: string
     idempotencyKey?: string
   }): Promise<ProviderResult>
-  rename(req: { sessionId?: string; name: string }): Promise<ProviderResult>
+  /** A broker-backed provider puts `default` on the wire; a host surface renames through its supervisor RPC with the name alone. */
+  rename(req: RenameRequest): Promise<ProviderResult>
   last(runId: string, publicRunId?: string): Promise<ProviderResult>
   peers(): Promise<PeersProviderResult>
   /** Host surfaces that own a turn loop publish their own finished turn. */

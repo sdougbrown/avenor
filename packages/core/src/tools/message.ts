@@ -16,6 +16,7 @@ export type {
   PeerRecord,
   PeersProviderResult,
   ProviderResult,
+  RenameRequest,
   Resolution,
   RunFacts,
 } from '../message.js'

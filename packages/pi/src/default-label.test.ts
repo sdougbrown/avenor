@@ -72,7 +72,15 @@ test('an unnamed top-level session registers under its repository through /renam
   try {
     await waitFor(() => calls.some(call => call.path === '/rename'))
     const rename = calls.find(call => call.path === '/rename')!
-    expect(rename.body).toMatchObject({ name: 'pi-demo-repo', session_id: '' })
+    // The harness-derived label says so, so a broker that checks names makes it
+    // unique instead of refusing it; run_id/token are the ordinary credentials.
+    expect(rename.body).toEqual({
+      session_id: '',
+      name: 'pi-demo-repo',
+      default: true,
+      run_id: expect.any(String),
+      token: expect.any(String),
+    })
     // /session_name is the human-name slot and would outrank a later rename.
     expect(calls.filter(call => call.path === '/session_name').map(call => call.body.name)).not.toContain('pi-demo-repo')
   } finally { await h.eventHandlers.session_shutdown({}, {}) }

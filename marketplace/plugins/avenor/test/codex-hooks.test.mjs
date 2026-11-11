@@ -232,6 +232,7 @@ const SESSION_START = fileURLToPath(new URL("../hooks/codex/session-start.mjs", 
 /** Run the real SessionStart hook against a stub broker; returns what it renamed to. */
 async function renamedTo({ cwd, payload = { cwd }, spawnCwd, env = {}, listing = { sessions: [] }, sessions }) {
   const renames = [];
+  const bodies = [];
   const broker = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (chunk) => { raw += chunk; });
@@ -240,7 +241,9 @@ async function renamedTo({ cwd, payload = { cwd }, spawnCwd, env = {}, listing =
       if (req.url === "/register") return reply({ run_id: JSON.parse(raw).run_id, token: "tok" });
       if (req.url === "/attach") return reply({ run_id: "rt_child", token: "own" });
       if (req.url === "/rename") {
-        renames.push(JSON.parse(raw).name);
+        const body = JSON.parse(raw);
+        renames.push(body.name);
+        bodies.push(body);
         return reply({});
       }
       if (req.url === "/sessions") {
@@ -269,7 +272,7 @@ async function renamedTo({ cwd, payload = { cwd }, spawnCwd, env = {}, listing =
     });
     child.stdin.end(JSON.stringify({ session_id: "01a1-label", hook_event_name: "SessionStart", source: "startup", ...payload }));
     await new Promise((resolve) => child.on("close", resolve));
-    return { renames, record: readRecord("01a1-label", home) };
+    return { renames, bodies, record: readRecord("01a1-label", home) };
   } finally {
     broker.close();
   }
@@ -285,9 +288,12 @@ function repo(name, branch) {
 const tail = (record) => runTail(record.run_id);
 
 test("a self-registered session is named after its repository", async () => {
-  const { renames, record } = await renamedTo({ cwd: repo("avenor", "main") });
+  const { renames, bodies, record } = await renamedTo({ cwd: repo("avenor", "main") });
   assert.deepEqual(renames, ["codex-avenor"]);
   assert.equal(record.label, "codex-avenor");
+  // The derived label says so in the body, so a broker that checks names makes
+  // it unique instead of refusing it.
+  assert.deepEqual(bodies, [{ name: "codex-avenor", default: true, run_id: record.run_id, token: "tok" }]);
 });
 
 test("the branch is not part of the default label", async () => {
@@ -356,9 +362,11 @@ test("a broker on another machine puts this machine's hostname first", async () 
 });
 
 test("a launch label from the environment wins over the derived one", async () => {
-  const { renames, record } = await renamedTo({ cwd: repo("avenor", "main"), env: { AVENOR_LABEL: "chosen" } });
+  const { renames, bodies, record } = await renamedTo({ cwd: repo("avenor", "main"), env: { AVENOR_LABEL: "chosen" } });
   assert.deepEqual(renames, ["chosen"]);
   assert.equal(record.label, "chosen");
+  // A person's name is an explicit rename, so it carries no default marker.
+  assert.deepEqual(bodies, [{ name: "chosen", run_id: record.run_id, token: "tok" }]);
 });
 
 test("a provisioned run is not renamed", async () => {
