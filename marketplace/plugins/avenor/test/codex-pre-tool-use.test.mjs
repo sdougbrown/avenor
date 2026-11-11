@@ -50,3 +50,23 @@ test("an unbound call without a binding passes through, and so does another serv
   assert.deepEqual((await run({ args: { action: "list" }, bound: false })).output, {})
   assert.deepEqual((await run({ tool: "mcp__other__thing", args: { claude_peer_file: "/x" }, bound: false })).output, {})
 })
+
+test("the message tool is bound, refused and passed through like the peers tool", async () => {
+  const tool = "mcp__avenor__message"
+  const bound = await run({ tool, args: { action: "tell", target: "x", message: "y" }, bound: true })
+  assert.equal(bound.output.hookSpecificOutput.permissionDecision, "allow")
+  assert.deepEqual(bound.output.hookSpecificOutput.updatedInput, {
+    action: "tell",
+    target: "x",
+    message: "y",
+    codex_peer_file: recordPathFor(bound.home, SESSION),
+  })
+
+  // Resume is the supervisor's authority: the unbound surface keeps serving it.
+  assert.deepEqual((await run({ tool, args: { action: "resume", target: "x", message: "y" }, bound: true })).output, {})
+
+  for (const name of ["claude_peer_file", "codex_peer_file"]) {
+    const refused = await run({ tool, args: { action: "tell", target: "x", message: "y", [name]: "/x" }, bound: true })
+    assert.equal(refused.output.hookSpecificOutput.permissionDecision, "deny", name)
+  }
+})

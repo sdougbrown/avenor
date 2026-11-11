@@ -186,7 +186,7 @@ async function transcriptTitle(d) {
 
 const PEER_DIR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 // The URLs the MCP server accepts in a peer record: https anywhere, plaintext
-// only on this host (internal/mcpserver/codex_peer.go readPeerRecord and
+// only on this host (internal/mcpserver/peer_record.go readPeerRecord and
 // loopbackHost). Go lowercases the scheme and nothing else: the host must be
 // the lowercase name `localhost`, an IPv4 loopback with no leading zeros, or
 // `[::1]`. A record the server would refuse is not written, because a bound

@@ -155,7 +155,7 @@ test("a /clear or a resume keeps the record: the run goes on under another sessi
     const s = await session("goes-on-" + reason)
     await s.hooks["session.end"](s.d, { reason, sessionId: SESSION })
     assert.equal(existsSync(file(s.home)), true, reason)
-    assert.ok(await s.peers({ action: "list" }), reason)
+    assert.deepEqual(await s.peers({ action: "list" }), { forwarded: { action: "list", claude_peer_file: file(s.home) } }, reason)
   }
 })
 
