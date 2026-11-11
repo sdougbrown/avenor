@@ -40,11 +40,34 @@ func TestSupervisorLastReadsARunItsParentHolds(t *testing.T) {
 		t.Fatalf("SessionLast(parent run) = %+v, want the recorded turn with its time", record)
 	}
 
+	status, body := getLastMessage(t, sup, "hub-run")
+	if status != http.StatusOK || body.RunID != "hub-run" || !body.HasRecord || body.FinalOutput != "reviewed the diff" {
+		t.Fatalf("/last_message = %d %+v, want the parent's turn", status, body)
+	}
+
+	_, _, err = sup.SessionLast("nobody")
+	var toolErr *router.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "unknown_target" {
+		t.Fatalf("SessionLast(unknown run) error = %v, want unknown_target", err)
+	}
+}
+
+// lastMessageBody is the /last_message fields these tests read.
+type lastMessageBody struct {
+	RunID       string `json:"run_id"`
+	HasRecord   bool   `json:"has_record"`
+	FinalOutput string `json:"final_output"`
+}
+
+// getLastMessage reads /last_message from the supervisor's broker as a run it
+// holds, the way a branch's own client does.
+func getLastMessage(t *testing.T, sup *Supervisor, target string) (int, lastMessageBody) {
+	t.Helper()
 	token, err := sup.broker.CreateRun("rt_local", "local")
 	if err != nil {
 		t.Fatalf("create a local run: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodGet, "http://"+sup.broker.Addr()+"/last_message?target=hub-run", nil)
+	req, err := http.NewRequest(http.MethodGet, "http://"+sup.broker.Addr()+"/last_message?target="+target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,22 +78,42 @@ func TestSupervisorLastReadsARunItsParentHolds(t *testing.T) {
 		t.Fatalf("GET /last_message: %v", err)
 	}
 	defer resp.Body.Close()
-	var body struct {
-		RunID       string `json:"run_id"`
-		HasRecord   bool   `json:"has_record"`
-		FinalOutput string `json:"final_output"`
-	}
+	var body lastMessageBody
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode /last_message: %v", err)
 	}
-	if resp.StatusCode != http.StatusOK || body.RunID != "hub-run" || !body.HasRecord || body.FinalOutput != "reviewed the diff" {
-		t.Fatalf("/last_message = %d %+v, want the parent's turn", resp.StatusCode, body)
+	return resp.StatusCode, body
+}
+
+// TestSupervisorLastReportsAParentRunWithNoTurnAsHavingNone pins the no-record
+// answer through the parent: a run the parent holds that has produced no turn is
+// ok=false with no error, and its route answer says has_record=false, so a run
+// with nothing recorded is never reported as having an empty turn.
+func TestSupervisorLastReportsAParentRunWithNoTurnAsHavingNone(t *testing.T) {
+	t.Parallel()
+	parentBroker, _ := startTestParentBroker(t)
+	if _, err := parentBroker.CreateRun("quiet-run", "quiet"); err != nil {
+		t.Fatalf("create the parent's run: %v", err)
+	}
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:     newStableSocketPath(t, "quiet"),
+		MaxRuntimes:       2,
+		BrokerParentURL:   "http://" + parentBroker.Addr(),
+		BrokerParentToken: testLinkToken,
+	})
+	t.Cleanup(func() { _ = sup.Shutdown("kill") })
+
+	record, ok, err := sup.SessionLast("quiet-run")
+	if err != nil || ok {
+		t.Fatalf("SessionLast(parent run with no turn) = (%+v, %v, %v), want no error and ok=false", record, ok, err)
+	}
+	if record.RunID != "quiet-run" {
+		t.Fatalf("SessionLast(parent run with no turn) identity = %+v, want the run's identity", record)
 	}
 
-	_, _, err = sup.SessionLast("nobody")
-	var toolErr *router.ToolError
-	if !errors.As(err, &toolErr) || toolErr.Code != "unknown_target" {
-		t.Fatalf("SessionLast(unknown run) error = %v, want unknown_target", err)
+	status, body := getLastMessage(t, sup, "quiet-run")
+	if status != http.StatusOK || body.RunID != "quiet-run" || body.HasRecord {
+		t.Fatalf("/last_message = %d %+v, want 200 with has_record=false", status, body)
 	}
 }
 
@@ -101,8 +144,9 @@ func TestSupervisorLastRefusesARunAnotherBranchOwns(t *testing.T) {
 }
 
 // TestSupervisorLastReportsAnUnreachableParentApartFromAMissingRun pins the
-// failure class end to end: a parent that has gone away is a failed read, not an
-// unknown target, and its reason names no parent address.
+// failure class end to end: a parent that has gone away is a refused read, not
+// an unknown target, whose code is not the invalid-request class a malformed
+// call gets and whose reason names no parent address.
 func TestSupervisorLastReportsAnUnreachableParentApartFromAMissingRun(t *testing.T) {
 	t.Parallel()
 	parentBroker, _ := startTestParentBroker(t)
@@ -126,8 +170,8 @@ func TestSupervisorLastReportsAnUnreachableParentApartFromAMissingRun(t *testing
 		t.Fatal("SessionLast with the parent gone succeeded")
 	}
 	var toolErr *router.ToolError
-	if errors.As(err, &toolErr) {
-		t.Fatalf("SessionLast with the parent gone = %v, want a failed read, not the typed %q refusal", err, toolErr.Code)
+	if !errors.As(err, &toolErr) || toolErr.Code != "refused" || toolErr.Message != messaging.ErrParentReadFailed.Error() {
+		t.Fatalf("SessionLast with the parent gone = %v, want a refused failed read carrying %q", err, messaging.ErrParentReadFailed)
 	}
 	if strings.Contains(err.Error(), parentURL) {
 		t.Fatalf("the failure %q names the parent's address", err)

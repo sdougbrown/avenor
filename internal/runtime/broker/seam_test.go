@@ -843,7 +843,7 @@ func TestLastMessageRouteClassifiesTheSeamsFailure(t *testing.T) {
 	if status != http.StatusBadGateway {
 		t.Fatalf("a failed parent = %d %v, want 502", status, body)
 	}
-	if reason, _ := body["error"].(string); strings.Contains(reason, "10.0.0.9") || reason != parentReadFailed {
+	if reason, _ := body["error"].(string); strings.Contains(reason, "10.0.0.9") || reason != messaging.ErrParentReadFailed.Error() {
 		t.Fatalf("a failed parent reported %q, want the fixed reason", reason)
 	}
 }

@@ -122,3 +122,9 @@ var (
 	ErrTransportClosed      = errors.New("messaging: transport closed")
 	ErrUnsupportedOperation = errors.New("messaging: operation unsupported by this transport")
 )
+
+// ErrParentReadFailed reports a read the parent broker could not answer: it was
+// unreachable or failed. It does not classify as ErrTargetUnavailable, so a
+// caller never reads an outage as a run the parent does not hold. Its text names
+// no parent address and is the reason every layer reports.
+var ErrParentReadFailed = errors.New("the parent broker could not answer the read")
