@@ -19,9 +19,11 @@ const (
 )
 
 // SessionRename is the only place a rename is authorized. It validates the
-// name, resolves the target, applies the caller's level, persists through
-// Broker.RenameRun (the one display-name writer) together with the runtime
-// registry's copy, and publishes session.renamed after the write.
+// name, resolves the target, applies the caller's level, persists through the
+// broker's one display-name writer (Broker.RenameRun, or Broker.RenameRunDefault
+// for a name the harness chose; both end in the same checked write) together
+// with the runtime registry's copy, and publishes session.renamed after the
+// write.
 func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name string) (messaging.RenameResult, error) {
 	return s.sessionRename(caller, sessionID, name, false)
 }

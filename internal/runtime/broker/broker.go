@@ -2016,12 +2016,7 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 			err = b.RenameRun(caller, body.Name)
 		}
 		if err != nil {
-			var taken *LabelTakenError
-			if errors.As(err, &taken) {
-				writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-name")
-				return
-			}
-			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
+			writeRenameError(w, err)
 			return
 		}
 		writeJSONBody(w, http.StatusOK, map[string]any{
@@ -2034,20 +2029,7 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 
 	result, err := handler(caller, body.SessionID, body.Name, body.Default)
 	if err != nil {
-		type toolCoder interface{ ToolCode() string }
-		var coded toolCoder
-		switch {
-		case errors.As(err, &coded) && coded.ToolCode() == "not_permitted":
-			writeCodedError(w, http.StatusForbidden, err.Error(), "not-permitted")
-		case errors.As(err, &coded) && coded.ToolCode() == "invalid_name":
-			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-name")
-		case errors.As(err, &coded) && coded.ToolCode() == "unknown_target":
-			writeCodedError(w, http.StatusNotFound, err.Error(), "unknown-target")
-		case errors.As(err, &coded) && coded.ToolCode() == "ambiguous_name":
-			writeCodedError(w, http.StatusConflict, err.Error(), "ambiguous-name")
-		default:
-			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
-		}
+		writeRenameError(w, err)
 		return
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
@@ -2055,6 +2037,26 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 		"label":          result.Label,
 		"previous_label": result.PreviousLabel,
 	})
+}
+
+// writeRenameError answers a refused rename with the wire code its tool code
+// names, so the broker-only fallback and the supervisor's authority classify
+// the same refusal one way. An error with no tool code is a generic refusal.
+func writeRenameError(w http.ResponseWriter, err error) {
+	type toolCoder interface{ ToolCode() string }
+	var coded toolCoder
+	switch {
+	case errors.As(err, &coded) && coded.ToolCode() == "not_permitted":
+		writeCodedError(w, http.StatusForbidden, err.Error(), "not-permitted")
+	case errors.As(err, &coded) && coded.ToolCode() == "invalid_name":
+		writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-name")
+	case errors.As(err, &coded) && coded.ToolCode() == "unknown_target":
+		writeCodedError(w, http.StatusNotFound, err.Error(), "unknown-target")
+	case errors.As(err, &coded) && coded.ToolCode() == "ambiguous_name":
+		writeCodedError(w, http.StatusConflict, err.Error(), "ambiguous-name")
+	default:
+		writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
+	}
 }
 
 // handleLastMessage reports any known run's recorded last turn. The target is
