@@ -19,6 +19,7 @@ const (
 	pathWait       = "/wait_reply"
 	pathWithdraw   = "/cancel_message"
 	pathSessions   = "/sessions"
+	pathLast       = "/last_message"
 )
 
 // ErrUnsupportedParentProtocol reports a parent broker that answered without

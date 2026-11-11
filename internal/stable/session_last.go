@@ -1,6 +1,8 @@
 package stable
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -14,15 +16,27 @@ import (
 //
 // A tombstone still answers here: this surface reads history by an id the caller
 // already holds, where a routing boundary asks whether a target can take part.
+// A run the broker does not hold is the parent's to answer when this broker has
+// one, so the read follows the same seam a tell does.
 func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, error) {
 	if s.broker == nil {
 		return broker.LastAgentMessage{}, false, fmt.Errorf("broker not available")
 	}
-	if s.broker.GetRun(rtID) == nil {
+	last, err := s.broker.Last(context.Background(), rtID)
+	if errors.Is(err, messaging.ErrTargetUnavailable) {
 		return broker.LastAgentMessage{}, false, unknownTargetError(rtID)
 	}
-	record, ok := s.broker.LastAgentMessage(rtID)
-	return record, ok, nil
+	if err != nil {
+		return broker.LastAgentMessage{}, false, err
+	}
+	return broker.LastAgentMessage{
+		RunID:      last.RunID,
+		Label:      last.Label,
+		Text:       last.Text,
+		StopReason: last.StopReason,
+		Truncated:  last.Truncated,
+		At:         last.At,
+	}, last.HasRecord, nil
 }
 
 // SessionLastSet publishes the supervisor session's last turn. It is the host

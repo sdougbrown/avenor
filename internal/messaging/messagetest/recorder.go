@@ -80,6 +80,10 @@ func (r *Recorder) Holds(runID string) bool {
 	return r.Local.Holds(runID)
 }
 
+func (r *Recorder) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
+	return r.Local.Last(ctx, runID)
+}
+
 func (r *Recorder) Peers(ctx context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	r.mu.Lock()
 	r.peerCalls++

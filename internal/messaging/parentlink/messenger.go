@@ -231,6 +231,17 @@ func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 	return messaging.PeersResult{Peers: peers, Generation: result.Generation}, err
 }
 
+// Last reads one run's recorded last turn. A run the local broker holds, or one
+// a registered child branch owns, is answered here. Anything else goes to the
+// parent, which is the authority on the runs it holds. A tombstone still
+// answers: this reads history.
+func (m *Messenger) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
+	if m.up == nil || m.local.Holds(runID) || m.registry.Owns(runID) {
+		return m.local.Last(ctx, runID)
+	}
+	return m.up.Last(ctx, runID)
+}
+
 // Receive drains the messages queued for the caller. A branch serves them from
 // the same local seam every other operation falls back to.
 func (m *Messenger) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {

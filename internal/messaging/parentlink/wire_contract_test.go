@@ -63,6 +63,7 @@ func TestParentWireDocumentPinsThePathsAndTheCodes(t *testing.T) {
 		"wait":       pathWait,
 		"withdraw":   pathWithdraw,
 		"sessions":   pathSessions,
+		"last":       pathLast,
 	}
 	for name, path := range paths {
 		if documented, ok := doc.Paths[name]; !ok {

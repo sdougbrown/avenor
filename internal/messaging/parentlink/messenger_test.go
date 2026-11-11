@@ -345,3 +345,45 @@ func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
 		t.Fatalf("peers = %v, want the parent's run-distinct listed", seen)
 	}
 }
+
+// TestMessengerLastFollowsTheRoutingRule pins which broker answers a last-turn
+// read: a run the local seam holds is read here, a run it does not hold is the
+// parent's, and a branch with no parent reads only its own.
+func TestMessengerLastFollowsTheRoutingRule(t *testing.T) {
+	parent := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathLast:
+			return http.StatusOK, `{"run_id":"run-hub","label":"hub","has_record":true,"final_output":"from the parent"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	local := newStubMessenger()
+	local.holds["run-local"] = true
+	messenger := newTestMessenger(t, local, parent)
+
+	if last, err := messenger.Last(testContext(t), "run-local"); err != nil || last.Label != "local" {
+		t.Fatalf("Last(local run) = (%+v, %v), want the local seam's answer", last, err)
+	}
+	if got := parent.countPath(pathLast); got != 0 {
+		t.Fatalf("the parent saw %d reads for a local run, want none", got)
+	}
+
+	last, err := messenger.Last(testContext(t), "run-hub")
+	if err != nil || last.Text != "from the parent" {
+		t.Fatalf("Last(parent run) = (%+v, %v), want the parent's answer", last, err)
+	}
+	if got := local.lastTargets(); len(got) != 1 || got[0] != "run-local" {
+		t.Fatalf("the local seam read %v, want only the local run", got)
+	}
+
+	alone := newStubMessenger()
+	standalone := newTestMessenger(t, alone, nil)
+	if _, err := standalone.Last(testContext(t), "run-hub"); err != nil {
+		t.Fatalf("Last without a parent: %v", err)
+	}
+	if got := alone.lastTargets(); len(got) != 1 || got[0] != "run-hub" {
+		t.Fatalf("a branch with no parent read %v locally, want run-hub", got)
+	}
+}

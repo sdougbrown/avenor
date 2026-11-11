@@ -83,6 +83,11 @@ type Seam interface {
 	// run's peer lease says. A target the seam holds is the seam's to answer
 	// or refuse; a forward never carries it past this broker.
 	Holds(runID string) bool
+	// Last reads one run's recorded last turn. A run this seam holds answers from
+	// its own record, a tombstone included, because this reads history. A run it
+	// does not hold is ErrTargetUnavailable here and is the parent's to answer on
+	// a seam that has one.
+	Last(ctx context.Context, runID string) (PeerLast, error)
 }
 
 // IncompletePeerListing is the reason a peer listing that could not be

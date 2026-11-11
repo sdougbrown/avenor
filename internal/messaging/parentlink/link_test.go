@@ -640,3 +640,53 @@ func TestIdleBranchReRegistersWithAReplacedParent(t *testing.T) {
 			generation, pinned, replacement.broker.Store().Generation())
 	}
 }
+
+// TestLinkLastReadsTheTargetsTurnFromTheParent pins the read: the link asks the
+// parent's /last_message route for the named run, authenticated with the
+// credential of a run the parent accepted, and returns the recorded turn.
+func TestLinkLastReadsTheTargetsTurnFromTheParent(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathLast:
+			return http.StatusOK, `{"run_id":"run-b","label":"beta","has_record":true,"final_output":"shipped","stop_reason":"end_turn","at":1700000000}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newTestLink(t, stub, "gen-a")
+
+	last, err := link.Last(testContext(t), "run-b")
+	if err != nil {
+		t.Fatalf("Last: %v", err)
+	}
+	want := messaging.PeerLast{RunID: "run-b", Label: "beta", HasRecord: true, Text: "shipped", StopReason: "end_turn", At: 1700000000}
+	if last != want {
+		t.Fatalf("Last = %+v, want %+v", last, want)
+	}
+	seen := stub.lastRequest(t, pathLast)
+	gotTarget, gotRun, gotToken := seen.Query.Get("target"), seen.Header.Get(messaging.HeaderRunID), seen.Header.Get(messaging.HeaderRunToken)
+	if gotTarget != "run-b" || gotRun != "run-a" || gotToken != "tok-a" {
+		t.Fatalf("the parent saw target %q from %q/%q, want run-b from run-a/tok-a", gotTarget, gotRun, gotToken)
+	}
+}
+
+// TestLinkLastClassifiesAnUnknownRunAsUnavailable pins the refusal: a run the
+// parent does not hold is a target-unavailable answer, which the caller reports
+// as an unknown run instead of a failed parent.
+func TestLinkLastClassifiesAnUnknownRunAsUnavailable(t *testing.T) {
+	stub := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-a"}`
+		case pathLast:
+			return http.StatusNotFound, `{"error":"run not found: run-x","code":"target-unavailable"}`
+		}
+		return http.StatusOK, `{}`
+	})
+	link := newTestLink(t, stub, "gen-a")
+
+	if _, err := link.Last(testContext(t), "run-x"); !errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Last error = %v, want ErrTargetUnavailable", err)
+	}
+}
