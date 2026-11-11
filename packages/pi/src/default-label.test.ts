@@ -7,12 +7,15 @@ import { startExtensionHarness, waitFor } from './test-fixtures.js'
 
 let root = ''
 let repo = ''
+let plain = ''
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'avenor-default-label-'))
   repo = join(root, 'demo-repo')
   mkdirSync(repo)
   execFileSync('git', ['init', '-q', '-b', 'feat-x', repo])
+  plain = join(root, 'plain-dir')
+  mkdirSync(plain)
 })
 
 afterAll(() => rmSync(root, { recursive: true }))
@@ -51,11 +54,17 @@ function broker(heldLabels: string[] = [], sessions?: () => Response | Promise<R
   return calls
 }
 
-async function startTopLevel(sessionName?: () => string | undefined) {
-  return startExtensionHarness({ cwd: repo, sessionName, extOptions: { topLevelBrokerUrl: 'https://broker.test' } })
+async function startTopLevel(sessionName?: () => string | undefined, cwd = repo) {
+  return startExtensionHarness({ cwd, sessionName, extOptions: { topLevelBrokerUrl: 'http://127.0.0.1:8787' } })
 }
 
-test('an unnamed top-level session registers under its repository and branch through /rename', async () => {
+// The run id every top-level session in these tests registers under.
+async function ownTail(calls: ReturnType<typeof broker>): Promise<string> {
+  await waitFor(() => calls.some(call => call.path === '/register'))
+  return String(calls.find(call => call.path === '/register')!.body.run_id).replace(/[^A-Za-z0-9]/g, '').slice(-6)
+}
+
+test('an unnamed top-level session registers under its repository through /rename', async () => {
   delete process.env.AVENOR_SESSION_NAME
   delete process.env.AVENOR_LABEL
   const calls = broker()
@@ -63,20 +72,59 @@ test('an unnamed top-level session registers under its repository and branch thr
   try {
     await waitFor(() => calls.some(call => call.path === '/rename'))
     const rename = calls.find(call => call.path === '/rename')!
-    expect(rename.body).toMatchObject({ name: 'pi-demo-repo@feat-x', session_id: '' })
+    expect(rename.body).toMatchObject({ name: 'pi-demo-repo', session_id: '' })
     // /session_name is the human-name slot and would outrank a later rename.
-    expect(calls.filter(call => call.path === '/session_name').map(call => call.body.name)).not.toContain('pi-demo-repo@feat-x')
+    expect(calls.filter(call => call.path === '/session_name').map(call => call.body.name)).not.toContain('pi-demo-repo')
   } finally { await h.eventHandlers.session_shutdown({}, {}) }
 })
 
-test('a label another peer holds takes the next free suffix', async () => {
+test('a label another peer holds gains the run id tail', async () => {
   delete process.env.AVENOR_SESSION_NAME
   delete process.env.AVENOR_LABEL
-  const calls = broker(['pi-demo-repo@feat-x', 'pi-demo-repo@feat-x-2'])
+  const calls = broker(['pi-demo-repo'])
   const h = await startTopLevel()
   try {
     await waitFor(() => calls.some(call => call.path === '/rename'))
-    expect(calls.find(call => call.path === '/rename')!.body.name).toBe('pi-demo-repo@feat-x-3')
+    expect(calls.find(call => call.path === '/rename')!.body.name).toBe(`pi-demo-repo-${await ownTail(calls)}`)
+  } finally { await h.eventHandlers.session_shutdown({}, {}) }
+})
+
+test('a directory outside any repository stands in for the repo and gains the run id tail', async () => {
+  delete process.env.AVENOR_SESSION_NAME
+  delete process.env.AVENOR_LABEL
+  const calls = broker()
+  const h = await startTopLevel(undefined, plain)
+  try {
+    await waitFor(() => calls.some(call => call.path === '/rename'))
+    expect(calls.find(call => call.path === '/rename')!.body.name).toBe(`pi-plain-dir-${await ownTail(calls)}`)
+  } finally { await h.eventHandlers.session_shutdown({}, {}) }
+})
+
+test('a broker on another machine leads the label with the machine name', async () => {
+  delete process.env.AVENOR_SESSION_NAME
+  delete process.env.AVENOR_LABEL
+  const calls = broker()
+  const h = await startExtensionHarness({
+    cwd: repo,
+    extOptions: { topLevelBrokerUrl: 'https://broker.test', hostname: () => 'fenwick.home.example.com' },
+  })
+  try {
+    await waitFor(() => calls.some(call => call.path === '/rename'))
+    expect(calls.find(call => call.path === '/rename')!.body.name).toBe('fenwick-pi-demo-repo')
+  } finally { await h.eventHandlers.session_shutdown({}, {}) }
+})
+
+test('a broker addressed by this machine\'s own name adds no prefix', async () => {
+  delete process.env.AVENOR_SESSION_NAME
+  delete process.env.AVENOR_LABEL
+  const calls = broker()
+  const h = await startExtensionHarness({
+    cwd: repo,
+    extOptions: { topLevelBrokerUrl: 'https://fenwick.home.example.com', hostname: () => 'fenwick' },
+  })
+  try {
+    await waitFor(() => calls.some(call => call.path === '/rename'))
+    expect(calls.find(call => call.path === '/rename')!.body.name).toBe('pi-demo-repo')
   } finally { await h.eventHandlers.session_shutdown({}, {}) }
 })
 
@@ -129,18 +177,18 @@ test('a peers read that fails leaves registration intact and the label unset', a
   } finally { await h.eventHandlers.session_shutdown({}, {}) }
 })
 
-test('an incomplete peers listing keeps the unsuffixed label', async () => {
+test('an incomplete peers listing gains the run id tail', async () => {
   delete process.env.AVENOR_SESSION_NAME
   delete process.env.AVENOR_LABEL
   const calls = broker([], () => Response.json({
     generation: 'gen',
-    sessions: [{ run_id: 'other', label: 'pi-demo-repo@feat-x', status: 'running' }],
+    sessions: [{ run_id: 'other', label: 'unrelated', status: 'running' }],
     peers_error: 'one host did not answer',
   }))
   const h = await startTopLevel()
   try {
     await waitFor(() => calls.some(call => call.path === '/rename'))
-    expect(calls.find(call => call.path === '/rename')!.body.name).toBe('pi-demo-repo@feat-x')
+    expect(calls.find(call => call.path === '/rename')!.body.name).toBe(`pi-demo-repo-${await ownTail(calls)}`)
   } finally { await h.eventHandlers.session_shutdown({}, {}) }
 })
 

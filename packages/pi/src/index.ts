@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
+import { hostname as osHostname } from 'node:os'
 import { combinePeerProviders } from './peer-provider.js'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
@@ -29,7 +30,9 @@ import {
   eventsTool,
   extractTurnText,
   getSupervisorClient,
-  hostLabel,
+  brokerIsLocal,
+  defaultHostLabel,
+  gitToplevel,
   inspectTool,
   installAskClaims,
   isClosedSocketError,
@@ -40,7 +43,6 @@ import {
   observeRun,
   peersDetails,
   peersTool,
-  pickSessionLabel,
   renderPeerList,
   resultOutput,
   resultTool,
@@ -52,7 +54,6 @@ import {
   THINKING_LEVELS,
   validateSpawnSelection,
   runWorkflowTool,
-  sessionLabel,
   takenLabelsFromListing,
   type AskClaims,
   type Client,
@@ -427,6 +428,9 @@ export interface ExtensionOptions {
   subAgentEnv?: SubAgentEnv | null
   /** Explicit central broker configuration; null disables top-level participation. */
   topLevelBrokerUrl?: string | null
+  /** The machine's name for the default label, read only when the broker is on
+   * another machine; injectable so tests can name the machine. */
+  hostname?: () => string
 }
 
 export function createExtension(deps: ExtensionDeps = defaultDeps, options: ExtensionOptions = {}) {
@@ -1816,9 +1820,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
     /**
      * A top-level session that neither Pi nor the environment named registers
-     * under its minted run id. It takes `pi-<repo>[@branch]` from its working
-     * directory instead, through the replaceable /rename route: a Pi session
-     * name published later through /session_name still outranks it.
+     * under its minted run id. It takes `[<hostname>-]pi-<repo>` from its
+     * working directory instead, through the replaceable /rename route: a Pi
+     * session name published later through /session_name still outranks it.
      */
     async function publishDefaultLabel(ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
       const env = topLevelEnv
@@ -1829,12 +1833,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const named = () => (harnessSessionName(manager) ?? '') !== ''
       if (named()) return
       try {
-        const base = hostLabel('pi', await sessionLabel(ctx.cwd))
-        if (base === '') return
-        const taken = takenLabelsFromListing(await provider.peers(), env.runId)
+        const toplevel = await gitToplevel(ctx.cwd)
+        const hostname = brokerIsLocal(env.brokerUrl, '') ? '' : (options.hostname ?? osHostname)()
+        const taken = takenLabelsFromListing(await provider.peers(), env.runId) ?? null
         // A name landing during the reads is the person's and wins.
         if (signal.aborted || env !== topLevelEnv || named()) return
-        await provider.rename({ name: pickSessionLabel(base, taken) })
+        const name = defaultHostLabel({ host: 'pi', hostname, brokerUrl: env.brokerUrl, dir: ctx.cwd, toplevel, runId: env.runId, taken })
+        if (name === '') return
+        await provider.rename({ name })
         defaultLabelPosted = true
       } catch {
         // The label is cosmetic: the run stays reachable under its minted id,

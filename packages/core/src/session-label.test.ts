@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 
 import fixture from '../../../schemas/session-name-rule.json'
 import { MAX_SESSION_NAME_RUNES, stripDisallowedSessionNameRunes } from './message.js'
-import { hostLabel, labelUsable, pickSessionLabel, sanitizeSessionLabel, sessionLabel, takenLabelsFromListing } from './session-label.js'
+import { defaultHostLabel, labelUsable, pickSessionLabel, sanitizeSessionLabel, sessionLabel, takenLabelsFromListing } from './session-label.js'
 
 type NameRuleFixture = {
   limit: number
@@ -10,7 +10,17 @@ type NameRuleFixture = {
   cases: Array<{ name: string; input: string; valid: boolean; disallowedRunes: boolean }>
   sanitizeCases: Array<{ name: string; input: string; label: string }>
   deriveCases: Array<{ name: string; toplevel: string; branch: string; label: string }>
-  hostCases: Array<{ name: string; host: string; work: string; label: string }>
+  hostLabelCases: Array<{
+    name: string
+    host: string
+    hostname: string
+    brokerUrl: string
+    dir: string
+    toplevel: string
+    runId: string
+    taken: string[] | null
+    label: string
+  }>
   pickCases: Array<{ name: string; base: string; taken: string[]; label: string }>
 }
 
@@ -57,9 +67,10 @@ describe('session name rule conformance', () => {
     })
   }
 
-  for (const c of rule.hostCases) {
-    it(`prefixes host case: ${c.name}`, () => {
-      expect(hostLabel(c.host, c.work)).toBe(c.label)
+  for (const c of rule.hostLabelCases) {
+    it(`derives host label case: ${c.name}`, () => {
+      const { name: _name, label, taken, ...input } = c
+      expect(defaultHostLabel({ ...input, taken: taken === null ? null : new Set(taken) })).toBe(label)
     })
   }
 

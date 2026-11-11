@@ -5,11 +5,12 @@ import type { PeersProviderResult } from './message.js'
 import { boundedRunes } from './messaging-text.js'
 
 /**
- * The work-derived default display label for a session: the base name of the
- * git top-level of the session's directory, plus "@<branch>" when the
- * checked-out branch is not one of the conventional default names. It mirrors
- * the supervisor's own session-label derivation so a session that never
- * carries a native title still appears under the work it serves.
+ * The work-derived default display labels for a session. `sessionLabel` and
+ * `pickSessionLabel` serve OpenCode: the base name of the git top-level of the
+ * session's directory, plus "@<branch>" when the checked-out branch is not one
+ * of the conventional default names, mirroring the supervisor's own derivation.
+ * `defaultHostLabel` serves Pi and mirrors the Claude plugin's
+ * hooks/label.js: "[<hostname>-]<host>-<repo>" with no branch.
  */
 
 // The repository's real default branch would mean resolving origin/HEAD — a
@@ -63,7 +64,7 @@ export function labelUsable(label: string): boolean {
  */
 export async function sessionLabel(dir: string | undefined, git: GitReader = defaultGitReader): Promise<string> {
   if (!dir) return ''
-  const toplevel = await git(dir, ['rev-parse', '--show-toplevel'])
+  const toplevel = await gitToplevel(dir, git)
   if (toplevel) {
     let label = nodePath.basename(toplevel)
     const branch = await git(dir, ['branch', '--show-current'])
@@ -75,10 +76,78 @@ export async function sessionLabel(dir: string | undefined, git: GitReader = def
   return labelUsable(fallback) ? fallback : ''
 }
 
-/** The label a host's session registers under, or "" when nothing usable derives. */
-export function hostLabel(host: string, work: string): string {
-  const label = sanitizeSessionLabel(`${host}-${work}`)
-  return work !== '' && labelUsable(label) ? label : ''
+/** The git top-level of dir, or an empty string when dir is not in a repository. */
+export function gitToplevel(dir: string, git: GitReader = defaultGitReader): Promise<string> {
+  return git(dir, ['rev-parse', '--show-toplevel'])
+}
+
+const TAIL_RUNES = 6
+
+/** The last path segment, splitting on either separator and ignoring trailing ones. */
+function baseName(path: string): string {
+  const parts = path.split(/[/\\]+/).filter(part => part !== '')
+  return parts.length === 0 ? '' : parts[parts.length - 1]
+}
+
+/** A machine name without its domain: "grace.home.example.com" is "grace". */
+export function shortHost(name: string): string {
+  return name.trim().split('.')[0]
+}
+
+/**
+ * Whether the broker runs on this machine: a loopback address, or the
+ * machine's own name. An unparseable URL counts as local, so no prefix is
+ * added on a guess.
+ */
+export function brokerIsLocal(brokerUrl: string, hostname: string): boolean {
+  const match = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?(\[[^\]]+\]|[^:/?#]+)/i.exec(brokerUrl)
+  if (match === null) return true
+  const host = match[1].toLowerCase()
+  if (host === 'localhost' || host === '[::1]' || /^127(\.\d{1,3}){3}$/.test(host)) return true
+  return hostname !== '' && shortHost(host) === shortHost(hostname).toLowerCase()
+}
+
+/** The last characters of a run id that tell it from another run's. */
+export function runTail(runId: string): string {
+  return runId.replace(/[^A-Za-z0-9]/g, '').slice(-TAIL_RUNES)
+}
+
+function withTail(base: string, tail: string): string {
+  if (tail === '') return base
+  const stem = boundedRunes(base, MAX_SESSION_NAME_RUNES - 1 - tail.length).replace(/-+$/, '')
+  return stem === '' ? '' : `${stem}-${tail}`
+}
+
+export type DefaultHostLabelInput = {
+  host: string
+  hostname: string
+  brokerUrl: string
+  dir: string
+  toplevel: string
+  runId: string
+  /** The labels other peers hold, or null when the listing is unreadable or partial. */
+  taken: Set<string> | null
+}
+
+/**
+ * The default label for a session of agent `host` in `dir`:
+ * "[<hostname>-]<host>-<repo>". The repo is the git top-level's base name,
+ * which for a linked worktree is the worktree's own directory. The hostname
+ * leads only when the broker is on another machine. The run-id tail is added
+ * when there is no repo to name (the directory stands in), when another peer
+ * holds the label, and when the listing could not be read (`taken` null).
+ * Empty means nothing usable derives and the run keeps its minted id.
+ */
+export function defaultHostLabel(input: DefaultHostLabelInput): string {
+  const { host, hostname, brokerUrl, dir, toplevel, runId, taken } = input
+  const repo = toplevel === '' ? '' : sanitizeSessionLabel(baseName(toplevel))
+  const work = repo !== '' ? repo : sanitizeSessionLabel(baseName(dir))
+  if (work === '') return ''
+  const prefix = brokerIsLocal(brokerUrl, hostname) ? '' : sanitizeSessionLabel(shortHost(hostname))
+  const base = sanitizeSessionLabel([prefix, host, work].filter(part => part !== '').join('-'))
+  const crowded = repo === '' || taken === null || taken.has(base)
+  const label = crowded ? withTail(base, runTail(runId)) : base
+  return labelUsable(label) ? label : ''
 }
 
 // The highest -N collision suffix a default label carries, and that suffix
