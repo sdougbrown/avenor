@@ -327,3 +327,33 @@ func TestMessageDropsAClaudePeerBinding(t *testing.T) {
 		t.Fatalf("message dropped a Codex binding: %+v", got)
 	}
 }
+
+// TestReadCodexPeerRecordBrokerURLs pins the URL rows the Claude plugin's
+// peers-binding test repeats (marketplace/plugins/avenor/test): the hook may
+// write a record only for a URL this reader accepts.
+func TestReadCodexPeerRecordBrokerURLs(t *testing.T) {
+	rows := []struct {
+		url      string
+		accepted bool
+	}{
+		{"http://127.0.0.1:8080", true},
+		{"HTTP://127.0.0.1:8080", true},
+		{"http://127.255.255.254", true},
+		{"http://localhost:8787", true},
+		{"http://[::1]:8080", true},
+		{"https://broker.example.com", true},
+		{"http://Localhost:8787", false},
+		{"http://LOCALHOST:8787", false},
+		{"http://127.000.000.001:8080", false},
+		{"http://127.0.0.256", false},
+		{"http://128.0.0.1", false},
+		{"http://10.0.0.5:8787", false},
+		{"http://broker.example.com", false},
+	}
+	for _, row := range rows {
+		_, err := readPeerRecord(writeHostPeerRecord(t, "claude", row.url, "claude-a", "tok"), "claude")
+		if (err == nil) != row.accepted {
+			t.Errorf("%s: accepted=%v err=%v", row.url, err == nil, err)
+		}
+	}
+}

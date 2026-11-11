@@ -158,3 +158,28 @@ test("a /clear or a resume keeps the record: the run goes on under another sessi
     assert.ok(await s.peers({ action: "list" }), reason)
   }
 })
+
+// The same rows as TestReadCodexPeerRecordBrokerURLs in internal/mcpserver:
+// the hook writes a record only for a URL the server will accept.
+const URL_ROWS = [
+  ["http://127.0.0.1:8080", true],
+  ["HTTP://127.0.0.1:8080", true],
+  ["http://127.255.255.254", true],
+  ["http://localhost:8787", true],
+  ["http://[::1]:8080", true],
+  ["https://broker.example.com", true],
+  ["http://Localhost:8787", false],
+  ["http://LOCALHOST:8787", false],
+  ["http://127.000.000.001:8080", false],
+  ["http://127.0.0.256", false],
+  ["http://128.0.0.1", false],
+  ["http://10.0.0.5:8787", false],
+  ["http://broker.example.com", false],
+]
+
+for (const [url, accepted] of URL_ROWS) {
+  test("a broker URL of " + url + (accepted ? " gets a record" : " gets none"), async () => {
+    const s = await session("url-" + Buffer.from(url).toString("hex"), { brokerUrl: url })
+    assert.equal(existsSync(file(s.home)), accepted)
+  })
+}

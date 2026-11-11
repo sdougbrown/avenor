@@ -186,8 +186,19 @@ async function transcriptTitle(d) {
 
 const PEER_DIR_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 // The URLs the MCP server accepts in a peer record: https anywhere, plaintext
-// only on this host (internal/mcpserver/codex_peer.go).
-const LOOPBACK_OR_HTTPS = /^(https:\/\/[^/\s]+|http:\/\/(localhost|127(\.\d{1,3}){3}|\[::1\])(:\d+)?)(\/.*)?$/i
+// only on this host (internal/mcpserver/codex_peer.go readPeerRecord and
+// loopbackHost). Go lowercases the scheme and nothing else: the host must be
+// the lowercase name `localhost`, an IPv4 loopback with no leading zeros, or
+// `[::1]`. A record the server would refuse is not written, because a bound
+// call it refuses answers worse than the supervisor did.
+const LOOPBACK_OR_HTTPS = new RegExp(
+  "^(https://[^/\\s]+|http://(localhost|127(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}|\\[::1\\])(:\\d+)?)(/.*)?$",
+)
+
+function peerRecordUrlAccepted(url) {
+  return LOOPBACK_OR_HTTPS.test(url.replace(/^[A-Za-z][A-Za-z0-9+.-]*:/, (scheme) => scheme.toLowerCase()))
+}
+
 const PEER_BINDINGS = ["claude_peer_file", "codex_peer_file"]
 
 /**
@@ -223,7 +234,7 @@ async function bindPeers(d, e, next) {
  */
 async function writePeerRecord(d) {
   try {
-    if (!PEER_DIR_ID.test(broker.runID) || !LOOPBACK_OR_HTTPS.test(broker.url)) {
+    if (!PEER_DIR_ID.test(broker.runID) || !peerRecordUrlAccepted(broker.url)) {
       await logLayer(d, "no peer record for " + broker.runID + ": the broker URL must be https or loopback")
       return
     }
