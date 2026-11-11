@@ -3,8 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import http from "node:http";
+import { execFileSync, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
+import { runTail, shortHost } from "../hooks/label.js";
 import {
+  defaultSessionLabel,
   framePeerMessage,
   identityPlan,
   peerDirFor,
@@ -220,4 +225,148 @@ test("a stale session lock is reclaimed", async () => {
     if (previous === undefined) delete process.env.AVENOR_HOME;
     else process.env.AVENOR_HOME = previous;
   }
+});
+
+const SESSION_START = fileURLToPath(new URL("../hooks/codex/session-start.mjs", import.meta.url));
+
+/** Run the real SessionStart hook against a stub broker; returns what it renamed to. */
+async function renamedTo({ cwd, payload = { cwd }, spawnCwd, env = {}, listing = { sessions: [] }, sessions }) {
+  const renames = [];
+  const broker = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      const reply = (body) => res.end(JSON.stringify(body));
+      if (req.url === "/register") return reply({ run_id: JSON.parse(raw).run_id, token: "tok" });
+      if (req.url === "/attach") return reply({ run_id: "rt_child", token: "own" });
+      if (req.url === "/rename") {
+        renames.push(JSON.parse(raw).name);
+        return reply({});
+      }
+      if (req.url === "/sessions") {
+        if (sessions !== undefined) return sessions(req, res);
+        return req.headers["x-avenor-run-token"] === "tok" || req.headers["x-avenor-run-token"] === "own"
+          ? reply(listing)
+          : (res.statusCode = 401, reply({}));
+      }
+      res.statusCode = 404;
+      reply({});
+    });
+  });
+  await new Promise((resolve) => broker.listen(0, "127.0.0.1", resolve));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "avenor-codex-start-"));
+  const childEnv = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("AVENOR_")));
+  try {
+    const child = spawn(process.execPath, [SESSION_START], {
+      env: {
+        ...childEnv,
+        AVENOR_HOME: home,
+        AVENOR_BROKER_URL: "http://127.0.0.1:" + broker.address().port,
+        ...env,
+      },
+      cwd: spawnCwd,
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    child.stdin.end(JSON.stringify({ session_id: "01a1-label", hook_event_name: "SessionStart", source: "startup", ...payload }));
+    await new Promise((resolve) => child.on("close", resolve));
+    return { renames, record: readRecord("01a1-label", home) };
+  } finally {
+    broker.close();
+  }
+}
+
+function repo(name, branch) {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "avenor-codex-repo-")), name);
+  fs.mkdirSync(dir);
+  execFileSync("git", ["-C", dir, "init", "-q", "-b", branch]);
+  return dir;
+}
+
+const tail = (record) => runTail(record.run_id);
+
+test("a self-registered session is named after its repository", async () => {
+  const { renames, record } = await renamedTo({ cwd: repo("avenor", "main") });
+  assert.deepEqual(renames, ["codex-avenor"]);
+  assert.equal(record.label, "codex-avenor");
+});
+
+test("the branch is not part of the default label", async () => {
+  const { renames } = await renamedTo({ cwd: repo("avenor", "feat/x") });
+  assert.deepEqual(renames, ["codex-avenor"]);
+});
+
+test("a default label another peer holds gets the run tail", async () => {
+  const { renames, record } = await renamedTo({
+    cwd: repo("avenor", "main"),
+    listing: { sessions: [{ label: "codex-avenor" }] },
+  });
+  assert.deepEqual(renames, ["codex-avenor-" + tail(record)]);
+});
+
+test("a listing that cannot be trusted gets the run tail", async () => {
+  const partial = await renamedTo({
+    cwd: repo("avenor", "main"),
+    listing: { sessions: [], peers_error: "peers unavailable" },
+  });
+  assert.deepEqual(partial.renames, ["codex-avenor-" + tail(partial.record)]);
+
+  const failed = await renamedTo({
+    cwd: repo("avenor", "main"),
+    sessions: (_req, res) => {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ sessions: [] }));
+    },
+  });
+  assert.deepEqual(failed.renames, ["codex-avenor-" + tail(failed.record)]);
+  assert.equal(failed.record.label, "codex-avenor-" + tail(failed.record));
+
+  const dropped = await renamedTo({
+    cwd: repo("avenor", "main"),
+    sessions: (req) => req.socket.destroy(),
+  });
+  assert.deepEqual(dropped.renames, ["codex-avenor-" + tail(dropped.record)]);
+});
+
+test("a hook payload without a usable cwd names the session from the hook's own directory", async () => {
+  for (const payload of [{}, { cwd: "" }]) {
+    const { renames } = await renamedTo({ payload, spawnCwd: repo("avenor", "feat/x") });
+    assert.deepEqual(renames, ["codex-avenor"]);
+  }
+});
+
+test("a directory outside a repository names the session by its own name and the run tail", async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "avenor-codex-plain-")), "scratch");
+  fs.mkdirSync(dir);
+  const { renames, record } = await renamedTo({ cwd: dir, env: { GIT_CEILING_DIRECTORIES: path.dirname(dir) } });
+  assert.deepEqual(renames, ["codex-scratch-" + tail(record)]);
+});
+
+test("a broker on another machine puts this machine's hostname first", async () => {
+  const record = { broker_url: "https://broker.example.com", run_id: "codex-a001f5", run_token: "t" };
+  const git = async () => "/work/avenor";
+  const fetchGet = async () => ({ ok: true, body: { sessions: [] } });
+  assert.equal(
+    await defaultSessionLabel("/work/avenor", record, git, fetchGet),
+    shortHost(os.hostname()) + "-codex-avenor",
+  );
+  assert.equal(
+    await defaultSessionLabel("/work/avenor", { ...record, broker_url: "http://127.0.0.1:8787" }, git, fetchGet),
+    "codex-avenor",
+  );
+});
+
+test("a launch label from the environment wins over the derived one", async () => {
+  const { renames, record } = await renamedTo({ cwd: repo("avenor", "main"), env: { AVENOR_LABEL: "chosen" } });
+  assert.deepEqual(renames, ["chosen"]);
+  assert.equal(record.label, "chosen");
+});
+
+test("a provisioned run is not renamed", async () => {
+  const { renames, record } = await renamedTo({
+    cwd: repo("avenor", "main"),
+    env: { AVENOR_RUN_ID: "rt_child", AVENOR_BROKER_TOKEN: "grant" },
+  });
+  assert.deepEqual(renames, []);
+  assert.equal(record.provisioned, true);
+  assert.equal(record.label, "");
 });
