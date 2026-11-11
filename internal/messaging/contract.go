@@ -163,4 +163,5 @@ type PeerLast struct {
 	Text       string // empty when the turn produced no final text
 	StopReason string // verbatim from the producer
 	Truncated  bool   // Text hit the bound
+	At         int64  // unix seconds the turn was recorded; zero when unknown
 }

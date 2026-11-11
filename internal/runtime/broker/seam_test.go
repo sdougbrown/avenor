@@ -803,3 +803,47 @@ func TestMessengerTransportResolvesTheSeamPerCall(t *testing.T) {
 		t.Fatalf("waits = %+v, want the wait through the seam", waits)
 	}
 }
+
+// TestLastMessageRouteClassifiesTheSeamsFailure pins the route's mapping of what
+// the seam reports: a missing run is a 404 target-unavailable, and any other
+// failure is a 502 whose reason names neither a parent address nor a dial error.
+func TestLastMessageRouteClassifiesTheSeamsFailure(t *testing.T) {
+	b, senderToken, _ := startSeamBroker(t)
+	var seamErr error
+	b.SetMessenger(&messagetest.Recorder{
+		Local: b.LocalMessenger(),
+		LastFunc: func(_ context.Context, _ string) (messaging.PeerLast, error) {
+			return messaging.PeerLast{}, seamErr
+		},
+	})
+	get := func() (int, map[string]any) {
+		req, err := http.NewRequest(http.MethodGet, "http://"+b.Addr()+"/last_message?target=anywhere", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(messaging.HeaderRunID, "sender")
+		req.Header.Set(messaging.HeaderRunToken, senderToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /last_message: %v", err)
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		return resp.StatusCode, body
+	}
+
+	seamErr = fmt.Errorf("%w: run not found: anywhere", messaging.ErrTargetUnavailable)
+	if status, body := get(); status != http.StatusNotFound || body["code"] != "target-unavailable" {
+		t.Fatalf("a missing run = %d %v, want 404 target-unavailable", status, body)
+	}
+
+	seamErr = errors.New("dial tcp 10.0.0.9:7777: connection refused")
+	status, body := get()
+	if status != http.StatusBadGateway {
+		t.Fatalf("a failed parent = %d %v, want 502", status, body)
+	}
+	if reason, _ := body["error"].(string); strings.Contains(reason, "10.0.0.9") || reason != messaging.ErrParentReadFailed.Error() {
+		t.Fatalf("a failed parent reported %q, want the fixed reason", reason)
+	}
+}

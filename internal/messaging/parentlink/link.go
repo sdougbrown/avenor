@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -587,34 +588,9 @@ func (l *Link) Tell(ctx context.Context, req messaging.TellRequest) error {
 // registration the link syncs once, so a listing is never answered with a
 // silent empty list just because no claim was published yet.
 func (l *Link) Peers(ctx context.Context) (messaging.PeersResult, error) {
-	caller, _ := messaging.CallerRun(ctx)
-	runID, token, ok := l.listingCredentials(caller)
-	if !ok {
-		// The parent has not accepted this branch's claim yet, so it knows no run
-		// of this branch to list with. Sync once and re-pick before giving up:
-		// an empty answer would read as "the parent has no peers" when the claim
-		// was simply never published.
-		if err := l.Sync(ctx); err != nil {
-			return messaging.PeersResult{}, err
-		}
-		runID, token, ok = l.listingCredentials(caller)
-		if !ok {
-			return messaging.PeersResult{}, fmt.Errorf("%w: this branch has no run registered at the parent broker to list peers with", messaging.ErrTargetUnavailable)
-		}
-	}
-	req, err := http.NewRequest(http.MethodGet, l.opts.ParentURL+pathSessions, nil)
+	status, raw, err := l.read(ctx, pathSessions)
 	if err != nil {
 		return messaging.PeersResult{}, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set(messaging.HeaderRunID, runID)
-	req.Header.Set(messaging.HeaderRunToken, token)
-	if l.opts.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+l.opts.Token)
-	}
-	status, raw, err := l.client.Do(ctx, req, 0)
-	if err != nil {
-		return messaging.PeersResult{}, fmt.Errorf("%w: %v", ErrParentUnavailable, err)
 	}
 	body, err := decode(status, raw)
 	if err != nil {
@@ -635,6 +611,82 @@ func (l *Link) Peers(ctx context.Context) (messaging.PeersResult, error) {
 		return result, fmt.Errorf("%w: parent peer listing is incomplete: %s", messaging.ErrTargetUnavailable, body.PeersError)
 	}
 	return result, nil
+}
+
+// Last reads one run's recorded last turn from the parent broker. The route is
+// side-effect free and universally visible there, so the branch authenticates
+// with the credential it already holds for one of its own runs, as it does to
+// list peers. A run the parent does not hold is ErrTargetUnavailable; a parent
+// that could not answer is messaging.ErrParentReadFailed.
+func (l *Link) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
+	status, raw, err := l.read(ctx, pathLast+"?"+url.Values{"target": {runID}}.Encode())
+	if err == nil {
+		_, err = decode(status, raw)
+	}
+	if errors.Is(err, ErrParentUnavailable) {
+		return messaging.PeerLast{}, fmt.Errorf("%w: %v", messaging.ErrParentReadFailed, err)
+	}
+	if err != nil {
+		return messaging.PeerLast{}, err
+	}
+	var body struct {
+		RunID       string `json:"run_id"`
+		Label       string `json:"label"`
+		HasRecord   bool   `json:"has_record"`
+		FinalOutput string `json:"final_output"`
+		StopReason  string `json:"stop_reason"`
+		Truncated   bool   `json:"final_output_truncated"`
+		At          int64  `json:"at"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return messaging.PeerLast{}, fmt.Errorf("%w: %v", ErrUnsupportedParentProtocol, err)
+	}
+	return messaging.PeerLast{
+		RunID:      body.RunID,
+		Label:      body.Label,
+		HasRecord:  body.HasRecord,
+		Text:       body.FinalOutput,
+		StopReason: body.StopReason,
+		Truncated:  body.Truncated,
+		At:         body.At,
+	}, nil
+}
+
+// read performs one authenticated GET on the parent broker with the credential
+// of the caller's own run when the parent knows it, else the first run in a
+// stable order. Before the first successful registration it syncs once, so a
+// read is never answered as though the parent knew nothing just because no claim
+// was published yet.
+func (l *Link) read(ctx context.Context, pathAndQuery string) (int, []byte, error) {
+	caller, _ := messaging.CallerRun(ctx)
+	runID, token, ok := l.listingCredentials(caller)
+	if !ok {
+		// The parent has not accepted this branch's claim yet, so it knows no run
+		// of this branch to authenticate with. Sync once and re-pick before giving
+		// up.
+		if err := l.Sync(ctx); err != nil {
+			return 0, nil, err
+		}
+		runID, token, ok = l.listingCredentials(caller)
+		if !ok {
+			return 0, nil, fmt.Errorf("%w: this branch has no run registered at the parent broker to read with", messaging.ErrTargetUnavailable)
+		}
+	}
+	req, err := http.NewRequest(http.MethodGet, l.opts.ParentURL+pathAndQuery, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set(messaging.HeaderRunID, runID)
+	req.Header.Set(messaging.HeaderRunToken, token)
+	if l.opts.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+l.opts.Token)
+	}
+	status, raw, err := l.client.Do(ctx, req, 0)
+	if err != nil {
+		return 0, nil, fmt.Errorf("%w: %v", ErrParentUnavailable, err)
+	}
+	return status, raw, nil
 }
 
 // RecordRelay binds the reply route of a relayed ask. The broker records it

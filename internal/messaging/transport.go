@@ -83,6 +83,11 @@ type Seam interface {
 	// run's peer lease says. A target the seam holds is the seam's to answer
 	// or refuse; a forward never carries it past this broker.
 	Holds(runID string) bool
+	// Last reads one run's recorded last turn. A run this seam holds answers from
+	// its own record, a tombstone included, because this reads history. A run it
+	// does not hold is ErrTargetUnavailable here and is the parent's to answer on
+	// a seam that has one.
+	Last(ctx context.Context, runID string) (PeerLast, error)
 }
 
 // IncompletePeerListing is the reason a peer listing that could not be
@@ -117,3 +122,9 @@ var (
 	ErrTransportClosed      = errors.New("messaging: transport closed")
 	ErrUnsupportedOperation = errors.New("messaging: operation unsupported by this transport")
 )
+
+// ErrParentReadFailed reports a read the parent broker could not answer: it was
+// unreachable or failed. It does not classify as ErrTargetUnavailable, so a
+// caller never reads an outage as a run the parent does not hold. Its text names
+// no parent address and is the reason every layer reports.
+var ErrParentReadFailed = errors.New("the parent broker could not answer the read")

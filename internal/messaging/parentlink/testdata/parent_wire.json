@@ -8,7 +8,8 @@
     "send": "/send",
     "wait": "/wait_reply",
     "withdraw": "/cancel_message",
-    "sessions": "/sessions"
+    "sessions": "/sessions",
+    "last": "/last_message"
   },
   "request_fields": {
     "register": ["child_id", "endpoint", "generation", "runs"],
@@ -72,6 +73,12 @@
       "name": "a_peer_listing",
       "fields": ["sessions", "generation"],
       "body": {"sessions": [{"run_id": "run-b"}], "generation": "<generation>"},
+      "outcome": ""
+    },
+    {
+      "name": "a_last_turn",
+      "fields": ["run_id", "label", "has_record", "final_output", "stop_reason", "final_output_truncated", "at"],
+      "body": {"run_id": "run-b", "label": "beta", "has_record": true, "final_output": "shipped", "stop_reason": "end_turn", "final_output_truncated": true, "at": 1700000000},
       "outcome": ""
     },
     {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 
@@ -14,8 +15,10 @@ import (
 
 // stubRequest is one request a stub broker received.
 type stubRequest struct {
-	Path string
-	Body map[string]any
+	Path   string
+	Query  url.Values
+	Header http.Header
+	Body   map[string]any
 }
 
 // stubBroker is one stub broker: it answers every request from a scripted
@@ -78,7 +81,7 @@ func (b *stubBroker) serve(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	body := map[string]any{}
 	_ = json.Unmarshal(raw, &body)
-	request := stubRequest{Path: r.URL.Path, Body: body}
+	request := stubRequest{Path: r.URL.Path, Query: r.URL.Query(), Header: r.Header.Clone(), Body: body}
 
 	b.mu.Lock()
 	b.requests = append(b.requests, request)
@@ -184,13 +187,14 @@ type stubMessenger struct {
 	withdraw   []messaging.WithdrawRequest
 	replies    []messaging.ReplyRequest
 	tells      []messaging.TellRequest
+	lasts      []string
 	receives   []messaging.ReceiveRequest
 	preflights int
 
-	holds     map[string]bool
-	peers     []messaging.Peer
-	peersGen  string
-	peersErr  error
+	holds    map[string]bool
+	peers    []messaging.Peer
+	peersGen string
+	peersErr error
 
 	sendResult     messaging.SendResult
 	sendErr        error
@@ -250,6 +254,13 @@ func (s *stubMessenger) Holds(runID string) bool {
 	return s.holds[runID]
 }
 
+func (s *stubMessenger) Last(_ context.Context, runID string) (messaging.PeerLast, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lasts = append(s.lasts, runID)
+	return messaging.PeerLast{RunID: runID, Label: "local"}, nil
+}
+
 func (s *stubMessenger) Peers(_ context.Context, req messaging.PeersRequest) (messaging.PeersResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -271,6 +282,13 @@ func (s *stubMessenger) Preflight(_ context.Context) (messaging.PreflightResult,
 }
 
 func (s *stubMessenger) Close() error { return nil }
+
+// lastTargets reports the runs the local seam was asked to read a last turn for.
+func (s *stubMessenger) lastTargets() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.lasts...)
+}
 
 // sentRuns reports the runs the local seam was asked to send to.
 func (s *stubMessenger) sentRuns() []string {

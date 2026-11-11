@@ -609,6 +609,12 @@ func (b *Broker) seam() messaging.Seam {
 	return b.messenger
 }
 
+// Last reads one run's recorded last turn through the messaging seam: this
+// broker's own record for a run it holds, the parent's for one it does not.
+func (b *Broker) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
+	return b.seam().Last(ctx, runID)
+}
+
 // MessengerTransport returns the in-process transport over the broker's ask
 // store whose ask, reply and peer operations enter the messenger seam at call
 // time. A messenger installed after this transport was built is still reached.
@@ -2059,27 +2065,33 @@ func writeRenameError(w http.ResponseWriter, err error) {
 	}
 }
 
-// handleLastMessage reports any known run's recorded last turn. The target is
-// not required to be the authenticated caller: this read is universally
-// visible and side-effect free.
+// handleLastMessage reports any known run's recorded last turn, this broker's
+// or its parent's. The target is not required to be the authenticated caller:
+// this read is universally visible and side-effect free.
 func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Query().Get("target")
 	if target == "" {
 		writeCodedError(w, http.StatusBadRequest, "target is required", "invalid-request")
 		return
 	}
-	if b.GetRun(target) == nil {
+	// The seam answers a run this broker holds from its own record, a tombstone
+	// included (history, not participation; the reap is what ends this read), and
+	// asks the parent for one it does not.
+	record, err := b.seam().Last(r.Context(), target)
+	switch {
+	case errors.Is(err, messaging.ErrTargetUnavailable):
 		writeCodedError(w, http.StatusNotFound, "run not found: "+target, "target-unavailable")
 		return
+	case err != nil:
+		// The reason names no parent address or dial error: a client's tool result
+		// carries it to a model.
+		writeJSONBody(w, http.StatusBadGateway, map[string]any{"error": messaging.ErrParentReadFailed.Error()})
+		return
 	}
-	// History, not participation: a tombstone still answers for the turn it holds,
-	// the way SessionLast reads it in process. Reachable is the question for a
-	// target that has to take part, and the reap is what ends this read.
-	record, hasRecord := b.LastAgentMessage(target)
 	writeJSONBody(w, http.StatusOK, map[string]any{
 		"run_id":                 record.RunID,
 		"label":                  record.Label,
-		"has_record":             hasRecord,
+		"has_record":             record.HasRecord,
 		"final_output":           record.Text,
 		"stop_reason":            record.StopReason,
 		"final_output_truncated": record.Truncated,
@@ -3115,6 +3127,25 @@ func (m localMessenger) Reachable(runID string) bool {
 // refuse. A send that names it is never forwarded to a parent.
 func (m localMessenger) Holds(runID string) bool {
 	return m.broker.GetRun(runID) != nil
+}
+
+// Last reads one run's recorded last turn from this broker. A tombstone still
+// answers for the turn it holds: this reads history, where Reachable is the
+// question for a target that has to take part.
+func (m localMessenger) Last(_ context.Context, runID string) (messaging.PeerLast, error) {
+	if m.broker.GetRun(runID) == nil {
+		return messaging.PeerLast{}, fmt.Errorf("%w: run not found: %s", messaging.ErrTargetUnavailable, runID)
+	}
+	record, hasRecord := m.broker.LastAgentMessage(runID)
+	return messaging.PeerLast{
+		RunID:      record.RunID,
+		Label:      record.Label,
+		HasRecord:  hasRecord,
+		Text:       record.Text,
+		StopReason: record.StopReason,
+		Truncated:  record.Truncated,
+		At:         record.At,
+	}, nil
 }
 
 func (m localMessenger) Receive(ctx context.Context, req messaging.ReceiveRequest) (messaging.ReceiveResult, error) {

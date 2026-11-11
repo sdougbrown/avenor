@@ -1,12 +1,20 @@
 package stable
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
+
+// sessionLastTimeout bounds one read of a run's last turn. The read is local
+// and instant unless this broker has a parent to ask, so a parent that never
+// answers must fail the control call quickly instead of holding it open.
+const sessionLastTimeout = 5 * time.Second
 
 // SessionLast reads one run's recorded last turn. It resolves the run before
 // reading, so an unknown runtime is a typed unknown_target refusal while a
@@ -14,15 +22,35 @@ import (
 //
 // A tombstone still answers here: this surface reads history by an id the caller
 // already holds, where a routing boundary asks whether a target can take part.
+// A run the broker does not hold is the parent's to answer when this broker has
+// one, so the read follows the same seam a tell does. A parent that cannot
+// answer is a refusal carrying messaging.ErrParentReadFailed's reason, not an
+// unknown target.
 func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, error) {
 	if s.broker == nil {
 		return broker.LastAgentMessage{}, false, fmt.Errorf("broker not available")
 	}
-	if s.broker.GetRun(rtID) == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionLastTimeout)
+	defer cancel()
+	last, err := s.broker.Last(ctx, rtID)
+	if errors.Is(err, messaging.ErrTargetUnavailable) {
 		return broker.LastAgentMessage{}, false, unknownTargetError(rtID)
 	}
-	record, ok := s.broker.LastAgentMessage(rtID)
-	return record, ok, nil
+	if err != nil {
+		return broker.LastAgentMessage{}, false, &router.ToolError{
+			Code:    "refused",
+			Message: messaging.ErrParentReadFailed.Error(),
+			Facts:   map[string]string{},
+		}
+	}
+	return broker.LastAgentMessage{
+		RunID:      last.RunID,
+		Label:      last.Label,
+		Text:       last.Text,
+		StopReason: last.StopReason,
+		Truncated:  last.Truncated,
+		At:         last.At,
+	}, last.HasRecord, nil
 }
 
 // SessionLastSet publishes the supervisor session's last turn. It is the host
