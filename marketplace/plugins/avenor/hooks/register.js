@@ -389,11 +389,11 @@ async function gitAnswer(d, dir, args) {
 /** The labels the broker lists, or null when the listing is unreadable or partial. */
 async function takenLabels(d) {
   try {
-    const body = await brokerGet(d, "/sessions")
-    if (body === null || typeof body !== "object" || typeof body.peers_error === "string" || !Array.isArray(body.sessions)) {
+    const listing = await readListing(d)
+    if (listing.incomplete !== "" || listing.sessions === null) {
       return null
     }
-    return new Set(body.sessions.map((row) => row && row.label).filter((label) => typeof label === "string"))
+    return new Set(listing.sessions.map((row) => row && row.label).filter((label) => typeof label === "string"))
   } catch (err) {
     return null
   }
@@ -822,23 +822,37 @@ function toolError(refusal) {
  * TS resolvers apply the same rule to the same field.
  */
 async function resolveTarget(d, ref, allowSelf = false) {
-  const body = await brokerGet(d, "/sessions")
-  const answer = body === null || typeof body !== "object" ? {} : body
-  const incomplete = typeof answer.peers_error === "string" ? answer.peers_error : ""
-  if (incomplete !== "") {
-    return { match: "incomplete", runId: "", candidates: [], generation: "", incomplete: incomplete }
+  const listing = await readListing(d)
+  if (listing.incomplete !== "") {
+    return { match: "incomplete", runId: "", candidates: [], generation: "", incomplete: listing.incomplete }
   }
-  const sessions = Array.isArray(answer.sessions) ? answer.sessions : []
   const targetRef = allowSelf && ref === "self" && broker !== null ? broker.runID : ref
   const excludeRunId = allowSelf || broker === null ? "" : broker.runID
-  const hit = matchSession(sessions, targetRef, excludeRunId)
+  const hit = matchSession(listing.sessions ?? [], targetRef, excludeRunId)
   return {
     match: hit.match,
     runId: hit.runId,
     candidates: hit.candidates,
     label: hit.match === "unique" ? hit.label : "",
-    generation: typeof answer.generation === "string" ? answer.generation : "",
+    generation: listing.generation,
     incomplete: "",
+  }
+}
+
+/**
+ * One fresh read of the broker's /sessions listing, shared by every caller
+ * that must not trust a subset: `incomplete` is the broker's `peers_error`
+ * (empty for a whole listing), `sessions` is the rows or null when the body
+ * carried none, and `generation` is the ask generation the listing advertises.
+ * A transport failure throws.
+ */
+async function readListing(d) {
+  const body = await brokerGet(d, "/sessions")
+  const answer = body === null || typeof body !== "object" ? {} : body
+  return {
+    incomplete: typeof answer.peers_error === "string" ? answer.peers_error : "",
+    sessions: Array.isArray(answer.sessions) ? answer.sessions : null,
+    generation: typeof answer.generation === "string" ? answer.generation : "",
   }
 }
 

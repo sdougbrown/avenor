@@ -1,9 +1,9 @@
 // The default display label for a session that no person has named:
 // "[<hostname>-]<agent>-<repo>", with a short run-id tail where the name alone
 // cannot be trusted to be unique. The sanitizing mirrors
-// internal/stable/sessiondefault.go and packages/core/src/session-label.ts;
+// internal/stable/sessiondefault.go and packages/opencode/src/label.ts;
 // schemas/session-name-rule.json pins them to the same answers, and its
-// hostLabelCases pin this derivation to the TypeScript one.
+// hostLabelCases pin this derivation.
 
 const MAX_NAME_RUNES = 64
 const TAIL_RUNES = 6
