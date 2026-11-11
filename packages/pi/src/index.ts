@@ -2680,7 +2680,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     pi.registerTool({
       name: 'avenor_status',
       label: 'Avenor Status',
-      description: 'Get lifecycle status of a run or all runs. Use view="lifecycle" for compact polling; full is the compatibility default.',
+      description: 'Get lifecycle status of a run or all runs. Use view="lifecycle" for compact polling; full is the compatibility default. A broker peer with no runtime answers with its identity and broker status only.',
       parameters: Type.Object({
         run_id: Type.Optional(Type.String({ description: 'Specific run ID to query' })),
         view: Type.Optional(Type.Unsafe<'lifecycle' | 'full'>({
@@ -3056,7 +3056,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     pi.registerTool({
       name: 'avenor_events',
       label: 'Avenor Events',
-      description: 'Read events from a run. Filter by type. Returns last N events.',
+      description: 'Read events from a run. Filter by type. Returns last N events. A broker peer has no event log; peers action last reads its last agent message.',
       parameters: Type.Object({
         run_id: Type.String({ description: 'Run ID to read events from' }),
         types: Type.Optional(Type.Array(Type.String(), { description: 'Filter by event types' })),

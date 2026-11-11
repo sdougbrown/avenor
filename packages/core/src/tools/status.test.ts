@@ -1,10 +1,10 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import * as crypto from 'node:crypto'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type { StatusListResult, StatusResult } from './status.js'
-import type { Client } from '../client.js'
+import { RpcError, type Client } from '../client.js'
 import { Supervisor } from '../supervisor.js'
 
 const statusMock = mock<Client['status']>(async () => {
@@ -470,5 +470,263 @@ describe('statusTool singleton list shape', () => {
       else process.env.AVENOR_HOME = previousHome
       fs.rmSync(home, { recursive: true, force: true })
     }
+  })
+})
+
+describe('statusTool broker peers', () => {
+  const supervisorId = '/tmp/avenor-status-broker-peer.sock'
+  const preflightMock = mock(async () => ({ protocol: 1, generation: 'gen-1' }))
+  const peersMock = mock(async (_params: { generation: string }): Promise<any> => ({ peers: [] }))
+  const peerStatusMock = mock(async (_runtimeId?: string): Promise<Record<string, unknown>> => {
+    throw absentRuntime('')
+  })
+  const peerListMock = mock(async (): Promise<Array<Record<string, unknown>>> => [])
+  const peerCloseMock = mock(() => {})
+  const getPeerClient = mock(async (_supervisorId?: string) => ({
+    client: peerClient,
+    isSingleton: false,
+    sup: null,
+    supervisorId,
+  })) as any
+  const peerStatusTool = createStatusTool(getPeerClient)
+  const peerClient = {
+    status: peerStatusMock,
+    list: peerListMock,
+    close: peerCloseMock,
+    messagePreflight: preflightMock,
+    messagePeers: peersMock,
+  }
+
+  function absentRuntime(runtimeId: string) {
+    return new RpcError(-32000, `runtime "${runtimeId}" not found`)
+  }
+
+  function peerRow(runId: string, session: Record<string, string>) {
+    return { run_id: runId, session: { run_id: runId, ...session } }
+  }
+
+  function brokerNotRead() {
+    expect(preflightMock).not.toHaveBeenCalled()
+    expect(peersMock).not.toHaveBeenCalled()
+  }
+
+  async function onSingleton<T>(run: () => Promise<T>): Promise<T> {
+    const previousSupervisorGet = Supervisor.get
+    Supervisor.get = mock(async () => ({
+      getClient: () => peerClient,
+      getRunByReference: () => undefined,
+    })) as unknown as typeof Supervisor.get
+    try {
+      return await run()
+    } finally {
+      Supervisor.get = previousSupervisorGet
+    }
+  }
+
+  beforeEach(() => {
+    for (const m of [preflightMock, peersMock, peerStatusMock, peerListMock, peerCloseMock, getPeerClient]) m.mockReset()
+    preflightMock.mockImplementation(async () => ({ protocol: 1, generation: 'gen-1' }))
+    peersMock.mockImplementation(async () => ({ peers: [] }))
+    peerStatusMock.mockImplementation(async (runtimeId?: string) => { throw absentRuntime(runtimeId ?? '') })
+    peerListMock.mockImplementation(async () => [])
+    getPeerClient.mockImplementation(async () => ({ client: peerClient, isSingleton: false, sup: null, supervisorId }))
+  })
+
+  afterEach(() => {
+    forgetExternalRuns(supervisorId)
+  })
+
+  it('answers a broker-only run by id with the row identity and the translated status', async () => {
+    peersMock.mockResolvedValueOnce({
+      peers: [peerRow('claude-1', {
+        label: 'planner', status: 'idle', backend: 'claude', model: 'opus', dir: '/work/repo', kind: 'claude-code',
+      })],
+    })
+
+    const result = singleRun(await peerStatusTool({ runId: 'claude-1', supervisorId }))
+
+    expect(peersMock).toHaveBeenCalledWith({ generation: 'gen-1' })
+    expect(result).toEqual({
+      run_id: 'claude-1',
+      label: 'planner',
+      status: 'running',
+      backend: 'claude',
+      model: 'opus',
+      dir: '/work/repo',
+      runtime_output_available: false,
+    })
+    expect(peerCloseMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers a broker-only run by a label that names one peer', async () => {
+    peersMock.mockResolvedValueOnce({
+      peers: [peerRow('claude-1', { label: 'planner', status: 'running' }), peerRow('claude-2', { label: 'other', status: 'running' })],
+    })
+
+    const result = singleRun(await peerStatusTool({ runId: 'planner', supervisorId }))
+
+    expect(result).toMatchObject({ run_id: 'claude-1', label: 'planner', status: 'running' })
+  })
+
+  it('marks a broker peer as having no runtime output to harvest', async () => {
+    peersMock.mockResolvedValueOnce({ peers: [peerRow('claude-2', { label: 'finished', status: 'ended' })] })
+
+    const result = singleRun(await peerStatusTool({ runId: 'claude-2', supervisorId }))
+
+    expect(result.runtime_output_available).toBe(false)
+  })
+
+  it('reports an ended broker peer as done', async () => {
+    peersMock.mockResolvedValueOnce({ peers: [peerRow('claude-2', { label: 'finished', status: 'ended' })] })
+
+    const result = singleRun(await peerStatusTool({ runId: 'claude-2', supervisorId }))
+
+    expect(result.status).toBe('done')
+  })
+
+  it('omits identity fields the row does not carry and labels the run by its id', async () => {
+    peersMock.mockResolvedValueOnce({ peers: [peerRow('claude-3', { status: 'running' })] })
+
+    const result = singleRun(await peerStatusTool({ runId: 'claude-3', supervisorId }))
+
+    expect(result).toEqual({ run_id: 'claude-3', label: 'claude-3', status: 'running', runtime_output_available: false })
+  })
+
+  it('shapes a broker peer by the lifecycle view', async () => {
+    peersMock.mockResolvedValueOnce({
+      peers: [peerRow('claude-1', { label: 'planner', status: 'ended', backend: 'claude', model: 'opus', dir: '/work/repo' })],
+    })
+
+    const result = singleRun(await peerStatusTool({ runId: 'claude-1', supervisorId, view: 'lifecycle' }))
+
+    expect(result).toEqual({ run_id: 'claude-1', label: 'planner', status: 'done' })
+  })
+
+  it('answers a broker-only run on the singleton path', async () => {
+    peersMock.mockResolvedValueOnce({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended', backend: 'claude' })] })
+
+    const result = singleRun(await onSingleton(() => statusTool({ runId: 'claude-1' })))
+
+    expect(result).toEqual({ run_id: 'claude-1', label: 'planner', status: 'done', backend: 'claude', runtime_output_available: false })
+  })
+
+  describe('keeps the existing answer for an unknown run', () => {
+    const unknown = { run_id: 'ghost-1', label: 'ghost-1', status: 'running' }
+    const listings: Array<[string, () => void]> = [
+      ['the run is on no listing', () => peersMock.mockResolvedValueOnce({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended' })] })],
+      ['two peers share the label', () => peersMock.mockResolvedValueOnce({
+        peers: [peerRow('claude-1', { label: 'ghost-1', status: 'ended' }), peerRow('claude-2', { label: 'ghost-1', status: 'ended' })],
+      })],
+      ['the listing cannot be read', () => peersMock.mockRejectedValueOnce(new Error('broker offline'))],
+      ['the listing is partial', () => peersMock.mockResolvedValueOnce({
+        peers: [peerRow('ghost-1', { label: 'ghost-1', status: 'ended' })],
+        peers_error: 'the broker could not read every peer',
+      })],
+    ]
+
+    for (const [name, arrange] of listings) {
+      it(`when ${name} (supervisorId path)`, async () => {
+        arrange()
+
+        expect(await peerStatusTool({ runId: 'ghost-1', supervisorId })).toMatchObject(unknown)
+        expect(peersMock).toHaveBeenCalledTimes(1)
+      })
+
+      it(`when ${name} (singleton path)`, async () => {
+        arrange()
+
+        expect(await onSingleton(() => statusTool({ runId: 'ghost-1' }))).toMatchObject(unknown)
+        expect(peersMock).toHaveBeenCalledTimes(1)
+      })
+    }
+
+    it('when the broker preflight fails', async () => {
+      preflightMock.mockRejectedValueOnce(new Error('no broker'))
+
+      expect(await peerStatusTool({ runId: 'ghost-1', supervisorId })).toMatchObject(unknown)
+      expect(peersMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('does not read the broker unless the supervisor reports the run absent', () => {
+    const failures: Array<[string, () => Error]> = [
+      ['a transport error', () => new Error('socket closed')],
+      ['a refusal', () => new RpcError(-32001, 'permission denied')],
+      ['another runtime absent answer', () => new RpcError(-32000, 'runtime "someone-else" not found')],
+    ]
+
+    for (const [name, failure] of failures) {
+      it(`after ${name} (supervisorId path)`, async () => {
+        peerStatusMock.mockRejectedValueOnce(failure())
+        peersMock.mockResolvedValue({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended' })] })
+
+        expect(await peerStatusTool({ runId: 'claude-1', supervisorId })).toMatchObject({
+          run_id: 'claude-1', label: 'claude-1', status: 'running',
+        })
+        brokerNotRead()
+      })
+
+      it(`after ${name} (singleton path)`, async () => {
+        peerStatusMock.mockRejectedValueOnce(failure())
+        peersMock.mockResolvedValue({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended' })] })
+
+        expect(await onSingleton(() => statusTool({ runId: 'claude-1' }))).toMatchObject({
+          run_id: 'claude-1', label: 'claude-1', status: 'running',
+        })
+        brokerNotRead()
+      })
+    }
+
+    it('when the runtime list cannot be read', async () => {
+      peerListMock.mockRejectedValueOnce(new Error('list offline'))
+      peersMock.mockResolvedValue({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended' })] })
+
+      expect(await peerStatusTool({ runId: 'claude-1', supervisorId })).toMatchObject({
+        run_id: 'claude-1', label: 'claude-1', status: 'running',
+      })
+      brokerNotRead()
+    })
+  })
+
+  it('does not read the broker for a run the supervisor knows', async () => {
+    peerStatusMock.mockResolvedValueOnce({ runtime_id: 'rt-live', phase: 'waiting' })
+    peersMock.mockResolvedValue({ peers: [peerRow('rt-live', { label: 'planner', status: 'ended' })] })
+
+    const result = singleRun(await peerStatusTool({ runId: 'rt-live', supervisorId }))
+
+    expect(result).toMatchObject({ runtime_id: 'rt-live', status: 'waiting' })
+    brokerNotRead()
+  })
+
+  describe('does not read the broker for a run with a sentinel', () => {
+    async function withSentinel<T>(run: () => Promise<T>): Promise<T> {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'avenor-status-broker-sentinel-'))
+      const previousHome = process.env.AVENOR_HOME
+      process.env.AVENOR_HOME = home
+      try {
+        fs.mkdirSync(path.join(home, 'runs', 'sentinel-run'), { recursive: true })
+        fs.writeFileSync(path.join(home, 'runs', 'sentinel-run', 'sentinel.done'), 'FAILED\nSTOP_REASON=refusal\n')
+        peersMock.mockResolvedValue({ peers: [peerRow('sentinel-run', { label: 'planner', status: 'running' })] })
+        return await run()
+      } finally {
+        if (previousHome === undefined) delete process.env.AVENOR_HOME
+        else process.env.AVENOR_HOME = previousHome
+        fs.rmSync(home, { recursive: true, force: true })
+      }
+    }
+
+    it('on the supervisorId path', async () => {
+      const result = await withSentinel(() => peerStatusTool({ runId: 'sentinel-run', supervisorId }))
+
+      expect(result).toMatchObject({ run_id: 'sentinel-run', status: 'failed', stop_reason: 'refusal' })
+      brokerNotRead()
+    })
+
+    it('on the singleton path', async () => {
+      const result = await withSentinel(() => onSingleton(() => statusTool({ runId: 'sentinel-run' })))
+
+      expect(result).toMatchObject({ run_id: 'sentinel-run', status: 'failed', stop_reason: 'refusal' })
+      brokerNotRead()
+    })
   })
 })

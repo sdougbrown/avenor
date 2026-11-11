@@ -8,6 +8,8 @@ import {
   validateRunId,
 } from './validate.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
+import { brokerPeerStatus, findBrokerPeer } from './broker-peer.js'
+import { statusReportsNoRuntime } from './message-provider.js'
 import { sentinelStatusToResult } from './sentinel-status.js'
 import { findExternalRun, listExternalRuns } from './run-registry.js'
 import { findLocalRunByReference, findLocalRunByRuntimeId } from './run-resolution.js'
@@ -323,16 +325,28 @@ async function buildRunStatus(
   return result
 }
 
+/**
+ * Read one runtime's live status. `absent` is true only when the supervisor
+ * answered that it runs no such runtime, so a refusal or a transport failure
+ * is never read as the run being elsewhere.
+ */
+async function queryRuntimeStatus(
+  client: Client,
+  runtimeId: string | undefined,
+): Promise<{ live: Record<string, unknown> | null; absent: boolean }> {
+  if (!runtimeId) return { live: null, absent: false }
+  try {
+    return { live: await client.status(runtimeId), absent: false }
+  } catch (error) {
+    return { live: null, absent: statusReportsNoRuntime(error, runtimeId) }
+  }
+}
+
 async function queryLiveStatus(
   client: Client,
   runtimeId: string | undefined,
 ): Promise<Record<string, unknown> | null> {
-  if (!runtimeId) return null
-  try {
-    return await client.status(runtimeId)
-  } catch {
-    return null
-  }
+  return (await queryRuntimeStatus(client, runtimeId)).live
 }
 
 async function executeStatusTool(
@@ -353,10 +367,13 @@ async function executeStatusTool(
           return shapeStatusResult(await buildRunStatus(runInfo, liveStatus), args.view)
         }
 
-        let liveStatus = await queryLiveStatus(client, args.runId)
+        const probe = await queryRuntimeStatus(client, args.runId)
+        let liveStatus = probe.live
+        let listed = false
         if (!liveStatus) {
           try {
             const list = await client.list()
+            listed = true
             const entry = list.find((item) => {
               const runtimeId = String(item.runtime_id ?? item.id ?? '')
               const label = String(item.label ?? '')
@@ -377,6 +394,9 @@ async function executeStatusTool(
         let sentinel: Record<string, string> | null = null
         if (await sentinelExists(sentinelPath)) {
           sentinel = await parseSentinel(sentinelPath)
+        } else if (probe.absent && listed && !liveStatus) {
+          const peer = await findBrokerPeer(client, args.runId)
+          if (peer) return shapeStatusResult(brokerPeerStatus(peer), args.view)
         }
 
         return shapeStatusResult(buildBaseStatus(
@@ -440,11 +460,15 @@ async function executeStatusTool(
     }
 
     validateRunId(args.runId)
-    const liveStatus = await queryLiveStatus(client, args.runId)
+    const probe = await queryRuntimeStatus(client, args.runId)
+    const liveStatus = probe.live
     const sentinelPath = path.join(runsRoot(), args.runId, 'sentinel.done')
     let sentinel: Record<string, string> | null = null
     if (await sentinelExists(sentinelPath)) {
       sentinel = await parseSentinel(sentinelPath)
+    } else if (probe.absent) {
+      const peer = await findBrokerPeer(client, args.runId)
+      if (peer) return shapeStatusResult(brokerPeerStatus(peer), args.view)
     }
     return shapeStatusResult(buildBaseStatus(
       liveStatus ?? {},
