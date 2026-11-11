@@ -30,6 +30,7 @@ import type {
   PeerRecord,
   PeersProviderResult,
   ProviderResult,
+  RenameRequest,
   Resolution,
   RunFacts,
 } from './message.js'
@@ -90,7 +91,7 @@ export interface ChildBroker {
   reply(askerRunId: string | undefined, inboundAskId: string, message: string): Promise<ProviderResult>
   withdraw(messageId: string): Promise<ProviderResult>
   peers(): Promise<PeersProviderResult>
-  rename(req: { sessionId?: string; name: string }): Promise<ProviderResult>
+  rename(req: RenameRequest): Promise<ProviderResult>
   last(runId: string): Promise<ProviderResult>
 }
 

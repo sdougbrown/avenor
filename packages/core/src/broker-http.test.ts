@@ -430,7 +430,16 @@ describe('child broker routes', () => {
     })
     const result = await createBrokerChildBroker(env, fetchImpl).rename({ name: 'renamed' })
     expect(result).toMatchObject({ runId: 'rt_1', label: 'renamed', previousLabel: 'old' })
-    expect(calls[0].body).toMatchObject({ session_id: '', name: 'renamed' })
+    // An explicit rename says nothing about the name's origin.
+    expect(calls[0].body).toEqual({ run_id: 'rt_1', token: 'tok', session_id: '', name: 'renamed' })
+  })
+
+  it('sends the default marker only for a harness-derived label', async () => {
+    const { calls, fetchImpl } = stubFetch({
+      '/rename': () => Response.json({ run_id: 'rt_1', label: 'pi-repo', previous_label: '' }),
+    })
+    await createBrokerChildBroker(env, fetchImpl).rename({ name: 'pi-repo', default: true })
+    expect(calls[0].body).toEqual({ run_id: 'rt_1', token: 'tok', session_id: '', name: 'pi-repo', default: true })
   })
 
   it('reads the last message and maps an unavailable target to unknown_target', async () => {

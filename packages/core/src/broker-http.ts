@@ -699,7 +699,9 @@ export function createBrokerChildBroker(
         const body = await postBroker(
           env,
           '/rename',
-          { session_id: req.sessionId ?? '', name: req.name },
+          // Only a derived label carries the flag; an explicit rename sends the
+          // body it always sent, so older brokers see nothing new.
+          { session_id: req.sessionId ?? '', name: req.name, ...(req.default === true ? { default: true } : {}) },
           transport,
         ) as Record<string, unknown> | null
         return {
