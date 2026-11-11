@@ -53,6 +53,7 @@ import {
   validateSpawnSelection,
   runWorkflowTool,
   sessionLabel,
+  takenLabelsFromListing,
   type AskClaims,
   type Client,
   type InspectResult,
@@ -720,6 +721,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // remembered and not republished; a different name is still sent.
     let refusedSessionName: string | null = null
 
+    // The name the harness gives this session: Pi's own session name, then the
+    // environment's for a top-level session.
+    function harnessSessionName(manager: { getSessionName?: () => string | undefined }): string | undefined {
+      return manager.getSessionName?.() ?? (topLevelEnv ? process.env.AVENOR_SESSION_NAME ?? process.env.AVENOR_LABEL : undefined)
+    }
+
     function publishSessionName(ctx: ExtensionContext): Promise<void> {
       const env = subAgentEnv ?? (topLevelRegistered ? topLevelEnv : null)
       if (!env) return publishChain
@@ -730,7 +737,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       // present but reports undefined is a real clear and still publishes.
       const manager = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } }).sessionManager
       if (!manager || typeof manager.getSessionName !== 'function') return publishChain
-      const name = manager.getSessionName() ?? (topLevelEnv ? process.env.AVENOR_SESSION_NAME ?? process.env.AVENOR_LABEL : undefined)
+      const name = harnessSessionName(manager)
       if (publishedSessionName && publishedSessionName.name === name) return publishChain
       if (refusedSessionName === name) return publishChain
       // Record the attempt before it lands so a second read of the same name
@@ -1819,15 +1826,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       if (!env || !provider || defaultLabelPosted) return
       const manager = (ctx as { sessionManager?: { getSessionName?: () => string | undefined } }).sessionManager
       if (!manager || typeof manager.getSessionName !== 'function') return
-      const named = () => manager.getSessionName?.() || process.env.AVENOR_SESSION_NAME || process.env.AVENOR_LABEL
+      const named = () => (harnessSessionName(manager) ?? '') !== ''
       if (named()) return
       try {
         const base = hostLabel('pi', await sessionLabel(ctx.cwd))
         if (base === '') return
-        const listing = await provider.peers()
-        const taken = listing.detail === undefined
-          ? new Set(listing.peers.filter(peer => peer.run_id !== env.runId).map(peer => peer.label ?? ''))
-          : undefined
+        const taken = takenLabelsFromListing(await provider.peers(), env.runId)
         // A name landing during the reads is the person's and wins.
         if (signal.aborted || env !== topLevelEnv || named()) return
         await provider.rename({ name: pickSessionLabel(base, taken) })

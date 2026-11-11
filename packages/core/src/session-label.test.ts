@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 
 import fixture from '../../../schemas/session-name-rule.json'
 import { MAX_SESSION_NAME_RUNES, stripDisallowedSessionNameRunes } from './message.js'
-import { hostLabel, labelUsable, sanitizeSessionLabel, sessionLabel } from './session-label.js'
+import { hostLabel, labelUsable, pickSessionLabel, sanitizeSessionLabel, sessionLabel, takenLabelsFromListing } from './session-label.js'
 
 type NameRuleFixture = {
   limit: number
@@ -11,6 +11,7 @@ type NameRuleFixture = {
   sanitizeCases: Array<{ name: string; input: string; label: string }>
   deriveCases: Array<{ name: string; toplevel: string; branch: string; label: string }>
   hostCases: Array<{ name: string; host: string; work: string; label: string }>
+  pickCases: Array<{ name: string; base: string; taken: string[]; label: string }>
 }
 
 const rule = fixture as NameRuleFixture
@@ -61,4 +62,31 @@ describe('session name rule conformance', () => {
       expect(hostLabel(c.host, c.work)).toBe(c.label)
     })
   }
+
+  for (const c of rule.pickCases) {
+    it(`picks case: ${c.name}`, () => {
+      expect(pickSessionLabel(c.base, new Set(c.taken))).toBe(c.label)
+    })
+  }
+})
+
+describe('takenLabelsFromListing', () => {
+  const peers = [
+    { run_id: 'a', label: 'one' },
+    { run_id: 'b', label: 'two' },
+    { run_id: 'c' },
+    { run_id: 'd', label: '' },
+  ]
+
+  it('collects the labels the listed peers hold', () => {
+    expect(takenLabelsFromListing({ peers })).toEqual(new Set(['one', 'two']))
+  })
+
+  it('leaves out the excluded run', () => {
+    expect(takenLabelsFromListing({ peers }, 'a')).toEqual(new Set(['two']))
+  })
+
+  it('is no information when the listing is marked incomplete', () => {
+    expect(takenLabelsFromListing({ peers, detail: 'one host did not answer' })).toBeUndefined()
+  })
 })

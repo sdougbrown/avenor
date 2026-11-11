@@ -27,7 +27,7 @@ afterEach(() => {
   }
 })
 
-function broker(heldLabels: string[] = []) {
+function broker(heldLabels: string[] = [], sessions?: () => Response | Promise<Response>) {
   const calls: Array<{ path: string; body: Record<string, unknown> }> = []
   globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
     const path = new URL(String(url)).pathname
@@ -35,6 +35,7 @@ function broker(heldLabels: string[] = []) {
     calls.push({ path, body })
     if (path === '/register') return Response.json(body)
     if (path === '/sessions') {
+      if (sessions) return sessions()
       return Response.json({
         generation: 'gen',
         sessions: [
@@ -97,6 +98,66 @@ test('an environment name is published as before and no default label is derived
   const h = await startTopLevel()
   try {
     await waitFor(() => calls.some(call => call.path === '/session_name' && call.body.name === 'from-env'))
+    await waitFor(() => calls.some(call => call.path === '/poll-control'))
+    expect(calls.some(call => call.path === '/rename')).toBe(false)
+  } finally { await h.eventHandlers.session_shutdown({}, {}) }
+})
+
+test('an AVENOR_LABEL environment name derives no default label', async () => {
+  delete process.env.AVENOR_SESSION_NAME
+  process.env.AVENOR_LABEL = 'label-from-env'
+  const calls = broker()
+  const h = await startTopLevel()
+  try {
+    await waitFor(() => calls.some(call => call.path === '/poll-control'))
+    expect(calls.some(call => call.path === '/rename')).toBe(false)
+  } finally { await h.eventHandlers.session_shutdown({}, {}) }
+})
+
+test('a peers read that fails leaves registration intact and the label unset', async () => {
+  delete process.env.AVENOR_SESSION_NAME
+  delete process.env.AVENOR_LABEL
+  let sessionReads = 0
+  const calls = broker([], () => (++sessionReads === 1 ? new Response('boom', { status: 500 }) : Response.json({ generation: 'gen', sessions: [] })))
+  const h = await startTopLevel()
+  try {
+    await waitFor(() => calls.some(call => call.path === '/poll-control'))
+    expect(calls.some(call => call.path === '/register')).toBe(true)
+    expect(calls.some(call => call.path === '/rename')).toBe(false)
+    // A registration marked failed would reject every tool call.
+    expect((await h.registeredTools.avenor_peers.execute('p', {})).details.peers).toEqual([])
+  } finally { await h.eventHandlers.session_shutdown({}, {}) }
+})
+
+test('an incomplete peers listing keeps the unsuffixed label', async () => {
+  delete process.env.AVENOR_SESSION_NAME
+  delete process.env.AVENOR_LABEL
+  const calls = broker([], () => Response.json({
+    generation: 'gen',
+    sessions: [{ run_id: 'other', label: 'pi-demo-repo@feat-x', status: 'running' }],
+    peers_error: 'one host did not answer',
+  }))
+  const h = await startTopLevel()
+  try {
+    await waitFor(() => calls.some(call => call.path === '/rename'))
+    expect(calls.find(call => call.path === '/rename')!.body.name).toBe('pi-demo-repo@feat-x')
+  } finally { await h.eventHandlers.session_shutdown({}, {}) }
+})
+
+test('a Pi session name arriving during the peers read wins over the derived label', async () => {
+  delete process.env.AVENOR_SESSION_NAME
+  delete process.env.AVENOR_LABEL
+  let name: string | undefined
+  let release: (response: Response) => void = () => {}
+  const pending = new Promise<Response>(resolve => { release = resolve })
+  const calls = broker([], () => pending)
+  // session_start awaits registration, which is parked on the peers read.
+  const started = startTopLevel(() => name)
+  await waitFor(() => calls.some(call => call.path === '/sessions'))
+  name = 'chosen-late'
+  release(Response.json({ generation: 'gen', sessions: [] }))
+  const h = await started
+  try {
     await waitFor(() => calls.some(call => call.path === '/poll-control'))
     expect(calls.some(call => call.path === '/rename')).toBe(false)
   } finally { await h.eventHandlers.session_shutdown({}, {}) }

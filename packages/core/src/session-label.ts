@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import * as nodePath from 'node:path'
 import { MAX_SESSION_NAME_RUNES, RESERVED_SESSION_REFERENCES, stripDisallowedSessionNameRunes } from './message.js'
+import type { PeersProviderResult } from './message.js'
 import { boundedRunes } from './messaging-text.js'
 
 /**
@@ -84,6 +85,21 @@ export function hostLabel(host: string, work: string): string {
 // spelled out: the room a truncation must leave for one.
 const MAX_LABEL_SUFFIX = 9
 const MAX_LABEL_SUFFIX_TEXT = '-9'
+
+/**
+ * The labels the peers in a listing hold, leaving out the peer whose run id is
+ * excludeRunId. A listing marked incomplete (detail set) is no information and
+ * yields undefined, so the caller keeps its unsuffixed base rather than guess
+ * at labels the listing did not carry.
+ */
+export function takenLabelsFromListing(listing: PeersProviderResult, excludeRunId?: string): Set<string> | undefined {
+  if (listing.detail !== undefined) return undefined
+  const taken = new Set<string>()
+  for (const peer of listing.peers) {
+    if (peer.label && peer.run_id !== excludeRunId) taken.add(peer.label)
+  }
+  return taken
+}
 
 /**
  * The label a session publishes for its derived base: the base itself when no

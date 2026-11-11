@@ -41,6 +41,7 @@ import {
   publishLastTurn,
   pickSessionLabel,
   sessionLabel,
+  takenLabelsFromListing,
   resultTool,
   sanitize,
   type MessageProvider,
@@ -1683,13 +1684,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     const provider = conversationProviders.get(sessionId)
     if (!provider) return undefined
     try {
-      const listing = await provider.peers()
-      if (listing.detail !== undefined) return undefined
-      const taken = new Set<string>()
-      for (const peer of listing.peers) {
-        if (peer.label) taken.add(peer.label)
-      }
-      return taken
+      return takenLabelsFromListing(await provider.peers())
     } catch {
       return undefined
     }
