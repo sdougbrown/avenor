@@ -313,3 +313,67 @@ func TestAttemptSpawnDirSharesTheSupervisorWorkingDir(t *testing.T) {
 		t.Fatalf("attempt spawn dir = %q, want the configured working directory %q", got, dir)
 	}
 }
+
+func TestBrokerIsLocal(t *testing.T) {
+	rows := []struct {
+		url, hostname string
+		local         bool
+	}{
+		{"", "fenwick", true},
+		{"not a url", "fenwick", true},
+		{"http://127.0.0.1:8787", "fenwick", true},
+		{"http://127.1.2.3", "fenwick", true},
+		{"http://localhost:8787", "fenwick", true},
+		{"http://LOCALHOST:8787", "fenwick", true},
+		{"http://[::1]:8787", "fenwick", true},
+		{"https://fenwick.lan:8443", "fenwick.home", true},
+		{"https://FENWICK.lan:8443", "fenwick", true},
+		{"https://broker.example.com", "fenwick", false},
+		{"https://broker.example.com", "", false},
+		{"http://10.0.0.5:8787", "fenwick", false},
+	}
+	for _, row := range rows {
+		if got := brokerIsLocal(row.url, row.hostname); got != row.local {
+			t.Errorf("brokerIsLocal(%q, %q) = %v, want %v", row.url, row.hostname, got, row.local)
+		}
+	}
+}
+
+func TestHostPrefixedLabel(t *testing.T) {
+	if got := hostPrefixedLabel("avenor@feat-x", "grace.home.example.com"); got != "grace-avenor@feat-x" {
+		t.Fatalf("prefixed label = %q", got)
+	}
+	if got := hostPrefixedLabel("avenor", ""); got != "avenor" {
+		t.Fatalf("an unknown hostname changed the label to %q", got)
+	}
+	long := strings.Repeat("a", 70)
+	got := hostPrefixedLabel(long, "grace")
+	if n := len([]rune(got)); n != messaging.MaxSessionNameRunes || !messaging.ValidSessionName(got) {
+		t.Fatalf("a long label became %q (%d runes)", got, n)
+	}
+}
+
+func TestSupervisorLabelLeadsWithTheHostnameForARemoteParent(t *testing.T) {
+	repo := gitRepoWithBranch(t, "main")
+	cases := []struct {
+		name, parent, want string
+	}{
+		{"a remote parent adds the hostname", "https://broker.example.com", "fenwick-" + filepath.Base(repo)},
+		{"a loopback parent adds none", "http://127.0.0.1:8787", filepath.Base(repo)},
+		{"the machine's own name adds none", "https://fenwick.lan:8443", filepath.Base(repo)},
+		{"a root supervisor adds none", "", filepath.Base(repo)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := Config{WorkingDir: repo, Hostname: "fenwick.lan"}
+			if c.parent != "" {
+				cfg.BrokerParentURL = c.parent
+				cfg.BrokerParentToken = "parent-token"
+			}
+			sup := newTestSupervisor(t, cfg)
+			if got := sup.broker.DisplayName(messaging.SupervisorRunID); got != c.want {
+				t.Fatalf("supervisor display name = %q, want %q", got, c.want)
+			}
+		})
+	}
+}

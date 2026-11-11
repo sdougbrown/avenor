@@ -2,6 +2,8 @@ package stable
 
 import (
 	"context"
+	"net"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -164,4 +166,45 @@ func sanitizeSessionLabel(label string) string {
 		label = strings.ReplaceAll(label, "--", "-")
 	}
 	return strings.Trim(truncateSessionLabel(label, messaging.MaxSessionNameRunes), "-")
+}
+
+// shortHost is a machine name without its domain: "grace.home.example.com" is
+// "grace".
+func shortHost(name string) string {
+	short, _, _ := strings.Cut(strings.TrimSpace(name), ".")
+	return short
+}
+
+// brokerIsLocal reports whether the broker at rawURL runs on this machine: a
+// loopback address, or the machine's own name. An empty or unparseable URL
+// counts as local, so no prefix is added on a guess. The Claude, Pi and Codex
+// harness defaults apply the same rule to the broker they register on
+// (marketplace/plugins/avenor/hooks/label.js, packages/core/src/session-label.ts).
+func brokerIsLocal(rawURL, hostname string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Hostname() == "" {
+		return true
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return hostname != "" && shortHost(host) == strings.ToLower(shortHost(hostname))
+}
+
+// hostPrefixedLabel leads label with the machine's short hostname, sanitized
+// and cut to the name limit. A hostname that yields nothing usable leaves the
+// label as it was.
+func hostPrefixedLabel(label, hostname string) string {
+	short := sanitizeSessionLabel(shortHost(hostname))
+	if short == "" {
+		return label
+	}
+	if prefixed := sanitizeSessionLabel(short + "-" + label); labelUsable(prefixed) {
+		return prefixed
+	}
+	return label
 }
