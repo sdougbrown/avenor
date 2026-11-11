@@ -1,11 +1,13 @@
 package stable
 
 import (
+	"errors"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
+	"github.com/sdougbrown/avenor/internal/runtime/broker"
 	"github.com/sdougbrown/avenor/internal/tooladmission"
 )
 
@@ -21,6 +23,13 @@ const (
 // Broker.RenameRun (the one display-name writer) together with the runtime
 // registry's copy, and publishes session.renamed after the write.
 func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name string) (messaging.RenameResult, error) {
+	return s.sessionRename(caller, sessionID, name, false)
+}
+
+// sessionRename is SessionRename with the harness-default switch: asDefault
+// makes a name another run wears unique with the run's tail instead of refusing
+// it.
+func (s *Supervisor) sessionRename(caller messaging.Caller, sessionID, name string, asDefault bool) (messaging.RenameResult, error) {
 	if !messaging.ValidSessionName(name) {
 		return messaging.RenameResult{}, &router.ToolError{
 			Code:    "invalid_name",
@@ -50,8 +59,16 @@ func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name stri
 	}
 
 	previous := s.broker.DisplayName(runID)
-	renamed, err := s.applySessionName(runID, name)
+	renamed, err := s.applySessionName(runID, name, asDefault)
 	if err != nil {
+		var taken *broker.LabelTakenError
+		if errors.As(err, &taken) {
+			return messaging.RenameResult{}, &router.ToolError{
+				Code:    "invalid_name",
+				Message: taken.Error(),
+				Facts:   map[string]string{"name": tooladmission.Quote(name)},
+			}
+		}
 		return messaging.RenameResult{}, err
 	}
 	// Persist then event: an event failure never rolls the name back, and a
@@ -67,10 +84,16 @@ func (s *Supervisor) SessionRename(caller messaging.Caller, sessionID, name stri
 // never sees the new broker name beside the old runtime name and a concurrent
 // keyed spawn sees the old name held or the new name held, never both free. The
 // supervisor session is broker-only: it has no child runtime to update.
-func (s *Supervisor) applySessionName(runID, name string) (string, error) {
+func (s *Supervisor) applySessionName(runID, name string, asDefault bool) (string, error) {
 	s.controlMu.Lock()
 	defer s.controlMu.Unlock()
-	if err := s.broker.RenameRun(runID, name); err != nil {
+	var err error
+	if asDefault {
+		_, err = s.broker.RenameRunDefault(runID, name)
+	} else {
+		err = s.broker.RenameRun(runID, name)
+	}
+	if err != nil {
 		return "", err
 	}
 	renamed := s.broker.DisplayName(runID)

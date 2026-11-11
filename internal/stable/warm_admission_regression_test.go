@@ -138,7 +138,7 @@ func TestWarmReservationAllowsControlAndRechecksAdmission(t *testing.T) {
 				if err == nil {
 					sup.List()
 					if change == "label" {
-						_, err = sup.applySessionName("other", "next-label")
+						_, err = sup.applySessionName("other", "next-label", false)
 					} else {
 						sup.controlMu.Lock()
 						sup.shuttingDown = true

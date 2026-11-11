@@ -494,3 +494,48 @@ func TestSessionRenameUnderAHarnessName(t *testing.T) {
 		t.Fatalf("runtime display name after clear = %q, want the renamed model-set label", got)
 	}
 }
+
+func TestSessionRenameRefusesANameAnotherRunWears(t *testing.T) {
+	t.Parallel()
+	sup, _ := newStage2Supervisor(t, 4)
+	for id, label := range map[string]string{"rt_a": "label-a", "rt_b": "label-b"} {
+		if _, err := sup.broker.CreateRun(id, label); err != nil {
+			t.Fatalf("create run: %v", err)
+		}
+	}
+	_, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_b"}, "", "label-a")
+	assertToolCode(t, err, "invalid_name")
+	if want := `the name "label-a" is already held by rt_a`; err.Error() != want {
+		t.Fatalf("taken-name text = %q, want %q", err, want)
+	}
+	if got := sup.broker.DisplayName("rt_b"); got != "label-b" {
+		t.Fatalf("label after the refusal = %q", got)
+	}
+	// The supervisor session is held to the same rule.
+	_, err = sup.SessionRename(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, "", "label-a")
+	assertToolCode(t, err, "invalid_name")
+	// A name nobody wears is still free.
+	if _, err := sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_b"}, "", "label-c"); err != nil {
+		t.Fatalf("a free name was refused: %v", err)
+	}
+}
+
+func TestSessionRenameMakesADefaultUniqueThroughTheAuthority(t *testing.T) {
+	t.Parallel()
+	sup, _ := newStage2Supervisor(t, 4)
+	for id, label := range map[string]string{"rt_a": "label-a", "rt_b": "label-b"} {
+		if _, err := sup.broker.CreateRun(id, label); err != nil {
+			t.Fatalf("create run: %v", err)
+		}
+	}
+	result, err := sup.sessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: "rt_b"}, "", "label-a", true)
+	if err != nil {
+		t.Fatalf("a default for a taken name: %v", err)
+	}
+	if result.Label != "label-a-rtb" {
+		t.Fatalf("default label = %q, want label-a-rtb", result.Label)
+	}
+	if got := sup.broker.DisplayName("rt_b"); got != "label-a-rtb" {
+		t.Fatalf("stored label = %q", got)
+	}
+}

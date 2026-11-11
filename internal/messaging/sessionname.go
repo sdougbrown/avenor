@@ -87,3 +87,40 @@ func ValidSessionID(id string) bool {
 	}
 	return !disallowedIdentifierRunes(id)
 }
+
+// runLabelTailRunes is how many trailing characters of a run id tell its label
+// from another run's.
+const runLabelTailRunes = 6
+
+// RunLabelTail is the last six letters and digits of a run id.
+func RunLabelTail(runID string) string {
+	var kept []rune
+	for _, r := range runID {
+		if r < 0x80 && (r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+			kept = append(kept, r)
+		}
+	}
+	if len(kept) > runLabelTailRunes {
+		kept = kept[len(kept)-runLabelTailRunes:]
+	}
+	return string(kept)
+}
+
+// LabelWithRunTail follows label with a dash and the run's tail, cutting the
+// label to leave room within the name limit. It returns the label unchanged
+// when the run id carries no tail, and "" when nothing of the label is left.
+func LabelWithRunTail(label, runID string) string {
+	tail := RunLabelTail(runID)
+	if tail == "" {
+		return label
+	}
+	stem := []rune(label)
+	if limit := MaxSessionNameRunes - 1 - len([]rune(tail)); len(stem) > limit {
+		stem = stem[:limit]
+	}
+	trimmed := strings.TrimRight(string(stem), "-")
+	if trimmed == "" {
+		return ""
+	}
+	return trimmed + "-" + tail
+}
