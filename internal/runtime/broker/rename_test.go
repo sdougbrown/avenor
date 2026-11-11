@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -154,7 +157,7 @@ func TestRenameEndpointRows(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create run: %v", err)
 			}
-			b.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
+			b.SetRenameHandler(func(callerRunID, sessionID, name string, _ bool) (messaging.RenameResult, error) {
 				return messaging.RenameResult{}, row.handlerErr
 			})
 			status, body := postAuthBroker(t, b.Addr(), "/rename", "rt_1", token, map[string]any{"name": "after"})
@@ -184,7 +187,7 @@ func TestRenameEndpointSuccessUsesHandlerResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	b.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
+	b.SetRenameHandler(func(callerRunID, sessionID, name string, _ bool) (messaging.RenameResult, error) {
 		if callerRunID != "rt_1" {
 			t.Fatalf("caller = %q, want rt_1", callerRunID)
 		}
@@ -428,7 +431,7 @@ func TestRenameEndpointRefusesAnotherRunsRunID(t *testing.T) {
 	if _, err := b.CreateRun("rt_b", "name-b"); err != nil {
 		t.Fatalf("create run b: %v", err)
 	}
-	b.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
+	b.SetRenameHandler(func(callerRunID, sessionID, name string, _ bool) (messaging.RenameResult, error) {
 		if err := b.RenameRun(callerRunID, name); err != nil {
 			return messaging.RenameResult{}, err
 		}
@@ -453,7 +456,7 @@ func TestRenameHandlerRefusesBodyRunIDThatIsNotTheAuthenticatedCaller(t *testing
 		t.Fatalf("create run b: %v", err)
 	}
 	handlerCalled := false
-	b.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
+	b.SetRenameHandler(func(callerRunID, sessionID, name string, _ bool) (messaging.RenameResult, error) {
 		handlerCalled = true
 		return messaging.RenameResult{RunID: callerRunID, Label: name}, nil
 	})
@@ -494,5 +497,249 @@ func TestRenameFallbackRefusesBodyRunIDThatIsNotTheAuthenticatedCaller(t *testin
 	}
 	if got := b.DisplayName("rt_a"); got != "name-a" {
 		t.Fatalf("caller label = %q, want name-a", got)
+	}
+}
+
+func TestRenameRunRefusesAnotherRunsName(t *testing.T) {
+	b := New("")
+	for _, id := range []string{"rt_1", "rt_2"} {
+		if _, err := b.CreateRun(id, id); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	if err := b.RenameRun("rt_1", "mesh"); err != nil {
+		t.Fatalf("first rename: %v", err)
+	}
+	err := b.RenameRun("rt_2", "mesh")
+	var taken *LabelTakenError
+	if !errors.As(err, &taken) || taken.HolderRunID != "rt_1" || taken.Label != "mesh" {
+		t.Fatalf("second rename error = %v, want a LabelTakenError held by rt_1", err)
+	}
+	if got := b.DisplayName("rt_2"); got != "rt_2" {
+		t.Fatalf("refused rename changed the label to %q", got)
+	}
+	if err := b.RenameRun("rt_1", "mesh"); err != nil {
+		t.Fatalf("renaming a run to the name it already wears: %v", err)
+	}
+	if err := b.RenameRun("rt_1", ""); err != nil {
+		t.Fatalf("resetting a name: %v", err)
+	}
+	if err := b.RenameRun("rt_2", "mesh"); err != nil {
+		t.Fatalf("a name the holder gave up: %v", err)
+	}
+}
+
+func TestRenameRunDefaultSuffixesOnlyATakenName(t *testing.T) {
+	b := New("")
+	for _, id := range []string{"claude-a001f5", "claude-b002e6", "squatter"} {
+		if _, err := b.CreateRun(id, id); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	if got, err := b.RenameRunDefault("claude-b002e6", "claude-avenor"); err != nil || got != "claude-avenor" {
+		t.Fatalf("a free default = %q, %v", got, err)
+	}
+	if got, err := b.RenameRunDefault("claude-a001f5", "claude-avenor"); err != nil || got != "claude-avenor-a001f5" {
+		t.Fatalf("a taken default = %q, %v, want claude-avenor-a001f5", got, err)
+	}
+	if got := b.DisplayName("claude-a001f5"); got != "claude-avenor-a001f5" {
+		t.Fatalf("label after the default = %q", got)
+	}
+	// The holder renaming to its own name keeps it.
+	if got, err := b.RenameRunDefault("claude-b002e6", "claude-avenor"); err != nil || got != "claude-avenor" {
+		t.Fatalf("the holder's own default = %q, %v", got, err)
+	}
+	// When the tail name is worn too, a counter goes before the tail.
+	if err := b.RenameRun("squatter", "mesh-b002e6"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RenameRun("claude-a001f5", "mesh"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := b.RenameRunDefault("claude-b002e6", "mesh"); err != nil || got != "mesh-2-b002e6" {
+		t.Fatalf("a default whose tail name is taken = %q, %v, want mesh-2-b002e6", got, err)
+	}
+}
+
+func TestConcurrentRenamesToOneNameHaveOneWinner(t *testing.T) {
+	const n = 16
+	// The race is a short window, so the same contest runs many times.
+	for round := 0; round < 100; round++ {
+		b := New("")
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("claude-%06x", i+1)
+			if _, err := b.CreateRun(ids[i], ids[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		contest := func(call func(id string) error) []error {
+			start := make(chan struct{})
+			errs := make([]error, n)
+			var wg sync.WaitGroup
+			for i, id := range ids {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					errs[i] = call(id)
+				}()
+			}
+			close(start)
+			wg.Wait()
+			return errs
+		}
+		won := 0
+		for _, err := range contest(func(id string) error { return b.RenameRun(id, "same") }) {
+			var taken *LabelTakenError
+			switch {
+			case err == nil:
+				won++
+			case !errors.As(err, &taken):
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+		if won != 1 {
+			t.Fatalf("round %d: %d runs won the name, want exactly one", round, won)
+		}
+
+		// Defaults chosen at once all succeed, each with a different name.
+		var mu sync.Mutex
+		names := map[string]bool{}
+		for _, err := range contest(func(id string) error {
+			got, err := b.RenameRunDefault(id, "shared")
+			mu.Lock()
+			names[got] = true
+			mu.Unlock()
+			return err
+		}) {
+			if err != nil {
+				t.Fatalf("round %d: a default was refused: %v", round, err)
+			}
+		}
+		if len(names) != n {
+			t.Fatalf("round %d: %d distinct default names for %d runs: %v", round, len(names), n, names)
+		}
+	}
+}
+
+func TestRenameRunCountsAChildBrokersRunButNotALapsedPeer(t *testing.T) {
+	b := New("")
+	b.ownRun(messaging.ClaimedRun{Key: "desc", RunClaim: messaging.RunClaim{RunID: "desc", Label: "branch-label"}}, true)
+	for _, id := range []string{"rt_1", "rt_2", "rt_3"} {
+		if _, err := b.CreateRun(id, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var taken *LabelTakenError
+	if err := b.RenameRun("rt_1", "branch-label"); !errors.As(err, &taken) || taken.HolderRunID != "desc" {
+		t.Fatalf("renaming to a child broker's label = %v, want it held by desc", err)
+	}
+
+	if err := b.RenameRun("rt_2", "worn-by-a-peer"); err != nil {
+		t.Fatal(err)
+	}
+	st := b.GetRun("rt_2")
+	st.Mu.Lock()
+	st.peer = true
+	st.peerDeadline = time.Now().Add(-time.Second)
+	st.Mu.Unlock()
+	if err := b.RenameRun("rt_3", "worn-by-a-peer"); err != nil {
+		t.Fatalf("a lapsed peer's name was held: %v", err)
+	}
+}
+
+func TestRenameRunKeepsANameAnUncheckedWriterDuplicated(t *testing.T) {
+	b := New("")
+	for _, id := range []string{"rt_1", "rt_2"} {
+		if _, err := b.CreateRun(id, "worker"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.RenameRun("rt_1", "worker"); err != nil {
+		t.Fatalf("a run renaming to the name it already wears: %v", err)
+	}
+}
+
+func TestRenameEndpointRefusesATakenNameUnlessItIsADefault(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	holderToken, err := b.CreateRun("claude-a001f5", "claude-a001f5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := b.CreateRun("claude-b002e6", "claude-b002e6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, body := postAuthBroker(t, b.Addr(), "/rename", "claude-a001f5", holderToken, map[string]any{"name": "claude-avenor"}); status != http.StatusOK {
+		t.Fatalf("holder rename = %d %v", status, body)
+	}
+
+	status, body := postAuthBroker(t, b.Addr(), "/rename", "claude-b002e6", token, map[string]any{"name": "claude-avenor"})
+	if status != http.StatusBadRequest || body["code"] != "invalid-name" || !strings.Contains(body["error"].(string), "already held by claude-a001f5") {
+		t.Fatalf("explicit rename to a taken name = %d %v, want 400 invalid-name naming the holder", status, body)
+	}
+	if got := b.DisplayName("claude-b002e6"); got != "claude-b002e6" {
+		t.Fatalf("label after the refusal = %q", got)
+	}
+
+	status, body = postAuthBroker(t, b.Addr(), "/rename", "claude-b002e6", token, map[string]any{"name": "claude-avenor", "default": true})
+	if status != http.StatusOK || body["label"] != "claude-avenor-b002e6" {
+		t.Fatalf("default rename to a taken name = %d %v, want 200 claude-avenor-b002e6", status, body)
+	}
+
+	// A default whose name is free is kept as chosen.
+	status, body = postAuthBroker(t, b.Addr(), "/rename", "claude-b002e6", token, map[string]any{"name": "claude-other", "default": true})
+	if status != http.StatusOK || body["label"] != "claude-other" {
+		t.Fatalf("default rename to a free name = %d %v", status, body)
+	}
+
+	// A default that is not a valid name keeps the rule's refusal.
+	status, body = postAuthBroker(t, b.Addr(), "/rename", "claude-b002e6", token, map[string]any{"name": "two\nlines", "default": true})
+	if status != http.StatusBadRequest || body["code"] != "invalid-name" {
+		t.Fatalf("invalid default = %d %v", status, body)
+	}
+}
+
+func TestSessionNameEndpointStaysUnchangedByLabelHolders(t *testing.T) {
+	b := New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer b.Stop()
+	holderToken, _ := b.CreateRun("rt_1", "rt_1")
+	token, _ := b.CreateRun("rt_2", "rt_2")
+	postAuthBroker(t, b.Addr(), "/rename", "rt_1", holderToken, map[string]any{"name": "shared"})
+	// The harness-name route is not one of the checked paths: a person's name
+	// from the host is published as given.
+	if status, body := postAuthBroker(t, b.Addr(), "/session_name", "rt_2", token, map[string]any{"name": "shared"}); status != http.StatusOK {
+		t.Fatalf("session name = %d %v", status, body)
+	}
+}
+
+func TestRenameEndpointHandsTheDefaultSwitchToTheAuthority(t *testing.T) {
+	b := New("")
+	var gotName string
+	var gotDefault bool
+	b.SetRenameHandler(func(callerRunID, sessionID, name string, asDefault bool) (messaging.RenameResult, error) {
+		gotName, gotDefault = name, asDefault
+		return messaging.RenameResult{RunID: callerRunID, Label: name + "-tail", PreviousLabel: callerRunID}, nil
+	})
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Stop()
+	token, _ := b.CreateRun("rt_1", "rt_1")
+	status, body := postAuthBroker(t, b.Addr(), "/rename", "rt_1", token, map[string]any{"name": "claude-avenor", "default": true})
+	if status != http.StatusOK || gotName != "claude-avenor" || !gotDefault || body["label"] != "claude-avenor-tail" {
+		t.Fatalf("default rename = %d %v, handler got %q default=%v", status, body, gotName, gotDefault)
+	}
+	status, _ = postAuthBroker(t, b.Addr(), "/rename", "rt_1", token, map[string]any{"name": "claude-avenor"})
+	if status != http.StatusOK || gotDefault {
+		t.Fatalf("explicit rename reached the handler with default=%v", gotDefault)
 	}
 }

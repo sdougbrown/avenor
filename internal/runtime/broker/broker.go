@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -369,6 +370,9 @@ type Broker struct {
 	listener net.Listener
 	mu       sync.RWMutex
 	runs     map[string]*RunState
+	// labelMu serializes the renames that check a display name for another
+	// holder before they write it, so two renames cannot both find a name free.
+	labelMu sync.Mutex
 	// identity names the supervisor instance this broker mints records for, and
 	// is what makes a record "its own": a host sets it from state that outlives
 	// the process (Broker.SetIdentity), so a successor can adopt what its
@@ -576,10 +580,12 @@ func (b *Broker) runSetChanged() {
 }
 
 // RenameHandler is the authority a rename delegates to. It persists the name
-// and returns the resolved run and the label before and after the write. The
-// broker installs one only when a supervisor owns it; a broker without one
-// falls back to the caller's own record.
-type RenameHandler func(callerRunID, sessionID, name string) (messaging.RenameResult, error)
+// and returns the resolved run and the label before and after the write.
+// asDefault marks a name the harness chose and not a person, which the
+// authority makes unique instead of refusing. The broker installs one only
+// when a supervisor owns it; a broker without one falls back to the caller's
+// own record.
+type RenameHandler func(callerRunID, sessionID, name string, asDefault bool) (messaging.RenameResult, error)
 
 // SetRenameHandler installs the authority POST /rename delegates to.
 func (b *Broker) SetRenameHandler(fn RenameHandler) {
@@ -1942,6 +1948,10 @@ type renameRequest struct {
 	Token     string `json:"token"`
 	Name      string `json:"name"`
 	SessionID string `json:"session_id"`
+	// Default marks a name the harness chose, not a person: another run's
+	// holding it makes the name unique with the run's tail instead of
+	// refusing it. /rename only; /session_name ignores it.
+	Default bool `json:"default"`
 }
 
 // decodeRenameCaller reads the shared body and returns it with the caller
@@ -1999,8 +2009,14 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		previous := b.DisplayName(caller)
-		if err := b.RenameRun(caller, body.Name); err != nil {
-			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
+		var err error
+		if body.Default {
+			_, err = b.RenameRunDefault(caller, body.Name)
+		} else {
+			err = b.RenameRun(caller, body.Name)
+		}
+		if err != nil {
+			writeRenameError(w, err)
 			return
 		}
 		writeJSONBody(w, http.StatusOK, map[string]any{
@@ -2011,22 +2027,9 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := handler(caller, body.SessionID, body.Name)
+	result, err := handler(caller, body.SessionID, body.Name, body.Default)
 	if err != nil {
-		type toolCoder interface{ ToolCode() string }
-		var coded toolCoder
-		switch {
-		case errors.As(err, &coded) && coded.ToolCode() == "not_permitted":
-			writeCodedError(w, http.StatusForbidden, err.Error(), "not-permitted")
-		case errors.As(err, &coded) && coded.ToolCode() == "invalid_name":
-			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-name")
-		case errors.As(err, &coded) && coded.ToolCode() == "unknown_target":
-			writeCodedError(w, http.StatusNotFound, err.Error(), "unknown-target")
-		case errors.As(err, &coded) && coded.ToolCode() == "ambiguous_name":
-			writeCodedError(w, http.StatusConflict, err.Error(), "ambiguous-name")
-		default:
-			writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
-		}
+		writeRenameError(w, err)
 		return
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{
@@ -2034,6 +2037,26 @@ func (b *Broker) handleRename(w http.ResponseWriter, r *http.Request) {
 		"label":          result.Label,
 		"previous_label": result.PreviousLabel,
 	})
+}
+
+// writeRenameError answers a refused rename with the wire code its tool code
+// names, so the broker-only fallback and the supervisor's authority classify
+// the same refusal one way. An error with no tool code is a generic refusal.
+func writeRenameError(w http.ResponseWriter, err error) {
+	type toolCoder interface{ ToolCode() string }
+	var coded toolCoder
+	switch {
+	case errors.As(err, &coded) && coded.ToolCode() == "not_permitted":
+		writeCodedError(w, http.StatusForbidden, err.Error(), "not-permitted")
+	case errors.As(err, &coded) && coded.ToolCode() == "invalid_name":
+		writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-name")
+	case errors.As(err, &coded) && coded.ToolCode() == "unknown_target":
+		writeCodedError(w, http.StatusNotFound, err.Error(), "unknown-target")
+	case errors.As(err, &coded) && coded.ToolCode() == "ambiguous_name":
+		writeCodedError(w, http.StatusConflict, err.Error(), "ambiguous-name")
+	default:
+		writeCodedError(w, http.StatusBadRequest, err.Error(), "invalid-request")
+	}
 }
 
 // handleLastMessage reports any known run's recorded last turn. The target is
@@ -2732,9 +2755,24 @@ func (b *Broker) LockWarmAdmission(runID, name string, injectsMessages bool) (fu
 // RenameRun changes the model-set display name for runID. An empty name resets
 // the run to its run ID. A harness-supplied name, if any, still wins.
 func (b *Broker) RenameRun(runID, name string) error {
+	_, err := b.renameRun(runID, name, false)
+	return err
+}
+
+// RenameRunDefault renames a run to a name the harness chose and not a person:
+// when another run wears the name, it is followed by the run's tail (and a
+// counter in the rare case that is worn too) instead of being refused. The
+// name is chosen and written under one hold of labelMu, so two runs that choose
+// the same default at once get two different names. It returns the name
+// written.
+func (b *Broker) RenameRunDefault(runID, name string) (string, error) {
+	return b.renameRun(runID, name, true)
+}
+
+func (b *Broker) renameRun(runID, name string, asDefault bool) (string, error) {
 	st := b.GetRun(runID)
 	if st == nil {
-		return fmt.Errorf("run not found: %s", runID)
+		return "", fmt.Errorf("run not found: %s", runID)
 	}
 	b.mu.RLock()
 	descendant := st.descendant
@@ -2742,10 +2780,31 @@ func (b *Broker) RenameRun(runID, name string) error {
 	if descendant {
 		// The run's display name belongs to the branch that owns it; a rename
 		// written to this broker's copy would be reverted by the next claim.
-		return fmt.Errorf("run %s is owned by a child broker", runID)
+		return "", fmt.Errorf("run %s is owned by a child broker", runID)
 	}
 	if name == "" {
 		name = runID
+	}
+	b.labelMu.Lock()
+	defer b.labelMu.Unlock()
+	st.Mu.Lock()
+	current := st.labelLocked()
+	st.Mu.Unlock()
+	// A run keeps the name it already wears, even when an unchecked writer left
+	// another run wearing it too.
+	if name != runID && name != current {
+		holder := b.labelHolder(name, runID)
+		switch {
+		case holder == "":
+		case asDefault:
+			unique, ok := b.uniqueDefault(name, runID)
+			if !ok {
+				return "", &LabelTakenError{Label: name, HolderRunID: holder}
+			}
+			name = unique
+		default:
+			return "", &LabelTakenError{Label: name, HolderRunID: holder}
+		}
 	}
 	st.Mu.Lock()
 	st.setLabelLocked(runID, name)
@@ -2753,7 +2812,26 @@ func (b *Broker) RenameRun(runID, name string) error {
 	// The label is what a host publishes about this run, so a rename is a
 	// run-set change even though the set itself did not change.
 	b.runSetChanged()
-	return nil
+	return name, nil
+}
+
+// uniqueDefault is label followed by the run's tail, and then by a counter
+// before the tail while the result is worn too. The caller holds labelMu.
+func (b *Broker) uniqueDefault(label, runID string) (string, bool) {
+	for i := 1; i <= 9; i++ {
+		base := label
+		if i > 1 {
+			base = label + "-" + strconv.Itoa(i)
+		}
+		candidate := messaging.LabelWithRunTail(base, runID)
+		if candidate == "" || !messaging.ValidSessionName(candidate) {
+			continue
+		}
+		if b.labelHolder(candidate, runID) == "" {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 // DeleteRun removes a run from the broker. Safe to call even if the run
@@ -3144,4 +3222,48 @@ func writeJSONBody(w http.ResponseWriter, status int, body map[string]any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// LabelTakenError reports a rename to a name another run already wears. It
+// answers as an invalid name, the refusal every rename caller already handles,
+// with its own message.
+type LabelTakenError struct {
+	Label       string
+	HolderRunID string
+}
+
+func (e *LabelTakenError) Error() string {
+	return fmt.Sprintf("the name %q is already held by %s", e.Label, e.HolderRunID)
+}
+
+// ToolCode is the router's refusal for a name that cannot be used.
+func (e *LabelTakenError) ToolCode() string { return "invalid_name" }
+
+// labelHolder returns the run, other than except, whose display name is label,
+// or "". It differs from MatchLabel on purpose: MatchLabel finds the runs this
+// broker routes a name to and so skips a run a child broker owns, while a name
+// this broker lists must be unique across everything it lists, that run
+// included. A run whose peer lease expired does not count, because it is not
+// listed. The caller holds labelMu.
+func (b *Broker) labelHolder(label, except string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	now := time.Now()
+	holders := make([]string, 0, 1)
+	for runID, st := range b.runs {
+		if runID == except {
+			continue
+		}
+		st.Mu.Lock()
+		held := st.labelLocked() == label && st.peerUnavailableLocked(now) == ""
+		st.Mu.Unlock()
+		if held {
+			holders = append(holders, runID)
+		}
+	}
+	sort.Strings(holders)
+	if len(holders) == 0 {
+		return ""
+	}
+	return holders[0]
 }

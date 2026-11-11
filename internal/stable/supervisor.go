@@ -940,8 +940,8 @@ func NewSupervisor(cfg Config) *Supervisor {
 		sup.messaging = sup.broker.MessengerTransport()
 		// POST /rename decides nothing itself: it forwards the authenticated
 		// caller and the optional target to the one authority.
-		sup.broker.SetRenameHandler(func(callerRunID, sessionID, name string) (messaging.RenameResult, error) {
-			return sup.SessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: callerRunID}, sessionID, name)
+		sup.broker.SetRenameHandler(func(callerRunID, sessionID, name string, asDefault bool) (messaging.RenameResult, error) {
+			return sup.sessionRename(messaging.Caller{Kind: messaging.CallerBroker, RunID: callerRunID}, sessionID, name, asDefault)
 		})
 		// The harness writes a session name straight to the broker's own label
 		// half. The runtime copy follows it under the same locks /rename writes
