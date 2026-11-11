@@ -5,6 +5,8 @@ import { type Client } from '../client.js'
 import { asRecord } from '../value-fields.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { validateRunId } from './validate.js'
+import { BROKER_PEER_NO_EVENTS, findBrokerPeer } from './broker-peer.js'
+import { statusReportsNoRuntime } from './message-provider.js'
 import { findExternalRun } from './run-registry.js'
 import { findLocalRunByReference } from './run-resolution.js'
 
@@ -191,7 +193,11 @@ async function resolveRun(
         return runtime === args.runId || label === args.runId || runId === args.runId
       })
       if (!match) {
+        const peer = statusReportsNoRuntime(statusError, args.runId)
+          ? await findBrokerPeer(client, args.runId)
+          : undefined
         if (!isSingleton) client.close()
+        if (peer) throw new Error(BROKER_PEER_NO_EVENTS)
         throw contextualError(`unable to resolve run ${args.runId}`, statusError)
       }
       runtimeId = String(match.runtime_id ?? match.id ?? '') || undefined
@@ -225,6 +231,10 @@ async function resolveRun(
       (direct.event_path as string | undefined) ??
       (direct.on_event as string | undefined)
   } catch (error) {
+    if (
+      statusReportsNoRuntime(error, args.runId) &&
+      await findBrokerPeer(sup.getClient(), args.runId)
+    ) throw new Error(BROKER_PEER_NO_EVENTS)
     throw contextualError(`unable to resolve run ${args.runId}`, error)
   }
 

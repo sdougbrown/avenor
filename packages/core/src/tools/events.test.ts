@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import type { Client } from '../client.js'
+import { RpcError, type Client } from '../client.js'
 
 const historyMock = mock<Client['history']>(async () => ({ events: [] }))
 const statusMock = mock<Client['status']>(async () => {
@@ -10,12 +10,16 @@ const statusMock = mock<Client['status']>(async () => {
 })
 const listMock = mock<Client['list']>(async () => [])
 const closeMock = mock<Client['close']>(() => {})
+const preflightMock = mock(async () => ({ protocol: 1, generation: 'gen-1' }))
+const peersMock = mock(async (_params: { generation: string }): Promise<any> => ({ peers: [] }))
 const getSupervisorClientMock = mock(async (_supervisorId?: string) => ({
   client: {
     history: historyMock,
     status: statusMock,
     list: listMock,
     close: closeMock,
+    messagePreflight: preflightMock,
+    messagePeers: peersMock,
   } as any,
   isSingleton: false,
   sup: null,
@@ -24,6 +28,7 @@ const getSupervisorClientMock = mock(async (_supervisorId?: string) => ({
 
 const { registerExternalRun, forgetExternalRuns, externalRunMetadataPath } = await import('./run-registry.js')
 const { createEventsTool } = await import('./events.js')
+const { Supervisor } = await import('../supervisor.js')
 const eventsTool = createEventsTool(getSupervisorClientMock)
 
 describe('eventsTool', () => {
@@ -202,5 +207,160 @@ describe('eventsTool', () => {
     expect(String(result.events[0].output).length).toBeLessThanOrEqual(4000)
     expect(result.events[1].event).toBe('session.end')
     expect(closeMock).toHaveBeenCalled()
+  })
+})
+
+describe('eventsTool broker peers', () => {
+  const supervisorId = '/tmp/avenor-events-test.sock'
+  const refusal = 'this run is a broker peer with no event log; peers action last reads its last agent message'
+  const peerClient = {
+    status: statusMock,
+    list: listMock,
+    history: historyMock,
+    close: closeMock,
+    messagePreflight: preflightMock,
+    messagePeers: peersMock,
+  }
+
+  function absentRuntime(runtimeId: string) {
+    return new RpcError(-32000, `runtime "${runtimeId}" not found`)
+  }
+
+  function peerRow(runId: string, session: Record<string, string>) {
+    return { run_id: runId, session: { run_id: runId, ...session } }
+  }
+
+  function listed(...rows: Array<ReturnType<typeof peerRow>>) {
+    peersMock.mockResolvedValue({ peers: rows })
+  }
+
+  function brokerNotRead() {
+    expect(preflightMock).not.toHaveBeenCalled()
+    expect(peersMock).not.toHaveBeenCalled()
+  }
+
+  async function onSingleton<T>(run: () => Promise<T>): Promise<T> {
+    const previousSupervisorGet = Supervisor.get
+    Supervisor.get = mock(async () => ({
+      getClient: () => peerClient,
+      getRunByReference: () => undefined,
+    })) as unknown as typeof Supervisor.get
+    try {
+      return await run()
+    } finally {
+      Supervisor.get = previousSupervisorGet
+    }
+  }
+
+  beforeEach(() => {
+    for (const m of [historyMock, statusMock, listMock, closeMock, preflightMock, peersMock]) m.mockReset()
+    preflightMock.mockImplementation(async () => ({ protocol: 1, generation: 'gen-1' }))
+    peersMock.mockImplementation(async () => ({ peers: [] }))
+    statusMock.mockImplementation(async (runtimeId?: string) => { throw absentRuntime(runtimeId ?? '') })
+    listMock.mockImplementation(async () => [])
+    historyMock.mockImplementation(async () => ({ events: [] }))
+  })
+
+  it('refuses a broker-only run when the runtime list does not hold it', async () => {
+    listed(peerRow('claude-1', { label: 'planner', status: 'running' }))
+
+    await expect(eventsTool({ runId: 'claude-1', supervisorId })).rejects.toThrow(new Error(refusal))
+    expect(peersMock).toHaveBeenCalledWith({ generation: 'gen-1' })
+    expect(historyMock).not.toHaveBeenCalled()
+    expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses a broker-only run by a label that names one peer', async () => {
+    listed(peerRow('claude-1', { label: 'planner', status: 'running' }))
+
+    await expect(eventsTool({ runId: 'planner', supervisorId })).rejects.toThrow(new Error(refusal))
+  })
+
+  it('refuses a broker-only run on the singleton path', async () => {
+    listed(peerRow('claude-1', { label: 'planner', status: 'running' }))
+
+    await expect(onSingleton(() => eventsTool({ runId: 'claude-1' }))).rejects.toThrow(new Error(refusal))
+  })
+
+  it('keeps the aggregate error when the runtime list cannot be read', async () => {
+    listMock.mockRejectedValueOnce(new Error('list offline'))
+    listed(peerRow('claude-1', { label: 'planner', status: 'running' }))
+
+    await expect(eventsTool({ runId: 'claude-1', supervisorId })).rejects.toThrow('unable to resolve run claude-1')
+    brokerNotRead()
+    expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+
+  describe('keeps the existing error for an unknown run', () => {
+    const existing = 'unable to resolve run ghost-1: rpc error [-32000]: runtime "ghost-1" not found'
+    const listings: Array<[string, () => void]> = [
+      ['the run is on no listing', () => listed(peerRow('claude-1', { label: 'planner', status: 'running' }))],
+      ['the listing is empty', () => listed()],
+      ['two peers share the label', () => listed(
+        peerRow('claude-1', { label: 'ghost-1', status: 'running' }),
+        peerRow('claude-2', { label: 'ghost-1', status: 'running' }),
+      )],
+      ['the listing cannot be read', () => peersMock.mockRejectedValue(new Error('broker offline'))],
+      ['the listing is partial', () => peersMock.mockResolvedValue({
+        peers: [peerRow('ghost-1', { label: 'ghost-1', status: 'running' })],
+        peers_error: 'the broker could not read every peer',
+      })],
+    ]
+
+    for (const [name, arrange] of listings) {
+      it(`when ${name} (supervisorId path)`, async () => {
+        arrange()
+
+        await expect(eventsTool({ runId: 'ghost-1', supervisorId })).rejects.toThrow(existing)
+        expect(peersMock).toHaveBeenCalledTimes(1)
+        expect(closeMock).toHaveBeenCalledTimes(1)
+      })
+
+      it(`when ${name} (singleton path)`, async () => {
+        arrange()
+
+        await expect(onSingleton(() => eventsTool({ runId: 'ghost-1' }))).rejects.toThrow(existing)
+        expect(peersMock).toHaveBeenCalledTimes(1)
+      })
+    }
+  })
+
+  describe('does not read the broker unless the supervisor reports the run absent', () => {
+    const failures: Array<[string, () => Error, string]> = [
+      ['a transport error', () => new Error('socket closed'), 'socket closed'],
+      ['a refusal', () => new RpcError(-32001, 'permission denied'), 'permission denied'],
+      ['another runtime absent answer', () => new RpcError(-32000, 'runtime "someone-else" not found'), 'someone-else'],
+    ]
+
+    for (const [name, failure, detail] of failures) {
+      it(`after ${name} (supervisorId path)`, async () => {
+        statusMock.mockRejectedValueOnce(failure())
+        listed(peerRow('claude-1', { label: 'planner', status: 'running' }))
+
+        await expect(eventsTool({ runId: 'claude-1', supervisorId })).rejects.toThrow(detail)
+        brokerNotRead()
+        expect(closeMock).toHaveBeenCalledTimes(1)
+      })
+
+      it(`after ${name} (singleton path)`, async () => {
+        statusMock.mockRejectedValueOnce(failure())
+        listed(peerRow('claude-1', { label: 'planner', status: 'running' }))
+
+        await expect(onSingleton(() => eventsTool({ runId: 'claude-1' })))
+          .rejects.toThrow(`unable to resolve run claude-1`)
+        brokerNotRead()
+      })
+    }
+  })
+
+  it('does not read the broker for a run the supervisor knows', async () => {
+    statusMock.mockResolvedValueOnce({ runtime_id: 'rt-known' })
+    historyMock.mockResolvedValueOnce({ events: [{ event: 'session.end', seq: 1 }] })
+    listed(peerRow('rt-known', { label: 'planner', status: 'running' }))
+
+    const result = await eventsTool({ runId: 'rt-known', supervisorId })
+
+    expect(result.events).toHaveLength(1)
+    brokerNotRead()
   })
 })

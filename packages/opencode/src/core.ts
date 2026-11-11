@@ -1998,7 +1998,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       }),
 
       avenor_status: tool({
-        description: 'Get lifecycle status of a run or all runs. Use view="lifecycle" for compact polling; full is the compatibility default.',
+        description: 'Get lifecycle status of a run or all runs. Use view="lifecycle" for compact polling; full is the compatibility default. A broker peer with no runtime answers with its identity and broker status only.',
         args: {
           run_id: tool.schema.string().optional().describe('Specific run ID to query'),
           view: tool.schema.enum(['lifecycle', 'full']).optional().describe('Response detail (default full for compatibility)'),
@@ -2124,7 +2124,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       }),
 
       avenor_events: tool({
-        description: 'Read events from a run. Filter by type. Returns last N events.',
+        description: 'Read events from a run. Filter by type. Returns last N events. A broker peer has no event log; peers action last reads its last agent message.',
         args: {
           run_id: tool.schema.string().describe('Run ID to read events from'),
           types: tool.schema.array(tool.schema.string()).optional().describe('Filter by event types'),

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
-import type { Client } from '../client.js'
+import { RpcError, type Client } from '../client.js'
 
 const historyMock = mock<Client['history']>(async () => ({
   runtime_id: 'rt-inspect',
@@ -38,12 +38,16 @@ const listMock = mock<Client['list']>(async () => ([
 ]))
 
 const closeMock = mock<Client['close']>(() => {})
+const preflightMock = mock(async () => ({ protocol: 1, generation: 'gen-1' }))
+const peersMock = mock(async (_params: { generation: string }): Promise<any> => ({ peers: [] }))
 const getSupervisorClientMock = mock(async (_supervisorId?: string) => ({
   client: {
     history: historyMock,
     status: statusMock,
     list: listMock,
     close: closeMock,
+    messagePreflight: preflightMock,
+    messagePeers: peersMock,
   } as any,
   isSingleton: false,
   sup: null,
@@ -64,6 +68,10 @@ describe('inspectTool', () => {
     statusMock.mockClear()
     listMock.mockClear()
     closeMock.mockClear()
+    preflightMock.mockReset()
+    preflightMock.mockImplementation(async () => ({ protocol: 1, generation: 'gen-1' }))
+    peersMock.mockReset()
+    peersMock.mockImplementation(async () => ({ peers: [] }))
     getSupervisorClientMock.mockClear()
   })
 
@@ -81,5 +89,19 @@ describe('inspectTool', () => {
     expect(result.final_output).toBe('hello world')
     expect((result.snapshot as any)._seen_seq_by_scope).toBeUndefined()
     expect(closeMock).toHaveBeenCalled()
+  })
+
+  it('rejects a broker-only run with the broker peer refusal', async () => {
+    statusMock.mockRejectedValueOnce(new RpcError(-32000, 'runtime "claude-9" not found'))
+    statusMock.mockRejectedValueOnce(new RpcError(-32000, 'runtime "claude-9" not found'))
+    const listing = {
+      peers: [{ run_id: 'claude-9', session: { run_id: 'claude-9', label: 'planner', status: 'running' } }],
+    }
+    peersMock.mockResolvedValueOnce(listing)
+    peersMock.mockResolvedValueOnce(listing)
+
+    await expect(inspectTool({ runId: 'claude-9', supervisorId: '/tmp/avenor-inspect.sock' }))
+      .rejects.toThrow('this run is a broker peer with no event log; peers action last reads its last agent message')
+    expect(historyMock).not.toHaveBeenCalled()
   })
 })

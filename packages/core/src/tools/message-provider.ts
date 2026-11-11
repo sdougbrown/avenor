@@ -175,7 +175,7 @@ export function isGenerationMismatchError(error: unknown): boolean {
  * caller's error. The sentence is rendered with `goQuote` because the
  * supervisor formats the id with Go's `%q`.
  */
-function statusReportsNoRuntime(error: unknown, runId: string): boolean {
+export function statusReportsNoRuntime(error: unknown, runId: string): boolean {
   if (!(error instanceof RpcError) || error.code !== -32000) return false
   return rpcText(error) === `runtime ${goQuote(runId)} not found`
 }
@@ -266,7 +266,7 @@ function translateRunFacts(rawStatus: string, rawPhase: string): { status: strin
  * carries no session and no sentinel, so the run is never resumable from here —
  * the supervisor that spawned it owns a resume.
  */
-function peerFacts(peer: PeerRecord | undefined): RunFacts {
+export function peerFacts(peer: PeerRecord | undefined): RunFacts {
   const translation = translateRunFacts(peer?.status ?? '', '')
   return { live: translation.live, resumable: false, status: translation.status }
 }
@@ -297,7 +297,7 @@ async function sentinelResumable(filePath: string): Promise<boolean> {
   return status !== undefined && RESUMABLE_SENTINEL_STATUSES.has(status)
 }
 
-function peerRecords(peers: MessagePeersResult): PeerRecord[] {
+export function peerRecords(peers: MessagePeersResult): PeerRecord[] {
   return (peers.peers ?? []).map(peer => {
     const session = peer.session
     const decoded = session !== null && typeof session === 'object'
