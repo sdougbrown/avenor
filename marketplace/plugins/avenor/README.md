@@ -156,7 +156,6 @@ without a `session_id` renames the session, and the list marks the session
 `reply`, and `withdraw` and `resume` still go to the supervisor. The server
 accepts `claude_peer_file` on `peers` only.
 
-
 A self-registered session's name follows Claude Code's `/rename`. After the built-in
 command runs, the layer reads the title it recorded (the last `custom-title`
 record in the session transcript, so a bare `/rename`'s generated name counts)
