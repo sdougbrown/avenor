@@ -189,12 +189,13 @@ func (s *Server) supervisorForPeerKey(key string) string {
 	return ""
 }
 
-// messageBinding is the peer binding the message tool honors. The Claude
-// plugin serves its own tell, ask and reply and binds only the peers tool, so
-// a Claude binding on a message call is not the plugin's and is dropped.
+// messageBinding is the peer binding the message tool honors: the one whose
+// host binds that tool, and none otherwise.
 func messageBinding(binding peerBinding) peerBinding {
-	if binding.host == "claude" {
-		return peerBinding{}
+	for _, h := range peerHosts {
+		if h.host == binding.host && !h.message {
+			return peerBinding{}
+		}
 	}
 	return binding
 }

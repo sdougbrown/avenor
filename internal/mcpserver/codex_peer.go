@@ -42,9 +42,13 @@ var peerHosts = []struct {
 	host  string
 	arg   string
 	title string
+	// message reports whether the message tool honors this host's binding.
+	// The Claude plugin serves its own tell, ask and reply and binds only the
+	// peers tool.
+	message bool
 }{
-	{"codex", codexPeerFileArg, "Codex"},
-	{"claude", claudePeerFileArg, "Claude"},
+	{"codex", codexPeerFileArg, "Codex", true},
+	{"claude", claudePeerFileArg, "Claude", false},
 }
 
 // codexPeerRecordVersion is the only record shape this reader understands.
