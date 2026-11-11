@@ -228,7 +228,7 @@ test("a stale session lock is reclaimed", async () => {
 const SESSION_START = fileURLToPath(new URL("../hooks/codex/session-start.mjs", import.meta.url));
 
 /** Run the real SessionStart hook against a stub broker; returns what it renamed to. */
-async function renamedTo({ cwd, env = {}, listing = { sessions: [] } }) {
+async function renamedTo({ cwd, payload = { cwd }, spawnCwd, env = {}, listing = { sessions: [] }, sessions }) {
   const renames = [];
   const broker = http.createServer((req, res) => {
     let raw = "";
@@ -242,6 +242,7 @@ async function renamedTo({ cwd, env = {}, listing = { sessions: [] } }) {
         return reply({});
       }
       if (req.url === "/sessions") {
+        if (sessions !== undefined) return sessions(req, res);
         return req.headers["x-avenor-run-token"] === "tok" || req.headers["x-avenor-run-token"] === "own"
           ? reply(listing)
           : (res.statusCode = 401, reply({}));
@@ -261,9 +262,10 @@ async function renamedTo({ cwd, env = {}, listing = { sessions: [] } }) {
         AVENOR_BROKER_URL: "http://127.0.0.1:" + broker.address().port,
         ...env,
       },
+      cwd: spawnCwd,
       stdio: ["pipe", "ignore", "ignore"],
     });
-    child.stdin.end(JSON.stringify({ session_id: "01a1-label", hook_event_name: "SessionStart", source: "startup", cwd }));
+    child.stdin.end(JSON.stringify({ session_id: "01a1-label", hook_event_name: "SessionStart", source: "startup", ...payload }));
     await new Promise((resolve) => child.on("close", resolve));
     return { renames, record: readRecord("01a1-label", home) };
   } finally {
@@ -303,6 +305,33 @@ test("a partial peer listing keeps the base label", async () => {
     listing: { sessions: [{ label: "codex-avenor" }], peers_error: "peers unavailable" },
   });
   assert.deepEqual(renames, ["codex-avenor"]);
+});
+
+test("an unreadable peer listing keeps the base label", async () => {
+  // The body would suffix the label if a non-ok status were trusted.
+  const failed = await renamedTo({
+    cwd: repo("avenor", "main"),
+    sessions: (_req, res) => {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ sessions: [{ label: "codex-avenor" }] }));
+    },
+  });
+  assert.deepEqual(failed.renames, ["codex-avenor"]);
+  assert.equal(failed.record.label, "codex-avenor");
+
+  const dropped = await renamedTo({
+    cwd: repo("avenor", "main"),
+    sessions: (req) => req.socket.destroy(),
+  });
+  assert.deepEqual(dropped.renames, ["codex-avenor"]);
+  assert.equal(dropped.record.label, "codex-avenor");
+});
+
+test("a hook payload without a usable cwd names the session from the hook's own directory", async () => {
+  for (const payload of [{}, { cwd: "" }]) {
+    const { renames } = await renamedTo({ payload, spawnCwd: repo("avenor", "feat/x") });
+    assert.deepEqual(renames, ["codex-avenor@feat-x"]);
+  }
 });
 
 test("a directory outside a repository names the session by its own name", async () => {
