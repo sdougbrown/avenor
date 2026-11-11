@@ -123,8 +123,9 @@ var (
 	ErrUnsupportedOperation = errors.New("messaging: operation unsupported by this transport")
 )
 
-// ErrParentReadFailed reports a read the parent broker could not answer: it was
-// unreachable or failed. It does not classify as ErrTargetUnavailable, so a
-// caller never reads an outage as a run the parent does not hold. Its text names
-// no parent address and is the reason every layer reports.
-var ErrParentReadFailed = errors.New("the parent broker could not answer the read")
+// ErrRemoteReadFailed reports a read the broker holding the run could not
+// answer: the parent or the child branch that owns the run was unreachable or
+// failed. It does not classify as ErrTargetUnavailable, so a caller never reads
+// an outage as a run nobody holds. Its text names no broker address and is the
+// reason every layer reports.
+var ErrRemoteReadFailed = errors.New("the broker holding the run could not answer the read")

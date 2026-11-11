@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/internal/httpbase"
@@ -175,6 +176,53 @@ func (r *relay) hop(ctx context.Context, target string, req messaging.TellReques
 		return decErr
 	}
 	return nil
+}
+
+// Last reads the last turn of the run a registered child owns, from that child.
+// The read authenticates as the target run itself, so the child answers only for
+// a run it holds: a child that no longer holds the run rejects the credential,
+// and the run reads as unknown. The result is addressed by the key the caller
+// used, not by the run's canonical ID in the child. A read has no side effect on
+// the registry: the claim stays for the write relay to retire.
+func (r *relay) Last(ctx context.Context, target string) (messaging.PeerLast, error) {
+	next, ok := r.registry.Hop(target)
+	if !ok {
+		return messaging.PeerLast{}, fmt.Errorf("%w: no registered branch owns run %q", messaging.ErrTargetUnavailable, target)
+	}
+	if next.Token == "" {
+		return messaging.PeerLast{}, fmt.Errorf("%w: this broker has no credential for run %q", messaging.ErrTargetUnavailable, target)
+	}
+	query := url.Values{"target": {next.RunID}}
+	httpReq, err := http.NewRequest(http.MethodGet, next.Endpoint+pathLast+"?"+query.Encode(), nil)
+	if err != nil {
+		return messaging.PeerLast{}, err
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set(messaging.HeaderRunID, next.RunID)
+	httpReq.Header.Set(messaging.HeaderRunToken, next.Token)
+	status, raw, err := r.client.Do(ctx, httpReq, 0)
+	if err != nil {
+		return messaging.PeerLast{}, fmt.Errorf("%w: %v", messaging.ErrRemoteReadFailed, err)
+	}
+	if status == http.StatusGone {
+		// The child no longer serves the run: a retired or expired peer answers
+		// with a code outside the messaging classes.
+		return messaging.PeerLast{}, fmt.Errorf("%w: the branch that owns run %q no longer serves it", messaging.ErrTargetUnavailable, target)
+	}
+	last, err := decodePeerLast(status, raw)
+	switch {
+	case err == nil:
+		last.RunID = target
+		return last, nil
+	case errors.Is(err, ErrParentUnavailable):
+		// A failing child is also a target-unavailable class, so it is classified
+		// before the verdicts about the run.
+		return messaging.PeerLast{}, remoteReadFailure(err)
+	case errors.Is(err, messaging.ErrTargetUnavailable), errors.Is(err, messaging.ErrAuthRejected):
+		return messaging.PeerLast{}, fmt.Errorf("%w: the branch that owns run %q refused the read: %v",
+			messaging.ErrTargetUnavailable, target, err)
+	}
+	return messaging.PeerLast{}, err
 }
 
 // forget drops a run this broker can no longer route to: its claim, and the

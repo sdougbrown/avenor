@@ -233,13 +233,19 @@ func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 
 // Last reads one run's recorded last turn. A run the local broker holds is
 // answered here, a tombstone included: this reads history. A run a registered
-// child branch owns is refused as unavailable, because this broker holds only an
-// adopted record of it and the turn lives on the child, which no read is relayed
-// to. Anything else goes to the parent, which is the authority on the runs it
-// holds.
+// child branch owns is read from that child, because this broker holds only an
+// adopted record of it and the turn lives there. The relay is for callers outside
+// every child branch, as peer export is: a caller that is itself a registered
+// child's run is refused as unavailable, because a sibling must not see another
+// branch's runs at all. A caller with no run in the context, this broker's own
+// supervisor, is served. Anything else goes to the parent, which is the authority
+// on the runs it holds.
 func (m *Messenger) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
 	if m.registry.Owns(runID) {
-		return messaging.PeerLast{}, fmt.Errorf("%w: run %q belongs to a child branch", messaging.ErrTargetUnavailable, runID)
+		if caller, _ := messaging.CallerRun(ctx); m.registry.Owns(caller) {
+			return messaging.PeerLast{}, fmt.Errorf("%w: run %q belongs to a child branch", messaging.ErrTargetUnavailable, runID)
+		}
+		return m.down.Last(ctx, runID)
 	}
 	if m.up == nil || m.local.Holds(runID) {
 		return m.local.Last(ctx, runID)

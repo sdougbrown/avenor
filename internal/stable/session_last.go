@@ -24,7 +24,7 @@ const sessionLastTimeout = 5 * time.Second
 // already holds, where a routing boundary asks whether a target can take part.
 // A run the broker does not hold is the parent's to answer when this broker has
 // one, so the read follows the same seam a tell does. A parent that cannot
-// answer is a refusal carrying messaging.ErrParentReadFailed's reason, not an
+// answer is a refusal carrying messaging.ErrRemoteReadFailed's reason, not an
 // unknown target.
 func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, error) {
 	if s.broker == nil {
@@ -39,7 +39,7 @@ func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, er
 	if err != nil {
 		return broker.LastAgentMessage{}, false, &router.ToolError{
 			Code:    "refused",
-			Message: messaging.ErrParentReadFailed.Error(),
+			Message: messaging.ErrRemoteReadFailed.Error(),
 			Facts:   map[string]string{},
 		}
 	}

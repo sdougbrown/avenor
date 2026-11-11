@@ -617,39 +617,17 @@ func (l *Link) Peers(ctx context.Context) (messaging.PeersResult, error) {
 // side-effect free and universally visible there, so the branch authenticates
 // with the credential it already holds for one of its own runs, as it does to
 // list peers. A run the parent does not hold is ErrTargetUnavailable; a parent
-// that could not answer is messaging.ErrParentReadFailed.
+// that could not answer is messaging.ErrRemoteReadFailed.
 func (l *Link) Last(ctx context.Context, runID string) (messaging.PeerLast, error) {
 	status, raw, err := l.read(ctx, pathLast+"?"+url.Values{"target": {runID}}.Encode())
-	if err == nil {
-		_, err = decode(status, raw)
-	}
-	if errors.Is(err, ErrParentUnavailable) {
-		return messaging.PeerLast{}, fmt.Errorf("%w: %v", messaging.ErrParentReadFailed, err)
-	}
 	if err != nil {
-		return messaging.PeerLast{}, err
+		return messaging.PeerLast{}, remoteReadFailure(err)
 	}
-	var body struct {
-		RunID       string `json:"run_id"`
-		Label       string `json:"label"`
-		HasRecord   bool   `json:"has_record"`
-		FinalOutput string `json:"final_output"`
-		StopReason  string `json:"stop_reason"`
-		Truncated   bool   `json:"final_output_truncated"`
-		At          int64  `json:"at"`
+	last, err := decodePeerLast(status, raw)
+	if err != nil {
+		return messaging.PeerLast{}, remoteReadFailure(err)
 	}
-	if err := json.Unmarshal(raw, &body); err != nil {
-		return messaging.PeerLast{}, fmt.Errorf("%w: %v", ErrUnsupportedParentProtocol, err)
-	}
-	return messaging.PeerLast{
-		RunID:      body.RunID,
-		Label:      body.Label,
-		HasRecord:  body.HasRecord,
-		Text:       body.FinalOutput,
-		StopReason: body.StopReason,
-		Truncated:  body.Truncated,
-		At:         body.At,
-	}, nil
+	return last, nil
 }
 
 // read performs one authenticated GET on the parent broker with the credential
