@@ -300,15 +300,18 @@ mock.module('./process.js', () => ({
   spawnAvenorProcess: spawnProcessMock,
   runAvenorCommand: runCommandMock,
 }))
-/** The derived default label; each test sees the label this returns. */
-const sessionLabelMock = mock(async (_dir?: string) => 'avenor@feat')
+/** The git top-level the default-label derivation sees; the answer per test. */
+const gitToplevelMock = mock(async (dir: string) => dir)
+/** The machine's name, read only for a broker on another machine. */
+const hostnameMock = mock(() => '')
 // The seams every test core starts through: the process seams keep real
-// processes out of the run, and the label seam keeps the derivation stubbed
-// without touching the module registry other test files read.
+// processes out of the run, and the label seams keep git and the machine's
+// name stubbed without touching the module registry other test files read.
 const coreOptions: AvenorCoreOptions = {
   spawnProcess: spawnProcessMock as unknown as AvenorCoreOptions['spawnProcess'],
   runCommand: runCommandMock,
-  sessionLabel: sessionLabelMock,
+  gitToplevel: gitToplevelMock,
+  hostname: hostnameMock,
 }
 const originalFetch = globalThis.fetch
 
@@ -406,8 +409,10 @@ beforeEach(() => {
   spawnProcessMock.mockClear()
   runCommandMock.mockClear()
   runCommandMock.mockImplementation(async () => ({ code: 0, stdout: '', stderr: '' }))
-  sessionLabelMock.mockClear()
-  sessionLabelMock.mockImplementation(async (_dir?: string) => 'avenor@feat')
+  gitToplevelMock.mockClear()
+  gitToplevelMock.mockImplementation(async (dir: string) => dir)
+  hostnameMock.mockClear()
+  hostnameMock.mockImplementation(() => '')
   resultToolMock.mockClear()
   shutdownToolMock.mockClear()
   killToolMock.mockClear()
@@ -1574,7 +1579,7 @@ describe('AvenorPlugin', () => {
     expect(messageBindMock).toHaveBeenCalledTimes(2)
   })
 
-  it('binds a session when it appears and names it from its directory', async () => {
+  it('binds a session when it appears and names it after its repository', async () => {
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
       coreOptions,
@@ -1585,7 +1590,10 @@ describe('AvenorPlugin', () => {
     expect(messageBindMock).toHaveBeenCalledTimes(1)
     expect(messageBindMock.mock.calls[0]?.[0]).toMatchObject({ host: 'opencode', session_id: 'session-1' })
     expect(spawnProcessMock).toHaveBeenCalledTimes(1)
-    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+    // The repository names the conversation, not the branch it has checked out:
+    // no peer holds the label, so no run-id tail follows it.
+    expect(gitToplevelMock).toHaveBeenCalledWith('/repo/avenor')
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'opencode-avenor' })
 
     // The first turn after creation reaches an already-bound session: no
     // second identity, no second consumer, no republished name.
@@ -1612,7 +1620,7 @@ describe('AvenorPlugin', () => {
     await waitFor(() => messageBindMock.mock.calls.length === 1, 'the first-turn bind')
     expect(spawnProcessMock).toHaveBeenCalledTimes(1)
     // No directory rode the turn event, so nothing is derived or named.
-    expect(sessionLabelMock).not.toHaveBeenCalled()
+    expect(gitToplevelMock).not.toHaveBeenCalled()
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toEqual([])
   })
 
@@ -1631,7 +1639,7 @@ describe('AvenorPlugin', () => {
     expect(messageBindMock).toHaveBeenCalledTimes(1)
     expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'Chosen Name' })
     // A human-named session never consults the derivation.
-    expect(sessionLabelMock).not.toHaveBeenCalled()
+    expect(gitToplevelMock).not.toHaveBeenCalled()
   })
 
   it('never lets the derived label replace a title that lands during the derivation', async () => {
@@ -1644,21 +1652,51 @@ describe('AvenorPlugin', () => {
       },
       coreOptions,
     )
-    // The derivation is held open while the bind's own title read answers.
-    let resolveLabel: (label: string) => void = () => {}
-    sessionLabelMock.mockImplementation(() => new Promise<string>(resolve => { resolveLabel = resolve }))
+    // The git read is held open while the bind's own title read answers.
+    let resolveToplevel: (toplevel: string) => void = () => {}
+    gitToplevelMock.mockImplementation(() => new Promise<string>(resolve => { resolveToplevel = resolve }))
     const appearance = (core as unknown as {
       onSessionAppeared: (sessionID: string, directory?: string) => Promise<void>
     }).onSessionAppeared('session-1', '/repo/avenor')
-    await waitFor(() => sessionLabelMock.mock.calls.length === 1, 'the derivation to start')
+    await waitFor(() => gitToplevelMock.mock.calls.length === 1, 'the derivation to start')
 
     // The bind's title read lands while git runs: the native name publishes
     // first and is what the broker must keep.
     reads.shift()?.('Native Name')
     await flush()
     await flushMicrotasks()
-    resolveLabel('avenor@feat')
+    resolveToplevel('/repo/avenor')
     await appearance
+    const publishes = postBrokerCalls.filter(call => call.path === '/session_name')
+    expect(publishes).toHaveLength(1)
+    expect(publishes[0]?.body).toEqual({ name: 'Native Name' })
+  })
+
+  it('never lets the derived label replace a title that lands during the peers read', async () => {
+    let peersStarted = false
+    let resolvePeers: (listing: { peers: [] }) => void = () => {}
+    providerFactory = () => makeProvider({
+      peers: () => {
+        peersStarted = true
+        return new Promise(resolve => { resolvePeers = resolve })
+      },
+    })
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const appearance = (core as unknown as {
+      onSessionAppeared: (sessionID: string, directory?: string) => Promise<void>
+    }).onSessionAppeared('session-1', '/repo/avenor')
+    await waitFor(() => peersStarted, 'the peers read to start')
+
+    // A rename lands while the listing is in flight: its version outranks the
+    // derivation that started before it, so nothing derived is published.
+    const renamed = (core as unknown as { event: (input: { event: unknown }) => Promise<void> }).event({
+      event: { type: 'session.renamed', properties: { sessionID: 'session-1', title: 'Native Name' } },
+    })
+    resolvePeers({ peers: [] })
+    await Promise.all([appearance, renamed])
     const publishes = postBrokerCalls.filter(call => call.path === '/session_name')
     expect(publishes).toHaveLength(1)
     expect(publishes[0]?.body).toEqual({ name: 'Native Name' })
@@ -1671,29 +1709,35 @@ describe('AvenorPlugin', () => {
     )
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
-    await waitFor(() => sessionLabelMock.mock.calls.length === 1, 'the first derivation')
+    await waitFor(() => gitToplevelMock.mock.calls.length === 1, 'the first derivation')
     await onEvent({ type: 'session.execution.started', data: { sessionID: 's1' } })
     await flush()
     await flushMicrotasks()
-    expect(sessionLabelMock).toHaveBeenCalledTimes(1)
+    expect(gitToplevelMock).toHaveBeenCalledTimes(1)
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
 
     // A derivation that names nothing is remembered as attempted too: a
-    // repository spelled like a reserved reference costs one git run, not two
-    // per turn.
-    sessionLabelMock.mockImplementation(async () => '')
-    await onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/repo/self' } } })
-    await waitFor(() => sessionLabelMock.mock.calls.length === 2, 'the empty derivation')
+    // directory with no usable name in it costs one git run, not two per turn.
+    gitToplevelMock.mockImplementation(async () => '')
+    await onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/' } } })
+    await waitFor(() => gitToplevelMock.mock.calls.length === 2, 'the empty derivation')
     await onEvent({ type: 'session.execution.started', data: { sessionID: 's2' } })
     await flush()
     await flushMicrotasks()
-    expect(sessionLabelMock).toHaveBeenCalledTimes(2)
+    expect(gitToplevelMock).toHaveBeenCalledTimes(2)
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
   })
 
   it('gives two conversations in the same work distinct default labels', async () => {
-    // The peers read reports the labels already published, as the broker does:
-    // each conversation reads with its own credential before naming itself.
+    // Each conversation binds its own run, and the peers read reports the
+    // labels already published with the run that holds each of them.
+    messageBindMock.mockImplementation(async (params: { host: string; session_id: string }) => ({
+      broker_url: 'http://broker.test',
+      run_id: params.session_id === 's1' ? 'run-111111' : 'run-222222',
+      run_token: 'oc-token-1',
+      generation: 'gen-bind-1',
+      created: true,
+    }))
     providerFactory = () => makeProvider({
       peers: async () => ({
         peers: postBrokerCalls
@@ -1710,17 +1754,16 @@ describe('AvenorPlugin', () => {
     await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 1, 'the first label to publish')
     await onEvent({ type: 'session.created', data: { sessionID: 's2', location: { directory: '/repo/avenor' } } })
     await waitFor(() => postBrokerCalls.filter(call => call.path === '/session_name').length === 2, 'the second label to publish')
+    // The second conversation takes its own run-id tail rather than a label a
+    // peer already answers to.
     expect(postBrokerCalls.filter(call => call.path === '/session_name').map(call => call.body.name))
-      .toEqual(['avenor@feat', 'avenor@feat-2'])
+      .toEqual(['opencode-avenor', 'opencode-avenor-222222'])
   })
 
-  it('takes the next free suffix when earlier ones are held', async () => {
+  it('takes its run-id tail when another peer already holds the label', async () => {
     providerFactory = () => makeProvider({
       peers: async () => ({
-        peers: [
-          { run_id: 'r1', label: 'avenor@feat' },
-          { run_id: 'r2', label: 'avenor@feat-2' },
-        ],
+        peers: [{ run_id: 'r1', label: 'opencode-avenor' }],
       }),
     })
     const core = createAvenorCore(
@@ -1730,18 +1773,33 @@ describe('AvenorPlugin', () => {
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
     await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
-    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat-3' })
+    // The bound run is 'oc-run-1', so its six-character tail is 'ocrun1'.
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'opencode-avenor-ocrun1' })
   })
 
-  it('keeps the unsuffixed base when every suffix variant is taken', async () => {
-    providerFactory = () => makeProvider({
-      peers: async () => ({
-        peers: [
-          { run_id: 'r0', label: 'avenor@feat' },
-          ...[2, 3, 4, 5, 6, 7, 8, 9].map(n => ({ run_id: `r${n}`, label: `avenor@feat-${n}` })),
-        ],
-      }),
-    })
+  it('names a directory that is not a repository after itself, with the run tail', async () => {
+    gitToplevelMock.mockImplementation(async () => '')
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/home/me/scratch' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    // No repository to name, so the directory stands in and the tail keeps the
+    // name from colliding.
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'opencode-scratch-ocrun1' })
+  })
+
+  it('leads with the short hostname only when the broker is on another machine', async () => {
+    hostnameMock.mockImplementation(() => 'grace.home.example.com')
+    messageBindMock.mockImplementation(async (_params: { host: string; session_id: string }) => ({
+      broker_url: 'http://broker.test:8080',
+      run_id: 'oc-run-1',
+      run_token: 'oc-token-1',
+      generation: 'gen-bind-1',
+      created: true,
+    }))
     const core = createAvenorCore(
       { promptAsync: async () => {}, getMessage: async () => undefined },
       coreOptions,
@@ -1749,14 +1807,34 @@ describe('AvenorPlugin', () => {
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
     await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
-    // Nothing invented past -9: the ambiguity is kept, not named around.
-    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
-    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+    expect(hostnameMock).toHaveBeenCalledTimes(1)
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'grace-opencode-avenor' })
   })
 
-  it('fits a suffixed label inside the name rule for a limit-length base', async () => {
-    const base = 'a'.repeat(64)
-    sessionLabelMock.mockImplementation(async () => base)
+  it('adds no hostname for a local broker and never reads the machine name', async () => {
+    hostnameMock.mockImplementation(() => 'grace')
+    messageBindMock.mockImplementation(async (_params: { host: string; session_id: string }) => ({
+      broker_url: 'http://127.0.0.1:8080',
+      run_id: 'oc-run-1',
+      run_token: 'oc-token-1',
+      generation: 'gen-bind-1',
+      created: true,
+    }))
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    const onEvent = createV2EventHandler(core)
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'opencode-avenor' })
+    expect(hostnameMock).not.toHaveBeenCalled()
+  })
+
+  it('fits the run-id tail inside the name rule for a limit-length repository', async () => {
+    const repo = 'a'.repeat(64)
+    gitToplevelMock.mockImplementation(async () => '/' + repo)
+    const base = 'opencode-' + 'a'.repeat(55)
     providerFactory = () => makeProvider({
       peers: async () => ({ peers: [{ run_id: 'r0', label: base }] }),
     })
@@ -1765,20 +1843,22 @@ describe('AvenorPlugin', () => {
       coreOptions,
     )
     const onEvent = createV2EventHandler(core)
-    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/' + repo } } })
     await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
-    // The base is cut to leave room for the suffix, so the published label
-    // stays within the 64-rune rule.
-    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'a'.repeat(62) + '-2' })
-    expect(Array.from(postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string)).toHaveLength(64)
+    // The base is cut to leave room for the tail, so the published label stays
+    // within the 64-rune rule.
+    const published = postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string
+    expect(published).toBe('opencode-' + 'a'.repeat(48) + '-ocrun1')
+    expect(Array.from(published)).toHaveLength(64)
   })
 
-  it('strips the dash a cut leaves at the stem boundary before appending the suffix', async () => {
-    // A 64-rune base whose 62nd rune is a dash: the truncation to 62 ends on
-    // that dash, and appending would double it — the strip before the suffix
+  it('strips the dash a cut leaves at the stem boundary before appending the tail', async () => {
+    // A base whose 57th rune is a dash: the cut to leave room for the tail ends
+    // on that dash, and appending would double it — the strip before the tail
     // is the branch under test.
-    const base = 'a'.repeat(61) + '-' + 'bc'
-    sessionLabelMock.mockImplementation(async () => base)
+    const repo = 'a'.repeat(47) + '-bc'
+    gitToplevelMock.mockImplementation(async () => '/' + repo)
+    const base = 'opencode-' + repo
     providerFactory = () => makeProvider({
       peers: async () => ({ peers: [{ run_id: 'r0', label: base }] }),
     })
@@ -1787,14 +1867,14 @@ describe('AvenorPlugin', () => {
       coreOptions,
     )
     const onEvent = createV2EventHandler(core)
-    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
+    await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/' + repo } } })
     await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
-    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'a'.repeat(61) + '-2' })
-    expect((postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string).includes('--')).toBe(false)
-    expect(Array.from(postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string).length).toBeLessThanOrEqual(64)
+    const published = postBrokerCalls.find(call => call.path === '/session_name')?.body.name as string
+    expect(published).toBe('opencode-' + 'a'.repeat(47) + '-ocrun1')
+    expect(published.includes('--')).toBe(false)
   })
 
-  it('publishes the plain base when the taken-label read fails', async () => {
+  it('takes the run-id tail when the taken-label read fails', async () => {
     providerFactory = () => makeProvider({
       peers: async () => {
         throw new Error('broker down')
@@ -1807,15 +1887,16 @@ describe('AvenorPlugin', () => {
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
     await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
-    // A failed read is no information: the unsuffixed base is kept, not skipped.
+    // A failed read is no information: the tail is taken rather than a name
+    // guessed at, and the conversation is still named once.
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
-    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'opencode-avenor-ocrun1' })
   })
 
-  it('treats a partial peers listing as no information', async () => {
+  it('takes the run-id tail for a partial peers listing', async () => {
     providerFactory = () => makeProvider({
       peers: async () => ({
-        peers: [{ run_id: 'r1', label: 'avenor@feat' }],
+        peers: [{ run_id: 'r1', label: 'opencode-avenor' }],
         detail: 'listing incomplete: transport error',
       }),
     })
@@ -1826,16 +1907,23 @@ describe('AvenorPlugin', () => {
     const onEvent = createV2EventHandler(core)
     await onEvent({ type: 'session.created', data: { sessionID: 's1', location: { directory: '/repo/avenor' } } })
     await waitFor(() => postBrokerCalls.some(call => call.path === '/session_name'), 'the label to publish')
-    // Peers plus an error is no information: the unsuffixed base publishes
-    // exactly once rather than a guess at the unlisted labels.
+    // Peers plus an error is no information about the unlisted labels, so the
+    // tail is taken rather than a guess.
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
-    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'avenor@feat' })
+    expect(postBrokerCalls.find(call => call.path === '/session_name')?.body).toEqual({ name: 'opencode-avenor-ocrun1' })
   })
 
   it('gives two sessions appearing concurrently distinct labels', async () => {
     // The peers read snapshots at call time and answers late, so two reads
     // running concurrently would both capture an empty set and publish alike;
     // the naming chain must keep the second read behind the first publish.
+    messageBindMock.mockImplementation(async (params: { host: string; session_id: string }) => ({
+      broker_url: 'http://broker.test',
+      run_id: params.session_id === 's1' ? 'run-111111' : 'run-222222',
+      run_token: 'oc-token-1',
+      generation: 'gen-bind-1',
+      created: true,
+    }))
     providerFactory = () => makeProvider({
       peers: () => {
         const snapshot = postBrokerCalls
@@ -1859,7 +1947,7 @@ describe('AvenorPlugin', () => {
       .filter(call => call.path === '/session_name')
       .map(call => call.body.name as string)
       .sort()
-    expect(names).toEqual(['avenor@feat', 'avenor@feat-2'])
+    expect(names).toEqual(['opencode-avenor', 'opencode-avenor-222222'])
   })
 
   it('restarts a bound conversation\'s feed when its execution succeeds', async () => {
