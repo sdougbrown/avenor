@@ -213,21 +213,33 @@ func (p *mcpMessageProvider) Resolve(ctx context.Context, ref string) (messaging
 	if err != nil {
 		return messaging.Resolution{}, err
 	}
+	res := matchListedPeer(peers, ref)
+	if res.Match == messaging.MatchUnique {
+		return p.peerResolution(res.RunID, res.Label), nil
+	}
+	return res, nil
+}
+
+// matchListedPeer resolves ref against a broker peer listing: an exact run id,
+// else an exact label. Both the provider's peer rungs and the status and events
+// tools read the listing through it, so a peer one tool can address resolves the
+// same way in the others.
+func matchListedPeer(peers []messaging.PeerRecord, ref string) messaging.Resolution {
 	// The run-id rung stays a separate pass: an exact run id wins over any
 	// label, so a label collected alongside it must not be able to answer first.
 	for _, peer := range peers {
 		if peer.RunID == ref {
-			return p.peerResolution(peer.RunID, peer.Label), nil
+			return messaging.Resolution{RunID: peer.RunID, Label: firstNonEmptyString(peer.Label, peer.RunID), Match: messaging.MatchUnique}
 		}
 	}
 	candidates, label := messaging.LabelCandidates(peers, ref)
 	switch len(candidates) {
 	case 1:
-		return p.peerResolution(candidates[0], label), nil
+		return messaging.Resolution{RunID: candidates[0], Label: firstNonEmptyString(label, candidates[0]), Match: messaging.MatchUnique}
 	case 0:
-		return messaging.Resolution{Match: messaging.MatchNone}, nil
+		return messaging.Resolution{Match: messaging.MatchNone}
 	default:
-		return messaging.Resolution{Match: messaging.MatchAmbiguous, Candidates: candidates}, nil
+		return messaging.Resolution{Match: messaging.MatchAmbiguous, Candidates: candidates}
 	}
 }
 

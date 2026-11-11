@@ -21,14 +21,9 @@ func (s *Server) brokerPeer(ctx context.Context, cl ControlClient, supervisorPat
 	if err != nil {
 		return messaging.PeerRecord{}, false
 	}
-	for _, peer := range peers {
-		if peer.RunID == key {
-			return peer, true
-		}
-	}
-	if candidates, _ := messaging.LabelCandidates(peers, key); len(candidates) == 1 {
+	if res := matchListedPeer(peers, key); res.Match == messaging.MatchUnique {
 		for _, peer := range peers {
-			if peer.RunID == candidates[0] {
+			if peer.RunID == res.RunID {
 				return peer, true
 			}
 		}
