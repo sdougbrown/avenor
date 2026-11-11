@@ -283,7 +283,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "status",
-		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission. Without run_id, returns an object with runs (array of status objects) and count. The wait budget is approximate: a single underlying status poll may add up to its own timeout.",
+		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission. Without run_id, returns an object with runs (array of status objects) and count. The wait budget is approximate: a single underlying status poll may add up to its own timeout. A broker peer with no runtime answers with its identity and broker status only, and cannot be waited on.",
 	}, s.handleAvenorStatus)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -313,7 +313,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "events",
-		Description: "Read recent events from a run's event log",
+		Description: "Read recent events from a run's event log. A broker peer has no event log: use peers action last.",
 	}, s.handleAvenorEvents)
 
 	// The merged tools publish the flat object schema compiled from the shared
@@ -490,6 +490,14 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 		ts, err = s.queryRunStatus(cl, supervisorPath, key)
 	}
 	if err != nil {
+		if ri == nil && statusReportsNoRuntime(err, key) {
+			if peer, ok := s.brokerPeer(ctx, cl, supervisorPath, key); ok {
+				if condition != "" {
+					return nil, statusToolOutput{}, errBrokerPeerNoWait
+				}
+				return nil, statusToolOutput{statusRun: statusRunFromMap(shapeStatusForView(brokerPeerStatus(peer), args.View))}, nil
+			}
+		}
 		return nil, statusToolOutput{}, err
 	}
 	if timedOut {
@@ -1493,6 +1501,9 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 			return nil, nil, err
 		}
 		if ri == nil {
+			if _, ok := s.brokerPeer(ctx, cl, supervisorPath, args.RunID); ok {
+				return nil, nil, errBrokerPeerNoEvents
+			}
 			return nil, nil, fmt.Errorf("run not found in registry")
 		}
 	}
