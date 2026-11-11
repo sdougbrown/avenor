@@ -1728,6 +1728,34 @@ describe('AvenorPlugin', () => {
     expect(postBrokerCalls.filter(call => call.path === '/session_name')).toHaveLength(1)
   })
 
+  it('leaves no title behind when the binding drops during the derivation', async () => {
+    const core = createAvenorCore(
+      { promptAsync: async () => {}, getMessage: async () => undefined },
+      coreOptions,
+    )
+    // The git read is held open while the supervisor the conversation is bound
+    // to goes away.
+    let resolveToplevel: (toplevel: string) => void = () => {}
+    gitToplevelMock.mockImplementation(() => new Promise<string>(resolve => { resolveToplevel = resolve }))
+    const appearance = (core as unknown as {
+      onSessionAppeared: (sessionID: string, directory?: string) => Promise<void>
+    }).onSessionAppeared('session-1', '/repo/avenor')
+    await waitFor(() => gitToplevelMock.mock.calls.length === 1, 'the derivation to start')
+    expect(messageBindMock).toHaveBeenCalledTimes(1)
+
+    await ((core as any).tool?.avenor_shutdown as any).execute({ supervisor_id: '/tmp/avenor.sock' }, {})
+    resolveToplevel('/repo/avenor')
+    await appearance
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toEqual([])
+
+    // The conversation binds again on the next use: nothing derived for the
+    // dead run was remembered, so nothing publishes for the new one.
+    await ((core as any).tool?.avenor_peers as any).execute({ action: 'list' }, toolContext('session-1'))
+    await flush()
+    expect(messageBindMock).toHaveBeenCalledTimes(2)
+    expect(postBrokerCalls.filter(call => call.path === '/session_name')).toEqual([])
+  })
+
   it('gives two conversations in the same work distinct default labels', async () => {
     // Each conversation binds its own run, and the peers read reports the
     // labels already published with the run that holds each of them.

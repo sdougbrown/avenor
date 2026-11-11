@@ -1736,6 +1736,9 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       const version = titleVersion(sessionID)
       const toplevel = await readGitToplevel(dir)
       if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
+      // A binding dropped while git ran belongs to a run that is gone: a label
+      // derived from it must not be published or remembered for the rebind.
+      if (conversationBindings.get(sessionID) !== binding) return
       // The bound conversation's own credential reads the labels the broker
       // holds, so a second conversation in the same work takes the run-id tail
       // instead of a name a peer already answers to. The gate runs again after
@@ -1743,6 +1746,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
       // either.
       const taken = await takenSessionLabels(sessionID, binding.runId)
       if (titleVersion(sessionID) !== version || typeof sessionTitles.get(sessionID) === 'string') return
+      if (conversationBindings.get(sessionID) !== binding) return
       // The machine's name matters only when the broker is on another machine.
       const hostname = brokerIsLocal(binding.brokerUrl, '') ? '' : (options.hostname ?? osHostname)()
       const label = defaultHostLabel({
