@@ -140,6 +140,22 @@ chosen once at start. Two sessions that start at the same moment can still both
 read a free label and take it. The derivation is pinned by
 `schemas/session-name-rule.json`.
 
+A self-registered session answers its own `peers` calls. At start the layer
+writes an owner-only record of the session's broker identity to
+`<AVENOR_HOME or ~/.avenor>/peers/claude/<run id>/identity.json` and
+removes it when the session ends (a `/clear` or a resume keeps it, because the
+run goes on). The record is keyed by the broker run, and is written only for a
+loopback or `https` broker URL, the only ones the server accepts. A `tool.call` hook adds the record's path to each `peers` call
+as `claude_peer_file`, replacing any path the model supplied. The MCP server
+then runs the shared router as that run, through the broker the run registered
+on. `peers last target=self` reads the session's own run, a `peers rename`
+without a `session_id` renames the session, and the list marks the session
+`(self)`. Provisioned runs write no record and keep the supervisor's answers.
+`message` is unchanged: the layer's own hook still serves `tell`, `ask` and
+`reply`, and `withdraw` and `resume` still go to the supervisor. The server
+accepts `claude_peer_file` on `peers` only.
+
+
 A self-registered session's name follows Claude Code's `/rename`. After the built-in
 command runs, the layer reads the title it recorded (the last `custom-title`
 record in the session transcript, so a bare `/rename`'s generated name counts)
