@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Shared conformance fixture for the one session display-name rule. This is NOT a wire schema: it pins the rule values and case tables that both the Go side (messaging.ValidSessionName and messaging.StripDisallowedIdentifierRunes in internal/messaging, the label sanitation in internal/stable) and the TypeScript side (the label pipeline in packages/opencode/src/label.ts plus the core rune helpers it imports) must reproduce, so a change on either side that the other does not follow fails a test instead of leaving conversations silently unnamed. 'cases' holds names the rule accepts or refuses; 'disallowedRunes' marks the cases whose input holds runes no identifier may hold, which is what the strip path must remove. 'sanitizeCases' holds inputs mapped to the exact label the derivation must produce. Non-ascii runes are spelled as escapes so the fixture stays diffable. It also pins the work-derived default label: deriveCases (git top-level and branch to the bare label, shared by every derivation) and hostCases (the host prefix a harness-side default adds).",
+  "description": "Shared conformance fixture for the one session display-name rule. This is NOT a wire schema: it pins the rule values and case tables that both the Go side (messaging.ValidSessionName and messaging.StripDisallowedIdentifierRunes in internal/messaging, the label sanitation in internal/stable) and the TypeScript side (the label pipeline in packages/opencode/src/label.ts plus the core rune helpers it imports) must reproduce, so a change on either side that the other does not follow fails a test instead of leaving conversations silently unnamed. 'cases' holds names the rule accepts or refuses; 'disallowedRunes' marks the cases whose input holds runes no identifier may hold, which is what the strip path must remove. 'sanitizeCases' holds inputs mapped to the exact label the derivation must produce. Non-ascii runes are spelled as escapes so the fixture stays diffable. It also pins the work-derived default label: deriveCases (git top-level and branch to the bare label, shared by every derivation) and hostCases (the host prefix a harness-side default adds). pickCases pins the collision suffixing every derivation shares for a base and the labels already taken; the exhausted case (base and -2 to -9 all taken) is deliberately absent because the hosts differ there.",
   "limit": 64,
   "reservedReferences": [
     "self",
@@ -295,6 +295,70 @@
       "host": "claude",
       "work": "",
       "label": ""
+    }
+  ],
+  "pickCases": [
+    {
+      "name": "a free base is kept",
+      "base": "claude-avenor",
+      "taken": [],
+      "label": "claude-avenor"
+    },
+    {
+      "name": "a taken base takes -2",
+      "base": "claude-avenor",
+      "taken": [
+        "claude-avenor"
+      ],
+      "label": "claude-avenor-2"
+    },
+    {
+      "name": "the first free suffix wins",
+      "base": "claude-avenor",
+      "taken": [
+        "claude-avenor",
+        "claude-avenor-2"
+      ],
+      "label": "claude-avenor-3"
+    },
+    {
+      "name": "a taken suffix with a free base is irrelevant",
+      "base": "claude-avenor",
+      "taken": [
+        "claude-avenor-2"
+      ],
+      "label": "claude-avenor"
+    },
+    {
+      "name": "-9 is the last suffix",
+      "base": "x",
+      "taken": [
+        "x",
+        "x-2",
+        "x-3",
+        "x-4",
+        "x-5",
+        "x-6",
+        "x-7",
+        "x-8"
+      ],
+      "label": "x-9"
+    },
+    {
+      "name": "a base at the limit is cut to leave room for the suffix",
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "taken": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2"
+    },
+    {
+      "name": "a separator at the cut is trimmed before the suffix",
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bb",
+      "taken": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bb"
+      ],
+      "label": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2"
     }
   ]
 }

@@ -34,6 +34,12 @@ test("the name rule agrees with the fixture's accepts and refusals", () => {
   }
 })
 
+for (const c of rule.pickCases) {
+  test("picks: " + c.name, () => {
+    assert.equal(pickLabel(c.base, new Set(c.taken)), c.label)
+  })
+}
+
 test("a taken label takes the first free suffix, within the limit", () => {
   assert.equal(pickLabel("claude-avenor", new Set()), "claude-avenor")
   assert.equal(pickLabel("claude-avenor", new Set(["claude-avenor"])), "claude-avenor-2")

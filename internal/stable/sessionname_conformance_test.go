@@ -22,6 +22,12 @@ type sessionLabelSanitizeFixture struct {
 		Branch   string `json:"branch"`
 		Label    string `json:"label"`
 	} `json:"deriveCases"`
+	PickCases []struct {
+		Name  string   `json:"name"`
+		Base  string   `json:"base"`
+		Taken []string `json:"taken"`
+		Label string   `json:"label"`
+	} `json:"pickCases"`
 	SanitizeCases []struct {
 		Name  string `json:"name"`
 		Input string `json:"input"`
@@ -80,6 +86,26 @@ func TestSessionLabelDeriveConformance(t *testing.T) {
 		t.Run(c.Name, func(t *testing.T) {
 			if got := sanitizeSessionLabel(joinWorkLabel(c.Toplevel, c.Branch)); got != c.Label {
 				t.Fatalf("label for %q on %q = %q, want %q", c.Toplevel, c.Branch, got, c.Label)
+			}
+		})
+	}
+}
+
+// TestSessionLabelPickConformance drives the collision suffixing over the
+// shared fixture's base and taken-label cases.
+func TestSessionLabelPickConformance(t *testing.T) {
+	cases := loadSessionLabelSanitizeFixture(t).PickCases
+	if len(cases) == 0 {
+		t.Fatal("session-name-rule fixture has no pick cases")
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			held := map[string]bool{}
+			for _, label := range c.Taken {
+				held[label] = true
+			}
+			if got := pickSessionLabel(c.Base, func(label string) bool { return held[label] }); got != c.Label {
+				t.Fatalf("pickSessionLabel(%q, taken %v) = %q, want %q", c.Base, c.Taken, got, c.Label)
 			}
 		})
 	}
