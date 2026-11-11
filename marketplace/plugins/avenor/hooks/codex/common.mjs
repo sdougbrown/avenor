@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 
-import { defaultHostLabel, pickLabel } from "../label.js";
+import { brokerIsLocal, defaultHostLabel } from "../label.js";
 
 export const RECORD_VERSION = 1;
 export const QUEUE_TIMEOUT_MS = 20000;
@@ -151,16 +151,24 @@ export class BrokerRefusal extends Error {}
 
 /**
  * The label a self-registered session takes when nobody named it:
- * "codex-<repo>[@branch]" from the hook's directory, suffixed -2 … -9 when a
- * listed peer holds it. Empty means nothing usable derives and the run keeps
- * its minted id.
+ * "[<hostname>-]codex-<repo>" from the hook's directory, with a run-id tail
+ * where the name alone is not unique (see hooks/label.js). Empty means nothing
+ * usable derives and the run keeps its minted id.
  */
 export async function defaultSessionLabel(dir, record, git = gitAnswer, fetchGet = getAuthed) {
   try {
     const toplevel = await git(dir, ["rev-parse", "--show-toplevel"]);
-    const branch = toplevel === "" ? "" : await git(dir, ["branch", "--show-current"]);
-    const base = defaultHostLabel("codex", dir, toplevel, branch);
-    return base === "" ? "" : pickLabel(base, await takenLabels(record, fetchGet));
+    // The machine's name matters only when the broker is on another machine.
+    const hostname = brokerIsLocal(record.broker_url, "") ? "" : os.hostname();
+    return defaultHostLabel({
+      host: "codex",
+      hostname,
+      brokerUrl: record.broker_url,
+      dir,
+      toplevel,
+      runId: record.run_id,
+      taken: await takenLabels(record, fetchGet),
+    });
   } catch {
     return "";
   }
