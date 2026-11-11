@@ -176,6 +176,25 @@ func TestRelayedReadLeavesTheRegistryUntouched(t *testing.T) {
 	}
 }
 
+// TestRelayedReadKeepsAnUnreadableAnswerOutOfTheRunClasses pins that a child
+// whose answer is not a last-turn record is neither an unknown run nor a run
+// with no turn: it reports the protocol failure, which the edges refuse as a
+// failed read.
+func TestRelayedReadKeepsAnUnreadableAnswerOutOfTheRunClasses(t *testing.T) {
+	for name, body := range map[string]string{"empty body": ``, "non-JSON body": `not a record`} {
+		t.Run(name, func(t *testing.T) {
+			stub := newStubBroker(t, func(stubRequest) (int, string) { return http.StatusOK, body })
+			registry := NewRegistry()
+			relay := newTestRelay(t, registry, "child-one", stub.URL(), "gen-a", "run-b")
+
+			_, err := relay.Last(testContext(t), ParentRunKey("child-one", "run-b"))
+			if !errors.Is(err, ErrUnsupportedParentProtocol) || errors.Is(err, messaging.ErrTargetUnavailable) {
+				t.Fatalf("relay.Last = %v, want ErrUnsupportedParentProtocol and not target-unavailable", err)
+			}
+		})
+	}
+}
+
 // TestRelayedReadReportsAServerErrorAsAFailedRead pins that a child that answers
 // with a server error is a failed read, not an unknown run.
 func TestRelayedReadReportsAServerErrorAsAFailedRead(t *testing.T) {
