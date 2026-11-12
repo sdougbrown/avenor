@@ -622,7 +622,7 @@ describe('AvenorPlugin', () => {
       roster_entry: 'planner',
       backend: 'agy',
       wait: false,
-    }, context)).rejects.toThrow('direct identity fields are disabled in roster mode')
+    }, context)).rejects.toThrow('backend is a direct identity field, disabled in roster mode')
     expect(spawnToolMock).toHaveBeenCalledTimes(1)
   })
 

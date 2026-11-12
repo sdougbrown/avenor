@@ -218,7 +218,7 @@ Direct mode permits `agent`, `model`, and `backend` to be omitted independently,
 }
 ```
 
-Each roster entry must contain `backend` and at least one of `agent` or `model`. Do not combine roster mode with direct `agent`, `model`, or `backend` overrides. Roster entries currently do not support `system` or `thinking`; `thinking` remains a run-level option and is validated against the effective backend. A resumed session must stay on its original backend. Use an absolute `roster_file` path when the Pi process and target project have different working directories.
+Each roster entry must contain `backend` and at least one of `agent` or `model`. Do not combine roster mode with direct `agent`, `model`, or `backend` overrides. Roster entries reject `system`; an entry's `thinking` is only a default, so a run-level `thinking` still wins and is validated against the effective backend. A resumed session must stay on its original backend. Use an absolute `roster_file` path when the Pi process and target project have different working directories.
 
 ### Pi-specific features
 

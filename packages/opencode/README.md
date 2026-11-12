@@ -95,7 +95,7 @@ Use `roster_file` plus `roster_entry` to select a complete identity. Every roste
 }
 ```
 
-Roster entries currently support only `backend`, `agent`, and `model`. `system` and `thinking` are rejected; `thinking` remains a run-level value and is validated against the effective backend. A resumed session cannot change backend. The plugin passes `roster_file` as supplied, so an absolute path avoids ambiguity when the OpenCode process directory differs from the project directory.
+Roster entries carry `backend`, `agent`, `model`, and an optional `thinking` default; `system` is rejected. An explicit run-level `thinking` wins over the entry's, and is validated against the effective backend. A resumed session cannot change backend. The plugin passes `roster_file` as supplied, so an absolute path avoids ambiguity when the OpenCode process directory differs from the project directory.
 
 ### `avenor_status`
 

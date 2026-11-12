@@ -179,7 +179,7 @@ func TestSpawnParamsFromArgsRejectsMixedRosterSelector(t *testing.T) {
 	if code == 0 || params != nil {
 		t.Fatalf("code=%d params=%#v", code, params)
 	}
-	if !containsStr(stderr.String(), "direct identity fields are disabled in roster mode") {
+	if !containsStr(stderr.String(), "backend is a direct identity field, disabled in roster mode") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }

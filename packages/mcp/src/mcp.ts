@@ -78,7 +78,7 @@ export function getMcpAuthToken(): string {
 export const server = new McpServer({ name: 'avenor', version: '0.1.0' })
 
 server.registerTool('spawn', {
-  description: 'Spawn a new agent run with an optional canonical thinking level; unsupported backends reject explicit values',
+  description: 'Spawn a new agent run. Identity comes from one of two modes. In direct mode pass any of agent, model, and backend, and omitted values use runtime defaults. In roster mode pass roster_file with roster_entry, which names all three and rejects them as arguments. Optional thinking accepts a canonical thinking level; unsupported backends reject explicit values',
   inputSchema: spawnInputShape,
 }, async ({
   repo_dir,

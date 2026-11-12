@@ -1846,19 +1846,19 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     tool: {
       avenor_spawn: tool({
         description:
-          `Dispatch an agent run via avenor. Optional thinking accepts ${[...THINKING_LEVELS].slice(0, -1).join(', ')}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}; unsupported backends reject explicit values. Blocks by default, showing live progress as an updating tool call. Set wait=false for fire-and-forget — you will be re-prompted automatically on completion.`,
+          `Dispatch an agent run via avenor. Identity comes from one of two modes. In direct mode pass any of agent, model, and backend, and omitted values use runtime defaults. In roster mode pass roster_file with roster_entry, which names all three and rejects them as arguments. Optional thinking accepts ${[...THINKING_LEVELS].slice(0, -1).join(', ')}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}; unsupported backends reject explicit values. Blocks by default, showing live progress as an updating tool call. Set wait=false for fire-and-forget — you will be re-prompted automatically on completion.`,
         args: {
-          agent: tool.schema.string().optional().describe('Optional agent name; omission uses the supplied model or runtime defaults'),
+          agent: tool.schema.string().optional().describe('Optional agent name for direct identity selection; pair it with model and backend, or omit it for the runtime default. Rejected when roster_entry is set, because the entry names all three'),
           prompt: tool.schema.string().optional().describe('Prompt text'),
           prompt_file: tool.schema.string().optional().describe('Path to prompt file'),
           dir: tool.schema.string().optional().describe('Working directory for the run (defaults to the session project directory)'),
           label: tool.schema.string().optional().describe('Human-readable label for the run'),
           timeout: tool.schema.string().optional().describe('Timeout duration (e.g. 3600s)'),
-          model: tool.schema.string().optional().describe('Model override'),
+          model: tool.schema.string().optional().describe('Optional model override for direct identity selection; pair it with agent and backend, or omit it for the runtime default. Rejected when roster_entry is set; to run a roster persona on a different model, send the identity directly'),
           thinking: tool.schema.enum([...THINKING_LEVELS]).optional().describe('Thinking level; omission uses the backend default'),
-          backend: tool.schema.string().optional().describe('Backend override'),
-          roster_file: tool.schema.string().optional().describe('Path to the roster map'),
-          roster_entry: tool.schema.string().optional().describe('Roster entry to select'),
+          backend: tool.schema.string().optional().describe('Optional runtime backend for direct identity selection, such as agy, pi, opencode-acp, codex-app-server, or opencode-http. Omitting it in direct mode uses opencode-acp. Rejected when roster_entry is set'),
+          roster_file: tool.schema.string().optional().describe('Optional path to a roster map; pair it with roster_entry to select a whole loadout by key. Setting roster_entry turns on roster mode, which rejects agent, model, and backend'),
+          roster_entry: tool.schema.string().optional().describe('Optional roster entry key; the selected entry supplies backend, agent, and model as one identity, and its optional thinking is only a default. Requires roster_file. Passing agent, model, or backend alongside it is an error; to change one part of a roster persona, send the identity directly instead'),
           server_url: tool.schema.string().optional().describe('Backend server URL'),
           supervisor_id: tool.schema.string().optional().describe('Reuse an existing supervisor by socket path'),
           wait: tool.schema.boolean().default(true).describe(

@@ -218,7 +218,7 @@ describe('avenor MCP server', () => {
 
     expect(z.object(spawnInputShape).safeParse({ repo_dir: '/tmp/repo', ...input }).success).toBe(true)
     expect(() => validateSpawnSelection(input)).toThrow(
-      'invalid spawn selector: direct identity fields are disabled in roster mode',
+      'invalid spawn selector: backend is a direct identity field, disabled in roster mode (roster_entry is set); drop backend to use the roster entry, or drop roster_file and roster_entry to use direct identity',
     )
   })
 

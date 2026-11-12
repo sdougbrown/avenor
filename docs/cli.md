@@ -207,7 +207,7 @@ avenor run --prompt "Use this model" --model provider/model
 avenor run --prompt "Use backend defaults" --backend opencode-acp
 ```
 
-`--roster-file` and `--roster-entry` must be supplied together for a direct request. A roster request cannot also supply `--agent`, `--model`, or `--backend`; the roster entry supplies all three identity fields. A roster file is strict: `system`, `thinking`, and unknown entry fields are rejected in all formats. Run-level `--thinking` remains separate and is checked against the effective backend selected by the direct entry or by each workflow phase.
+`--roster-file` and `--roster-entry` must be supplied together for a direct request. A roster request cannot also supply `--agent`, `--model`, or `--backend`; the roster entry supplies all three identity fields. A roster file is strict: `system` and unknown entry fields are rejected in all formats. An entry's `thinking` is only a default, so a run-level `--thinking` still wins and is checked against the effective backend selected by the direct entry or by each workflow phase.
 
 For a workflow, `--roster-file` is only a root fallback and `--roster-entry` is invalid. The workflow config selects entries per direct phase:
 

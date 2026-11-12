@@ -251,10 +251,17 @@ The supervisor `resume` operation preserves the run's messaging choice. A raw `s
 - `model` — model to use
 - `backend` — runtime backend (e.g., `"opencode-http"`, `"opencode-acp"`, `"codex-app-server"`, `"agy"`)
 - `messaging` — request poo messaging on or off. Omitted defaults on for delegation spawns and off for workflow nodes, loop or team phases, and permission-decider runs. True is refused for loop and team spawns. The switch is carried per run; poo messaging is not wired at launch yet.
-- `roster_file` / `roster_entry` — optional roster selector pair
+- `roster_file` — path to a roster map; pair it with `roster_entry` to select a whole loadout by key. Setting `roster_entry` turns on roster mode, which rejects `agent`, `model`, and `backend`
+- `roster_entry` — roster entry key; the selected entry supplies backend, agent, and model as one identity, and its optional `thinking` is only a default. Requires `roster_file`
 - `server_url` — server URL for opencode-http backend
 - `launch_wrapper` — optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion (see [backends.md](backends.md#mcp-surfaces-operator-allowlist))
 - `supervisor_id` — supervisor socket to use instead of the default. Must be an `avenor-mcp-*.sock` directly inside the sockets root (`AVENOR_HOME/sockets` when set, otherwise `~/.avenor/sockets`), the same containment rule the TypeScript core enforces; a custom supervisor location is reachable only by configuring it as the MCP server's `--supervisor-socket`
+
+#### Direct and roster identity
+
+`spawn` selects its identity one of two ways. Direct mode specifies `agent`, `model`, or `backend`, each independently optional, and omitted values come from the runtime default. Roster mode specifies `roster_file` with `roster_entry`, whose entry supplies all three. The modes are mutually exclusive: a call carrying `roster_entry` rejects `agent`, `model`, and `backend`, and the refusal names the field to drop.
+
+Because a roster entry defines the complete identity, a persona selected from a roster cannot take a model override. To run a persona on another model, name the identity directly instead of selecting it by key. `thinking` is not part of the identity: the entry supplies it only as a default, and an explicit `thinking` wins.
 
 **Returns:**
 ```json
