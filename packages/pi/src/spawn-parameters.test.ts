@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   THINKING_LEVELS,
   spawnFieldDescription,
+  spawnFieldEnum,
   spawnFieldProperties,
   spawnSurfaceFields,
 } from '@dougbots/avenor-core'
@@ -20,6 +21,10 @@ describe('pi spawn parameters', () => {
     >
     for (const [name, published] of Object.entries(properties)) {
       const declared = spawnFieldProperties[name]?.type
+      if (name === 'backend') {
+        expect(published.anyOf?.map((literal) => literal.const)).toEqual([...spawnFieldEnum('backend')])
+        continue
+      }
       if (published.anyOf) {
         // A union of literals carries no top-level type; the thinking levels are
         // the only such field, and the union is the enum the schema describes.

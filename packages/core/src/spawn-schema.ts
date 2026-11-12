@@ -13,6 +13,7 @@ export type SpawnSurface = 'go' | 'mcp' | 'pi' | 'opencode'
 type SpawnSchemaProperty = {
   type: string
   description?: string
+  enum?: string[]
   items?: { type: string }
   'x-avenor-surfaces'?: string[]
 }
@@ -25,6 +26,19 @@ export const spawnFieldNames: readonly string[] = Object.keys(properties).sort()
 /** Each property's canonical schema shape, keyed by property name. */
 export const spawnFieldProperties: Readonly<Record<string, SpawnSchemaProperty>> =
   Object.freeze({ ...properties })
+
+/**
+ * One field's declared values, for a surface that publishes the restriction.
+ * Throws for a field the schema leaves open, so a surface cannot narrow a field
+ * the contract does not.
+ */
+export function spawnFieldEnum(name: string): readonly string[] {
+  const values = properties[name]?.enum
+  if (!values || values.length === 0) {
+    throw new Error(`spawn field "${name}" declares no enum in schemas/spawn.input.json`)
+  }
+  return values
+}
 
 /** The fields one surface publishes, in schema order. */
 export function spawnSurfaceFields(surface: SpawnSurface): string[] {

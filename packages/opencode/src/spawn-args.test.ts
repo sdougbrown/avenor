@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   THINKING_LEVELS,
   spawnFieldDescription,
+  spawnFieldEnum,
   spawnFieldProperties,
   spawnSurfaceFields,
 } from '@dougbots/avenor-core'
@@ -39,9 +40,10 @@ describe('opencode spawn arguments', () => {
       const declared = spawnFieldProperties[name]?.type
       const parsed = schema as unknown as { safeParse: (value: unknown) => { success: boolean } }
       if (declared === 'string') {
-        // thinking is the one string field the surfaces narrow to an enum; the
-        // schema keeps it a plain string because the backend validates the level.
-        const sample = name === 'thinking' ? THINKING_LEVELS[0] : 'value'
+        // A declared enum narrows the field here; thinking is the exception the
+        // schema leaves open, because the backend validates the level itself.
+        const sample = spawnFieldProperties[name]?.enum?.[0]
+          ?? (name === 'thinking' ? THINKING_LEVELS[0] : 'value')
         expect(parsed.safeParse(sample).success).toBe(true)
         expect(parsed.safeParse(true).success).toBe(false)
       } else if (declared === 'boolean') {
@@ -51,6 +53,14 @@ describe('opencode spawn arguments', () => {
         throw new Error(`spawn field "${name}" declares type "${declared}", which this test does not cover`)
       }
     }
+  })
+
+  it('accepts only the backends the schema declares', async () => {
+    const backend = (await spawnArgs()).backend as unknown as { safeParse: (v: unknown) => { success: boolean } }
+    for (const value of spawnFieldEnum('backend')) {
+      expect(backend.safeParse(value).success).toBe(true)
+    }
+    expect(backend.safeParse('opencode-htt').success).toBe(false)
   })
 
   it('keeps wait defaulting to blocking when the caller omits it', async () => {

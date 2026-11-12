@@ -61,6 +61,7 @@ import {
   type StatusResult,
   THINKING_LEVELS,
   spawnFieldDescription,
+  spawnFieldEnum,
   validateSpawnSelection,
   runWorkflowTool,
 } from '@dougbots/avenor-core'
@@ -1857,7 +1858,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     timeout: tool.schema.string().optional().describe(spawnFieldDescription('timeout')),
     model: tool.schema.string().optional().describe(spawnFieldDescription('model')),
     thinking: tool.schema.enum([...THINKING_LEVELS]).optional().describe(spawnFieldDescription('thinking')),
-    backend: tool.schema.string().optional().describe(spawnFieldDescription('backend')),
+    backend: tool.schema.enum(spawnFieldEnum('backend') as [string, ...string[]]).optional().describe(spawnFieldDescription('backend')),
     roster_file: tool.schema.string().optional().describe(spawnFieldDescription('roster_file')),
     roster_entry: tool.schema.string().optional().describe(spawnFieldDescription('roster_entry')),
     server_url: tool.schema.string().optional().describe(spawnFieldDescription('server_url')),

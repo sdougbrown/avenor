@@ -52,6 +52,7 @@ export { validateSpawnSelection } from './spawn-selection.js'
 export type { SpawnSelectionInput } from './spawn-selection.js'
 export {
   spawnFieldDescription,
+  spawnFieldEnum,
   spawnFieldNames,
   spawnFieldProperties,
   spawnSurfaceFields,

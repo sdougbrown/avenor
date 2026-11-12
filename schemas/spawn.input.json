@@ -98,6 +98,18 @@
     },
     "backend": {
       "type": "string",
+      "enum": [
+        "agy",
+        "claude",
+        "codex-app-server",
+        "cursor-acp",
+        "gemini-acp",
+        "opencode-acp",
+        "opencode-http",
+        "pi",
+        "pony",
+        "poo"
+      ],
       "x-avenor-surfaces": [
         "go",
         "mcp",

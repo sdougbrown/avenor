@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sdougbrown/avenor/internal/runtime/factory"
 )
 
 // TestGeneratedSpawnSchemaIsCurrent fails when the checked-in schema file and
@@ -132,6 +133,26 @@ func TestSpawnToolPublishesSharedSchema(t *testing.T) {
 				t.Errorf("launch_wrapper items.type = %v, want string", items["type"])
 			}
 		}
+	}
+}
+
+// TestSpawnSchemaBackendEnumMatchesRegistry holds the schema's backend enum to
+// the backends this build registers. A backend added to the factory without a
+// schema edit would otherwise be refused by every client that validates the
+// published schema first.
+func TestSpawnSchemaBackendEnumMatchesRegistry(t *testing.T) {
+	var schema struct {
+		Properties map[string]struct {
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(spawnInputSchemaJSON), &schema); err != nil {
+		t.Fatalf("parse generated schema: %v", err)
+	}
+	got := schema.Properties["backend"].Enum
+	want := factory.KnownBackends()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backend enum = %v, want the registered backends %v; edit schemas/spawn.input.json and regenerate", got, want)
 	}
 }
 
