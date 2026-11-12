@@ -1,6 +1,7 @@
 package control
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,55 @@ func TestCancelAcknowledgesBeforeTheRunStopsTheServer(t *testing.T) {
 	case <-cancelled:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the cancel never ran the run's cancel function")
+	}
+}
+
+// TestRunLevelCancelAnswersOnce pins the observable half of the async response
+// contract: a run-level cancel writes one response, not two. The helper that
+// acknowledges and returns the dispatch sentinel exists so the write and the
+// sentinel cannot drift apart; a handler that wrote inline and returned a normal
+// response would answer twice, which is what this test reads for.
+func TestRunLevelCancelAnswersOnce(t *testing.T) {
+	state := NewState("run_1", "", 0)
+	s, cap := NewTestServer(state)
+	if err := s.Start(testSocketPath(t)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer s.Stop()
+
+	cancelled := make(chan struct{})
+	s.SetCancelFunc(func() { close(cancelled) })
+
+	owner := dialOwner(t, s, cap)
+	defer owner.Close()
+	if err := writeReq(t, owner, Request{JSONRPC: "2.0", ID: 1, Method: "cancel"}); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancel never ran the run's cancel function")
+	}
+
+	// Drain whatever the server wrote until the deadline: exactly one line.
+	_ = owner.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	buf := make([]byte, 0, 1024)
+	chunk := make([]byte, 256)
+	for {
+		n, err := owner.Read(chunk)
+		buf = append(buf, chunk[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	written := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(buf)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			written++
+		}
+	}
+	if written != 1 {
+		t.Fatalf("cancel wrote %d response lines, want 1: %q", written, string(buf))
 	}
 }
 
