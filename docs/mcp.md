@@ -240,7 +240,7 @@ Starts a new run.
 The supervisor `resume` operation preserves the run's messaging choice. A raw `spawn` with `session_id` uses the caller's `messaging` choice or its default instead. `avenor run --resume` has no supervisor choice and treats messaging as off; a poo session created with messaging on may fail to resume when its recorded tools are unavailable.
 
 **Required:**
-- `dir` — working directory for the run. Before 0.47.0 this field was `repo_dir`; a client that still sends that name is refused with `unexpected additional properties ["repo_dir"]` rather than having it ignored
+- `dir` — working directory for the run
 
 **Optional:**
 - `agent` — agent persona to run (e.g., `"jockey"`, `"butler"`). The backend resolves the name to a prompt, tool set, and permission policy
@@ -256,6 +256,12 @@ The supervisor `resume` operation preserves the run's messaging choice. A raw `s
 - `server_url` — server URL for opencode-http backend
 - `launch_wrapper` — optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion (see [backends.md](backends.md#mcp-surfaces-operator-allowlist))
 - `supervisor_id` — supervisor socket to use instead of the default. Must be an `avenor-mcp-*.sock` directly inside the sockets root (`AVENOR_HOME/sockets` when set, otherwise `~/.avenor/sockets`), the same containment rule the TypeScript core enforces; a custom supervisor location is reachable only by configuring it as the MCP server's `--supervisor-socket`
+
+::: warning Renamed in 0.47.0
+The working directory argument is `dir`. It was `repo_dir` before 0.47.0, and a
+client that still sends that name is refused with `unexpected additional
+properties ["repo_dir"]` rather than having it ignored.
+:::
 
 `schemas/spawn.input.json` is the single source for every field above: the server publishes that file, and the three JavaScript surfaces read their field text from it. Reword or add a spawn field there, not in this list.
 
