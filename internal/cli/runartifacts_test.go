@@ -408,8 +408,11 @@ func testControlCancelKeepsSignalTrap(t *testing.T) {
 	// The signal lands during teardown, after the control cancel and before the
 	// pid file is removed. A cancel that had unregistered the trap would leave
 	// the default disposition in place, and this process would exit by signal.
+	// The signal must be delivered before the hook returns: the run stops its
+	// trap as soon as teardown ends, so a signal still in flight then would meet
+	// the default disposition whether or not the cancel had kept the trap.
 	pidFileRemoveCheck = func() {
-		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		if err := raiseSignalSynchronously(syscall.SIGTERM); err != nil {
 			t.Errorf("send SIGTERM: %v", err)
 		}
 	}
