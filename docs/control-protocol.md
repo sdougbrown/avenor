@@ -234,7 +234,7 @@ Response:
 {"jsonrpc":"2.0","id":1,"method":"cancel"}
 ```
 
-Cancels the run (equivalent to SIGINT). Writes `STOP_REASON=cancelled` to the sentinel file. Requires ownership.
+Cancels the run (equivalent to SIGINT). Writes `STOP_REASON=cancelled` to the sentinel file. Requires ownership. The server answers `{"ok":true}` before the run begins to stop, so the answer arrives even when the run ends at once.
 
 #### `prompt`
 
