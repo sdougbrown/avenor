@@ -229,8 +229,10 @@ func TestSpawnSchemaMatchesStruct(t *testing.T) {
 }
 
 // TestPublishedSpawnSchemaIsTheGoFieldSet pins the published schema to what this
-// server actually decodes: a JS-only property (dir, wait) must not reach the
-// schema, because the decoder would refuse it after the schema admitted it.
+// server actually decodes. A field only the JS surfaces publish must not reach
+// the schema, because the decoder would refuse it after the schema admitted it;
+// wait is the only such field today, and a field that becomes a Go field fails
+// here until the filter and this test agree.
 func TestPublishedSpawnSchemaIsTheGoFieldSet(t *testing.T) {
 	var published struct {
 		Properties map[string]json.RawMessage `json:"properties"`

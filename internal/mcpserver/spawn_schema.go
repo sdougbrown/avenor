@@ -14,11 +14,11 @@ const surfaceAnnotation = "x-avenor-surfaces"
 
 // publishedSpawnInputSchema is schemas/spawn.input.json reduced to the fields
 // this server publishes, with the one fact this server owns added: which of
-// them it requires. Filtering matters: the file also describes dir and wait,
-// which only the JS surfaces publish, and a schema that advertised them would
-// accept a call the strict decoder then refuses. The required list is derived
-// from spawnArgs, where "no omitempty" is exactly what the decoder will not
-// default.
+// them it requires. Filtering matters because the file also describes fields
+// only the JS surfaces publish (today that is wait alone): a schema that
+// advertised one would accept a call the strict decoder then refuses. The
+// required list is derived from spawnArgs, where "no omitempty" is exactly what
+// the decoder will not default.
 func publishedSpawnInputSchema() json.RawMessage {
 	var source struct {
 		Schema               string                     `json:"$schema"`
