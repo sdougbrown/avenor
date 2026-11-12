@@ -145,7 +145,7 @@ describe('statusTool singleton registry', () => {
     sentinelPath = path.join(os.tmpdir(), `avenor-wait-${runInfo.runId}.done`)
     fs.writeFileSync(sentinelPath, 'DONE\n')
     runInfo.sentinelPath = sentinelPath
-    statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: sentinelPath, phase: 'waiting', pending_permission: { request_id: 'req', description: 'approve', options: [] } })
+    statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: sentinelPath, status: 'running', phase: 'waiting', pending_permission: { request_id: 'req', description: 'approve', options: [] } })
     const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
     expect(result.status).toBe('waiting')
     expect(result.pending_permission?.request_id).toBe('req')
@@ -194,6 +194,38 @@ describe('statusTool singleton registry', () => {
     const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
     expect(result).toMatchObject({ status: 'running', run_id: runInfo.runId })
     expect(result.final_output).toBeUndefined()
+  })
+
+  it('keeps a running runtime running when it reports a terminal phase and no sentinel exists', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-phase-race-${runInfo.runId}.done`)
+    runInfo.sentinelPath = sentinelPath
+    statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: sentinelPath, status: 'running', phase: 'done' })
+
+    const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
+
+    expect(result.status).toBe('running')
+  })
+
+  it('keeps a running runtime in an active phase running when its sentinel holds an earlier turn\'s outcome', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-follow-up-${runInfo.runId}.done`)
+    fs.writeFileSync(sentinelPath, 'DONE\n')
+    runInfo.sentinelPath = sentinelPath
+    statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: sentinelPath, status: 'running', phase: 'working' })
+
+    const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
+
+    expect(result.status).toBe('running')
+  })
+
+  it('settles a running runtime that reports a terminal phase from its sentinel', async () => {
+    sentinelPath = path.join(os.tmpdir(), `avenor-phase-race-${runInfo.runId}.done`)
+    fs.writeFileSync(sentinelPath, 'DONE\n')
+    runInfo.sentinelPath = sentinelPath
+    statusMock.mockResolvedValueOnce({ runtime_id: runInfo.runtimeId, sentinel_file: sentinelPath, status: 'running', phase: 'done' })
+
+    const result = singleRun(await statusTool({ runId: runInfo.runId, supervisorId: '/tmp/avenor-mcp-test.sock' }))
+
+    expect(result.status).toBe('done')
   })
 
   it('reads terminal sentinel when singleton registry status lookup throws', async () => {
@@ -312,6 +344,7 @@ describe('statusTool singleton registry', () => {
       run_id: 'parent-run-id-that-must-not-replace-the-tracked-run',
       runtime_id: runInfo.runtimeId,
       session_id: 'ses-live',
+      status: 'running',
       phase: 'waiting',
       phase_label: 'Need approval',
       backend: 'pi',
@@ -689,7 +722,7 @@ describe('statusTool broker peers', () => {
         peersMock.mockResolvedValue({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended' })] })
 
         expect(await peerStatusTool({ runId: 'claude-1', supervisorId })).toMatchObject({
-          run_id: 'claude-1', label: 'claude-1', status: 'running',
+          run_id: 'claude-1', label: 'claude-1', status: 'unknown',
         })
         brokerNotRead()
       })
@@ -699,7 +732,7 @@ describe('statusTool broker peers', () => {
         peersMock.mockResolvedValue({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended' })] })
 
         expect(await onSingleton(() => statusTool({ runId: 'claude-1' }))).toMatchObject({
-          run_id: 'claude-1', label: 'claude-1', status: 'running',
+          run_id: 'claude-1', label: 'claude-1', status: 'unknown',
         })
         brokerNotRead()
       })
@@ -710,7 +743,7 @@ describe('statusTool broker peers', () => {
       peersMock.mockResolvedValue({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended' })] })
 
       expect(await peerStatusTool({ runId: 'claude-1', supervisorId })).toMatchObject({
-        run_id: 'claude-1', label: 'claude-1', status: 'running',
+        run_id: 'claude-1', label: 'claude-1', status: 'unknown',
       })
       brokerNotRead()
     })
@@ -719,7 +752,7 @@ describe('statusTool broker peers', () => {
   describe('on the singleton path, finds a live run on the runtime list', () => {
     function liveByRunId() {
       peerStatusMock.mockImplementation(async (runtimeId?: string) => {
-        if (runtimeId === 'rt-9') return { runtime_id: 'rt-9', phase: 'waiting' }
+        if (runtimeId === 'rt-9') return { runtime_id: 'rt-9', status: 'running', phase: 'waiting' }
         throw absentRuntime(runtimeId ?? '')
       })
       peerListMock.mockResolvedValue([{ runtime_id: 'rt-9', run_id: 'live-run', label: 'worker' }])
@@ -739,14 +772,14 @@ describe('statusTool broker peers', () => {
       peersMock.mockResolvedValue({ peers: [peerRow('live-run', { label: 'planner', status: 'ended' })] })
 
       expect(await onSingleton(() => statusTool({ runId: 'live-run' }))).toMatchObject({
-        run_id: 'live-run', label: 'live-run', status: 'running',
+        run_id: 'live-run', label: 'live-run', status: 'unknown',
       })
       brokerNotRead()
     })
   })
 
   it('does not read the broker for a run the supervisor knows', async () => {
-    peerStatusMock.mockResolvedValueOnce({ runtime_id: 'rt-live', phase: 'waiting' })
+    peerStatusMock.mockResolvedValueOnce({ runtime_id: 'rt-live', status: 'running', phase: 'waiting' })
     peersMock.mockResolvedValue({ peers: [peerRow('rt-live', { label: 'planner', status: 'ended' })] })
 
     const result = singleRun(await peerStatusTool({ runId: 'rt-live', supervisorId }))

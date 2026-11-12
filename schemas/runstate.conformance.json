@@ -1,0 +1,531 @@
+{
+  "version": 1,
+  "description": "Shared conformance fixture for the run lifecycle vocabulary. This is NOT a wire schema: it pins the pure functions Go (internal/runstate) and TypeScript (packages/core/src/run-state.ts) must both reproduce. 'translate' maps a raw supervisor status and phase to the consumer-facing status, phase, turnComplete and recognized; the functions are case-sensitive, so an upper-case status is unrecognized. 'sentinelStatus' maps a completion sentinel's status word to a consumer-facing status, passing an unlisted word through lowercased. 'terminalStatus' classifies a consumer-facing status as terminal. 'terminalSentinel' and 'resumableSentinel' classify a sentinel word, upper-casing it first.",
+  "translate": [
+    {
+      "name": "running",
+      "status": "running",
+      "phase": "working",
+      "want": {
+        "status": "running",
+        "phase": "working",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "running without phase",
+      "status": "running",
+      "phase": "",
+      "want": {
+        "status": "running",
+        "phase": "",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "running terminal phase",
+      "status": "running",
+      "phase": "done",
+      "want": {
+        "status": "running",
+        "phase": "",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "running failed phase",
+      "status": "running",
+      "phase": "failed",
+      "want": {
+        "status": "running",
+        "phase": "",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "running killed phase",
+      "status": "running",
+      "phase": "killed",
+      "want": {
+        "status": "running",
+        "phase": "",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "running waiting phase",
+      "status": "running",
+      "phase": "waiting",
+      "want": {
+        "status": "running",
+        "phase": "waiting",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "idle active phase",
+      "status": "idle",
+      "phase": "working",
+      "want": {
+        "status": "running",
+        "phase": "working",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "idle without phase",
+      "status": "idle",
+      "phase": "",
+      "want": {
+        "status": "running",
+        "phase": "",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "idle waiting phase",
+      "status": "idle",
+      "phase": "waiting",
+      "want": {
+        "status": "running",
+        "phase": "waiting",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "idle non-terminal status as phase",
+      "status": "idle",
+      "phase": "blocked",
+      "want": {
+        "status": "running",
+        "phase": "blocked",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "idle done phase",
+      "status": "idle",
+      "phase": "done",
+      "want": {
+        "status": "done",
+        "phase": "done",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "idle failed phase",
+      "status": "idle",
+      "phase": "failed",
+      "want": {
+        "status": "failed",
+        "phase": "failed",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "idle timeout phase",
+      "status": "idle",
+      "phase": "timeout",
+      "want": {
+        "status": "timeout",
+        "phase": "timeout",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "idle killed phase",
+      "status": "idle",
+      "phase": "killed",
+      "want": {
+        "status": "killed",
+        "phase": "killed",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "ended",
+      "status": "ended",
+      "phase": "",
+      "want": {
+        "status": "done",
+        "phase": "",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "ended with phase",
+      "status": "ended",
+      "phase": "working",
+      "want": {
+        "status": "done",
+        "phase": "working",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "done",
+      "status": "done",
+      "phase": "done",
+      "want": {
+        "status": "done",
+        "phase": "done",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "done without phase",
+      "status": "done",
+      "phase": "",
+      "want": {
+        "status": "done",
+        "phase": "",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "failed",
+      "status": "failed",
+      "phase": "",
+      "want": {
+        "status": "failed",
+        "phase": "",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "timeout",
+      "status": "timeout",
+      "phase": "timeout",
+      "want": {
+        "status": "timeout",
+        "phase": "timeout",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "killed",
+      "status": "killed",
+      "phase": "killed",
+      "want": {
+        "status": "killed",
+        "phase": "killed",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "waiting",
+      "status": "waiting",
+      "phase": "waiting",
+      "want": {
+        "status": "waiting",
+        "phase": "waiting",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "waiting without phase",
+      "status": "waiting",
+      "phase": "",
+      "want": {
+        "status": "waiting",
+        "phase": "",
+        "turnComplete": false,
+        "recognized": true
+      }
+    },
+    {
+      "name": "blocked",
+      "status": "blocked",
+      "phase": "",
+      "want": {
+        "status": "failed",
+        "phase": "",
+        "turnComplete": true,
+        "recognized": true
+      }
+    },
+    {
+      "name": "unknown status",
+      "status": "unknown",
+      "phase": "working",
+      "want": {
+        "status": "unknown",
+        "phase": "working",
+        "turnComplete": false,
+        "recognized": false
+      }
+    },
+    {
+      "name": "empty status",
+      "status": "",
+      "phase": "working",
+      "want": {
+        "status": "unknown",
+        "phase": "working",
+        "turnComplete": false,
+        "recognized": false
+      }
+    },
+    {
+      "name": "unlisted status",
+      "status": "paused",
+      "phase": "",
+      "want": {
+        "status": "unknown",
+        "phase": "",
+        "turnComplete": false,
+        "recognized": false
+      }
+    },
+    {
+      "name": "upper-case running is unrecognized",
+      "status": "RUNNING",
+      "phase": "working",
+      "want": {
+        "status": "unknown",
+        "phase": "working",
+        "turnComplete": false,
+        "recognized": false
+      }
+    },
+    {
+      "name": "upper-case ended is unrecognized",
+      "status": "ENDED",
+      "phase": "",
+      "want": {
+        "status": "unknown",
+        "phase": "",
+        "turnComplete": false,
+        "recognized": false
+      }
+    },
+    {
+      "name": "upper-case idle is unrecognized",
+      "status": "IDLE",
+      "phase": "done",
+      "want": {
+        "status": "unknown",
+        "phase": "done",
+        "turnComplete": false,
+        "recognized": false
+      }
+    },
+    {
+      "name": "upper-case phase is not terminal",
+      "status": "idle",
+      "phase": "DONE",
+      "want": {
+        "status": "running",
+        "phase": "DONE",
+        "turnComplete": false,
+        "recognized": true
+      }
+    }
+  ],
+  "sentinelStatus": [
+    {
+      "word": "DONE",
+      "want": "done"
+    },
+    {
+      "word": "FAILED",
+      "want": "failed"
+    },
+    {
+      "word": "BLOCKED",
+      "want": "failed"
+    },
+    {
+      "word": "TIMEOUT",
+      "want": "timeout"
+    },
+    {
+      "word": "KILLED",
+      "want": "killed"
+    },
+    {
+      "word": "STOPPED",
+      "want": "stopped"
+    },
+    {
+      "word": "WEIRD",
+      "want": "weird"
+    },
+    {
+      "word": "",
+      "want": ""
+    },
+    {
+      "word": "done",
+      "want": "done"
+    },
+    {
+      "word": "failed",
+      "want": "failed"
+    },
+    {
+      "word": "blocked",
+      "want": "blocked"
+    },
+    {
+      "word": "Done",
+      "want": "done"
+    }
+  ],
+  "terminalSentinel": [
+    {
+      "word": "DONE",
+      "want": true
+    },
+    {
+      "word": "FAILED",
+      "want": true
+    },
+    {
+      "word": "BLOCKED",
+      "want": true
+    },
+    {
+      "word": "TIMEOUT",
+      "want": true
+    },
+    {
+      "word": "KILLED",
+      "want": true
+    },
+    {
+      "word": "done",
+      "want": true
+    },
+    {
+      "word": "blocked",
+      "want": true
+    },
+    {
+      "word": "STOPPED",
+      "want": false
+    },
+    {
+      "word": "RUNNING",
+      "want": false
+    },
+    {
+      "word": "WEIRD",
+      "want": false
+    },
+    {
+      "word": "",
+      "want": false
+    }
+  ],
+  "resumableSentinel": [
+    {
+      "word": "DONE",
+      "want": true
+    },
+    {
+      "word": "FAILED",
+      "want": true
+    },
+    {
+      "word": "BLOCKED",
+      "want": true
+    },
+    {
+      "word": "done",
+      "want": true
+    },
+    {
+      "word": "blocked",
+      "want": true
+    },
+    {
+      "word": "TIMEOUT",
+      "want": false
+    },
+    {
+      "word": "KILLED",
+      "want": false
+    },
+    {
+      "word": "timeout",
+      "want": false
+    },
+    {
+      "word": "STOPPED",
+      "want": false
+    },
+    {
+      "word": "",
+      "want": false
+    }
+  ],
+  "terminalStatus": [
+    {
+      "status": "done",
+      "want": true
+    },
+    {
+      "status": "failed",
+      "want": true
+    },
+    {
+      "status": "timeout",
+      "want": true
+    },
+    {
+      "status": "killed",
+      "want": true
+    },
+    {
+      "status": "",
+      "want": false
+    },
+    {
+      "status": "running",
+      "want": false
+    },
+    {
+      "status": "idle",
+      "want": false
+    },
+    {
+      "status": "ended",
+      "want": false
+    },
+    {
+      "status": "waiting",
+      "want": false
+    },
+    {
+      "status": "blocked",
+      "want": false
+    },
+    {
+      "status": "unknown",
+      "want": false
+    }
+  ]
+}

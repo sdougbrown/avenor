@@ -36,6 +36,7 @@ import {
   inspectTool,
   installAskClaims,
   isClosedSocketError,
+  isTerminalStatus,
   isGenerationMismatchError,
   killTool,
   messageTool,
@@ -76,7 +77,7 @@ import {
   type WatchRunRef,
 } from './watch.js'
 import type { TrackedRun, RunStatusEntry, CompletionNotice } from './types.js'
-import { TERMINAL_STATUSES, findLiveStatusForTrackedRun, formatRunLine, statusEmoji } from './types.js'
+import { findLiveStatusForTrackedRun, formatRunLine, statusEmoji } from './types.js'
 import { countNestedRuns } from './nested-count.js'
 import { resolveAgentProfile } from './agent-profile.js'
 import {
@@ -301,9 +302,7 @@ function buildWaitingText(run: { runId: string; label: string; agent?: string },
   return lines.join('\n')
 }
 
-export function isTerminalStatus(status: string | undefined): boolean {
-  return !!status && TERMINAL_STATUSES.has(status)
-}
+export { isTerminalStatus }
 
 export function renderStatusLines(entries: RunStatusEntry[]): string[] {
   const active = entries.filter(e => !isTerminalStatus(e.status))

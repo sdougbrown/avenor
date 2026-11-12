@@ -1,4 +1,4 @@
-import { extractEventText, peersDetails, renderPeerList, resultOutput } from '@dougbots/avenor-core'
+import { extractEventText, isTerminalStatus, peersDetails, renderPeerList, resultOutput } from '@dougbots/avenor-core'
 import type {
   InspectResult,
   PeersRouterResult,
@@ -16,7 +16,6 @@ const STATUS_ROWS = 12
 const COLLECTION_ITEMS = 8
 const INSPECT_ITEMS = 5
 const CLEANUP_ITEMS = 8
-const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
 
 type RichToolResult = {
   title: string
@@ -156,10 +155,6 @@ function output(lines: string[] | undefined, tool: string): string {
   return (lines ?? fallback(tool)).join('\n')
 }
 
-function isTerminal(status: string): boolean {
-  return TERMINAL_STATUSES.has(status)
-}
-
 function permission(record: RecordValue | undefined): RecordValue | undefined {
   return asRecord(record?.pending_permission)
 }
@@ -193,7 +188,7 @@ function guidance(status: string, pending: RecordValue | undefined, runId: strin
     }
     return `Guidance: Call avenor_message with action "resume" or avenor_status with run_id "${runId}".`
   }
-  if (isTerminal(status)) return `Guidance: Call avenor_result or avenor_events with run_id "${runId}".`
+  if (isTerminalStatus(status)) return `Guidance: Call avenor_result or avenor_events with run_id "${runId}".`
   return `Guidance: Call avenor_result with run_id "${runId}".`
 }
 

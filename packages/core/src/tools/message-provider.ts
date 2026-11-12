@@ -17,13 +17,9 @@ import { ensureRunPaths } from '../paths.js'
 import { Supervisor, retainLiveIdentity, type RunInfo } from '../supervisor.js'
 import { goQuote, newMsgID, type MessageOutcome } from '../messaging-text.js'
 import { ToolError } from '../message.js'
+import { isResumableSentinel, isTerminalSentinel, sentinelStatus, translate } from '../run-state.js'
 import { findExternalRunById, listExternalRuns, registerExternalRun } from './run-registry.js'
-import {
-  RESUMABLE_SENTINEL_STATUSES,
-  resumableFromSession,
-  sentinelStatusToResult,
-  TERMINAL_SENTINEL_STATUSES,
-} from './sentinel-status.js'
+import { resumableFromSession } from './sentinel-status.js'
 import type {
   MessageProvider,
   MessageSurface,
@@ -101,7 +97,6 @@ export interface PendingAsk {
 }
 
 export const SUPERVISOR_RUN_ID = 'supervisor'
-const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
 
 function firstNonEmpty(...values: Array<string | undefined>): string {
   for (const value of values) {
@@ -231,49 +226,14 @@ function authorityError(error: unknown): Error {
 }
 
 /**
- * The port of Go's `runstate.Translate` that classifies one supervisor status
- * record into the turn and resume facts the router gates on. `status.ts`'s
- * `translateStatus` is a different port — the sentinel-aware status renderer
- * for the status surface, which reads a sentinel file this path never does.
- */
-function translateRunFacts(rawStatus: string, rawPhase: string): { status: string; live: boolean } {
-  let status = rawStatus
-  let phase = rawPhase
-  switch (rawStatus) {
-    case 'running':
-      if (TERMINAL_STATUSES.has(rawPhase)) phase = ''
-      break
-    case 'idle':
-      status = TERMINAL_STATUSES.has(rawPhase) ? rawPhase : 'running'
-      break
-    case 'ended':
-      status = 'done'
-      break
-    case 'blocked':
-      status = 'failed'
-      break
-    case 'done':
-    case 'failed':
-    case 'timeout':
-    case 'killed':
-    case 'waiting':
-      break
-    default:
-      status = 'unknown'
-  }
-  void phase
-  return { status, live: !TERMINAL_STATUSES.has(status) }
-}
-
-/**
  * Classify one broker peer row into the facts the router gates on. The Go
  * providers share this translation through `messaging.PeerRunFacts`: a peer row
  * carries no session and no sentinel, so the run is never resumable from here —
  * the supervisor that spawned it owns a resume.
  */
 export function peerFacts(peer: PeerRecord | undefined): RunFacts {
-  const translation = translateRunFacts(peer?.status ?? '', '')
-  return { live: translation.live, resumable: false, status: translation.status }
+  const translation = translate(peer?.status ?? '', '')
+  return { live: !translation.turnComplete, resumable: false, status: translation.status }
 }
 
 /** Read one sentinel file's status word, or undefined when the file is unreadable. */
@@ -288,18 +248,18 @@ async function readSentinelStatus(filePath: string): Promise<string | undefined>
 
 /**
  * Read one sentinel file's terminal result word, or undefined when the file is
- * unreadable or holds a status that is not terminal. The mapping is the status
- * surface's, so both classify a sentinel the same way.
+ * unreadable or holds a status that is not terminal. The mapping is
+ * `sentinelStatus`, the one the status surface answers from too.
  */
 async function terminalSentinelStatus(filePath: string): Promise<string | undefined> {
   const status = await readSentinelStatus(filePath)
-  if (!status || !TERMINAL_SENTINEL_STATUSES.has(status)) return undefined
-  return sentinelStatusToResult(status)
+  if (!status || !isTerminalSentinel(status)) return undefined
+  return sentinelStatus(status)
 }
 
 async function sentinelResumable(filePath: string): Promise<boolean> {
   const status = await readSentinelStatus(filePath)
-  return status !== undefined && RESUMABLE_SENTINEL_STATUSES.has(status)
+  return status !== undefined && isResumableSentinel(status)
 }
 
 export function peerRecords(peers: MessagePeersResult): PeerRecord[] {
@@ -527,7 +487,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
         const terminal = await terminalSentinelStatus(info.sentinelPath)
         return { live: false, resumable: false, status: terminal ?? 'unknown' }
       }
-      const translation = translateRunFacts(
+      const translation = translate(
         typeof status.status === 'string' ? status.status : '',
         typeof status.phase === 'string' ? status.phase : '',
       )
@@ -535,7 +495,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       if (!resumable && typeof status.sentinel_file === 'string') {
         resumable = await sentinelResumable(status.sentinel_file)
       }
-      return { live: translation.live, resumable, status: translation.status }
+      return { live: !translation.turnComplete, resumable, status: translation.status }
     },
 
     async tell(targetRunId: string, message: string, publicRunId?: string): Promise<ProviderResult> {

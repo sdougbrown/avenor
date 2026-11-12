@@ -11,7 +11,7 @@ import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor
 import { brokerPeerStatus, lookupBrokerPeer, type BrokerPeerLookup } from './broker-peer.js'
 import { ambiguousName } from '../message.js'
 import { runtimeNotFoundMessage, statusReportsNoRuntime } from './message-provider.js'
-import { sentinelStatusToResult } from './sentinel-status.js'
+import { isTerminalPhase, sentinelStatus, translate } from '../run-state.js'
 import { findExternalRun, listExternalRuns } from './run-registry.js'
 import { findLocalRunByReference, findLocalRunByRuntimeId } from './run-resolution.js'
 
@@ -45,43 +45,46 @@ async function sentinelExists(filePath: string): Promise<boolean> {
   }
 }
 
-function rawStatusPhase(source: Record<string, unknown> | null): string {
-  return stringField(source ?? {}, 'phase') || stringField(source ?? {}, 'status') || 'running'
+/**
+ * The status a run presents, from the supervisor's raw `status` and `phase` and
+ * the run's own sentinel. Rules, in order:
+ *
+ * 1. Both raw values are lowercased; `translate` itself is case-sensitive.
+ * 2. `translate` normalizes the pair, the same as the Go planes.
+ * 3. A running runtime whose phase is `waiting` presents `waiting`. Go reports
+ *    running plus a pending permission instead; this surface's callers wait on
+ *    the status word.
+ * 4. The sentinel overlays the status when it is `running` with no phase or a
+ *    terminal phase, `unknown`, or `done` from a raw `ended`: the sentinel's
+ *    outcome is `sentinelStatus` of its status word. It never overlays `waiting`,
+ *    `running` in an active phase, nor a terminal status the raw status or phase
+ *    produced directly.
+ * 5. With no sentinel the translated status stands.
+ */
+export function translateStatus(
+  rawStatus: string,
+  rawPhase: string,
+  sentinel: Record<string, string> | null,
+): string {
+  const status = rawStatus.toLowerCase()
+  const phase = rawPhase.toLowerCase()
+  const translated = translate(status, phase).status
+  if (translated === 'running' && phase === 'waiting') return 'waiting'
+
+  const word = sentinel?._status
+  if (!word) return translated
+  const settledByEnding = translated === 'done' && status === 'ended'
+  // A running runtime in an active phase keeps running: a follow-up turn wakes a
+  // parked runtime without rotating its sentinel, so the file can still hold the
+  // previous turn's outcome.
+  const settledWhileRunning = translated === 'running' && (phase === '' || isTerminalPhase(phase))
+  if (settledWhileRunning || translated === 'unknown' || settledByEnding) return sentinelStatus(word)
+  return translated
 }
 
-export function translateStatus(
-  rawPhase: string,
-  sentinelData: Record<string, string> | null,
-): string {
-  const sentinelStatus = sentinelData?._status
-  const phase = rawPhase.toLowerCase()
-
-  if (sentinelStatus && (phase === 'running' || phase === 'idle')) {
-    return sentinelStatusToResult(sentinelStatus)
-  }
-
-  switch (phase) {
-    case 'idle':
-      return sentinelStatus ? sentinelStatusToResult(sentinelStatus) : 'running'
-    case 'running':
-      return 'running'
-    case 'waiting':
-      return 'waiting'
-    case 'ended':
-      return sentinelStatus ? sentinelStatusToResult(sentinelStatus) : 'running'
-    case 'done':
-      return 'done'
-    case 'failed':
-      return 'failed'
-    case 'timeout':
-      return 'timeout'
-    case 'killed':
-      return 'killed'
-    case 'blocked':
-      return 'failed'
-    default:
-      return 'running'
-  }
+function presentStatus(source: Record<string, unknown> | null, sentinel: Record<string, string> | null): string {
+  const fields = source ?? {}
+  return translateStatus(stringField(fields, 'status') ?? '', stringField(fields, 'phase') ?? '', sentinel)
 }
 
 function normalizePermission(raw: Record<string, unknown> | null | undefined): StatusResult['pending_permission'] | undefined {
@@ -291,9 +294,9 @@ async function buildRunStatus(
   // turn on the shared runtime; only the run's own registered session may
   // answer for this one.
   const source = belongsToRun ? liveStatus : null
-  const translated = belongsToRun && liveStatus
-    ? translateStatus(rawStatusPhase(source), sentinel)
-    : sentinel ? sentinelStatusToResult(sentinel._status) : translateStatus(rawStatusPhase(source), null)
+  // A turn queued behind another on the shared runtime has no status of its own
+  // yet, and is pending rather than unknown.
+  const translated = !belongsToRun && !sentinel ? 'running' : presentStatus(source, sentinel)
   const result = buildBaseStatus(
     source ?? {},
     {
@@ -429,7 +432,7 @@ async function executeStatusTool(
               (liveStatus?.session_id as string | undefined),
             stop_reason: sentinel?.STOP_REASON,
           },
-          translateStatus(rawStatusPhase(liveStatus), sentinel),
+          presentStatus(liveStatus, sentinel),
         ), args.view)
       }
 
@@ -455,7 +458,7 @@ async function executeStatusTool(
             runtime_id: entryId,
             session_id: entry.session_id as string | undefined,
           },
-          translateStatus(rawStatusPhase(entry), null),
+          presentStatus(entry, null),
         ), args.view))
       }
       return { runs: results, count: results.length }
@@ -500,7 +503,7 @@ async function executeStatusTool(
           (liveStatus?.session_id as string | undefined),
         stop_reason: sentinel?.STOP_REASON,
       },
-      translateStatus(rawStatusPhase(liveStatus), sentinel),
+      presentStatus(liveStatus, sentinel),
     ), args.view)
   }
 
@@ -529,7 +532,7 @@ async function executeStatusTool(
           runtime_id: entryId,
           session_id: entry.session_id as string | undefined,
         },
-        translateStatus(rawStatusPhase(entry), null),
+        presentStatus(entry, null),
       ), args.view))
     }
   }

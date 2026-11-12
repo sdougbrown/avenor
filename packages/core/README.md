@@ -89,7 +89,7 @@ const status = await statusTool({ runId: 'reverse-string', view: 'lifecycle' })
 // { run_id: 'reverse-string', label: 'reverse-string', status: 'running', ... }
 ```
 
-Status values: `running`, `done`, `failed`, `timeout`, `killed`. If a permission request is pending, the result includes `pending_permission` with available options. The `lifecycle` view omits final output and diagnostic metadata; `full` remains the default for compatibility.
+Status values: `running`, `waiting`, `done`, `failed`, `timeout`, `killed`, and `unknown` when the supervisor reports no status or one this package does not recognize. `done`, `failed`, `timeout` and `killed` are terminal; `unknown` is not. If a permission request is pending, the result includes `pending_permission` with available options. The `lifecycle` view omits final output and diagnostic metadata; `full` remains the default for compatibility.
 
 ### `resultTool`
 

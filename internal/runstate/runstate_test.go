@@ -1,43 +1,75 @@
 package runstate
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
+
+type conformanceFixture struct {
+	Translate []struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Phase  string `json:"phase"`
+		Want   struct {
+			Status       string `json:"status"`
+			Phase        string `json:"phase"`
+			TurnComplete bool   `json:"turnComplete"`
+			Recognized   bool   `json:"recognized"`
+		} `json:"want"`
+	} `json:"translate"`
+	SentinelStatus []wordCase[string] `json:"sentinelStatus"`
+	TerminalStatus []struct {
+		Status string `json:"status"`
+		Want   bool   `json:"want"`
+	} `json:"terminalStatus"`
+	TerminalSentinel  []wordCase[bool] `json:"terminalSentinel"`
+	ResumableSentinel []wordCase[bool] `json:"resumableSentinel"`
+}
+
+type wordCase[T any] struct {
+	Word string `json:"word"`
+	Want T      `json:"want"`
+}
+
+// loadConformanceFixture reads schemas/runstate.conformance.json, the table the
+// TypeScript run-state module is pinned to as well, relative to this file so
+// the test runs the same from any working directory.
+func loadConformanceFixture(t *testing.T) conformanceFixture {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate this test file to resolve the shared fixture")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "..", "..", "schemas", "runstate.conformance.json"))
+	if err != nil {
+		t.Fatalf("read runstate conformance fixture: %v", err)
+	}
+	var f conformanceFixture
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatalf("parse runstate conformance fixture: %v", err)
+	}
+	if len(f.Translate) == 0 || len(f.SentinelStatus) == 0 || len(f.TerminalSentinel) == 0 || len(f.ResumableSentinel) == 0 || len(f.TerminalStatus) == 0 {
+		t.Fatal("runstate conformance fixture has an empty section")
+	}
+	return f
+}
 
 func TestTranslate(t *testing.T) {
-	tests := []struct {
-		name           string
-		status         RuntimeStatus
-		phase          Phase
-		wantStatus     RuntimeStatus
-		wantPhase      Phase
-		wantComplete   bool
-		wantRecognized bool
-	}{
-		{name: "running", status: StatusRunning, phase: PhaseWorking, wantStatus: StatusRunning, wantPhase: PhaseWorking, wantRecognized: true},
-		{name: "running terminal phase", status: StatusRunning, phase: PhaseDone, wantStatus: StatusRunning, wantPhase: PhaseNone, wantRecognized: true},
-		{name: "idle active phase", status: StatusIdle, phase: PhaseWorking, wantStatus: StatusRunning, wantPhase: PhaseWorking, wantRecognized: true},
-		{name: "idle terminal phase", status: StatusIdle, phase: "failed", wantStatus: StatusFailed, wantPhase: "failed", wantComplete: true, wantRecognized: true},
-		{name: "ended", status: StatusEnded, wantStatus: StatusDone, wantComplete: true, wantRecognized: true},
-		{name: "terminal", status: StatusTimeout, phase: "timeout", wantStatus: StatusTimeout, wantPhase: "timeout", wantComplete: true, wantRecognized: true},
-		{name: "waiting", status: StatusWaiting, phase: "waiting", wantStatus: StatusWaiting, wantPhase: "waiting", wantRecognized: true},
-		{name: "blocked", status: StatusBlocked, wantStatus: StatusFailed, wantComplete: true, wantRecognized: true},
-		{name: "done", status: StatusDone, phase: PhaseDone, wantStatus: StatusDone, wantPhase: PhaseDone, wantComplete: true, wantRecognized: true},
-		{name: "failed", status: StatusFailed, wantStatus: StatusFailed, wantComplete: true, wantRecognized: true},
-		{name: "killed", status: StatusKilled, phase: "killed", wantStatus: StatusKilled, wantPhase: "killed", wantComplete: true, wantRecognized: true},
-		{name: "unknown", status: StatusUnknown, phase: PhaseWorking, wantStatus: StatusUnknown, wantPhase: PhaseWorking, wantRecognized: false},
-		{name: "empty status", status: "", phase: PhaseWorking, wantStatus: StatusUnknown, wantPhase: PhaseWorking, wantRecognized: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := Translate(tt.status, tt.phase)
-			if got.Status != tt.wantStatus || got.Phase != tt.wantPhase || got.TurnComplete != tt.wantComplete {
-				t.Fatalf("Translate(%q, %q) = %#v, want status=%q phase=%q complete=%v", tt.status, tt.phase, got, tt.wantStatus, tt.wantPhase, tt.wantComplete)
+	for _, tt := range loadConformanceFixture(t).Translate {
+		t.Run(tt.Name, func(t *testing.T) {
+			status, phase := RuntimeStatus(tt.Status), Phase(tt.Phase)
+			got := Translate(status, phase)
+			if got.Status != RuntimeStatus(tt.Want.Status) || got.Phase != Phase(tt.Want.Phase) || got.TurnComplete != tt.Want.TurnComplete {
+				t.Fatalf("Translate(%q, %q) = %#v, want status=%q phase=%q complete=%v", tt.Status, tt.Phase, got, tt.Want.Status, tt.Want.Phase, tt.Want.TurnComplete)
 			}
-			if got.StatusRecognized != tt.wantRecognized {
-				t.Fatalf("Translate(%q, %q).StatusRecognized = %v, want %v", tt.status, tt.phase, got.StatusRecognized, tt.wantRecognized)
+			if got.StatusRecognized != tt.Want.Recognized {
+				t.Fatalf("Translate(%q, %q).StatusRecognized = %v, want %v", tt.Status, tt.Phase, got.StatusRecognized, tt.Want.Recognized)
 			}
-			if gotPredicate := IsTurnComplete(tt.status, tt.phase); gotPredicate != tt.wantComplete {
-				t.Fatalf("IsTurnComplete(%q, %q) = %v, want %v", tt.status, tt.phase, gotPredicate, tt.wantComplete)
+			if gotPredicate := IsTurnComplete(status, phase); gotPredicate != tt.Want.TurnComplete {
+				t.Fatalf("IsTurnComplete(%q, %q) = %v, want %v", tt.Status, tt.Phase, gotPredicate, tt.Want.TurnComplete)
 			}
 		})
 	}
@@ -71,37 +103,40 @@ func TestParsePhase(t *testing.T) {
 }
 
 func TestSentinelStatus(t *testing.T) {
-	tests := []struct {
-		raw  string
-		want RuntimeStatus
-	}{
-		{raw: "DONE", want: StatusDone},
-		{raw: "FAILED", want: StatusFailed},
-		{raw: "BLOCKED", want: StatusFailed},
-		{raw: "TIMEOUT", want: StatusTimeout},
-		{raw: "KILLED", want: StatusKilled},
-		{raw: "STOPPED", want: "stopped"},
-		{raw: "", want: ""},
+	for _, tt := range loadConformanceFixture(t).SentinelStatus {
+		t.Run(tt.Word, func(t *testing.T) {
+			if got := SentinelStatus(tt.Word); string(got) != tt.Want {
+				t.Fatalf("SentinelStatus(%q) = %q, want %q", tt.Word, got, tt.Want)
+			}
+		})
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.raw, func(t *testing.T) {
-			if got := SentinelStatus(tt.raw); got != tt.want {
-				t.Fatalf("SentinelStatus(%q) = %q, want %q", tt.raw, got, tt.want)
+func TestSentinelClassification(t *testing.T) {
+	f := loadConformanceFixture(t)
+	for _, tt := range f.TerminalSentinel {
+		t.Run("terminal "+tt.Word, func(t *testing.T) {
+			if got := IsTerminalSentinel(tt.Word); got != tt.Want {
+				t.Fatalf("IsTerminalSentinel(%q) = %v, want %v", tt.Word, got, tt.Want)
+			}
+		})
+	}
+	for _, tt := range f.ResumableSentinel {
+		t.Run("resumable "+tt.Word, func(t *testing.T) {
+			if got := IsResumableStatus(tt.Word); got != tt.Want {
+				t.Fatalf("IsResumableStatus(%q) = %v, want %v", tt.Word, got, tt.Want)
 			}
 		})
 	}
 }
 
 func TestTerminalStatuses(t *testing.T) {
-	for _, status := range []RuntimeStatus{StatusDone, StatusFailed, StatusTimeout, StatusKilled} {
-		if !IsTerminalStatus(status) {
-			t.Errorf("IsTerminalStatus(%q) = false, want true", status)
+	for _, tt := range loadConformanceFixture(t).TerminalStatus {
+		if got := IsTerminalStatus(RuntimeStatus(tt.Status)); got != tt.Want {
+			t.Errorf("IsTerminalStatus(%q) = %v, want %v", tt.Status, got, tt.Want)
 		}
-	}
-	for _, status := range []RuntimeStatus{"", StatusRunning, StatusIdle, StatusEnded, StatusWaiting, StatusBlocked, StatusUnknown} {
-		if IsTerminalStatus(status) {
-			t.Errorf("IsTerminalStatus(%q) = true, want false", status)
+		if got := IsTerminalPhase(Phase(tt.Status)); got != tt.Want {
+			t.Errorf("IsTerminalPhase(%q) = %v, want %v", tt.Status, got, tt.Want)
 		}
 	}
 }

@@ -135,7 +135,7 @@ Get the status of one run, or list all runs. Use the compact `lifecycle` view fo
 | `view` | no | Response detail: `lifecycle` or `full` (default) |
 | `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
 
-Returns a status object (or array) with `status` being one of `running`, `done`, `failed`, `timeout`, or `killed`. When a run is blocked on a permission request, the response includes a `pending_permission` field with the available options.
+Returns a status object (or array) with `status` being one of `running`, `waiting`, `done`, `failed`, `timeout`, `killed`, or `unknown` (no status reported, or one that is not recognized). `done`, `failed`, `timeout` and `killed` are terminal; `unknown` is not. When a run is blocked on a permission request, the response includes a `pending_permission` field with the available options.
 
 ### `result`
 

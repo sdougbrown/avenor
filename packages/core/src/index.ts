@@ -59,6 +59,15 @@ export {
   validateThinkingForBackendResume,
 } from './thinking-policy.js'
 export type { ThinkingOutcome } from './thinking-policy.js'
+export {
+  isResumableSentinel,
+  isTerminalPhase,
+  isTerminalSentinel,
+  isTerminalStatus,
+  sentinelStatus,
+  translate,
+} from './run-state.js'
+export type { Phase, RuntimeStatus, TerminalStatus, Translation } from './run-state.js'
 export { statusTool } from './tools/status.js'
 export type { StatusResult, StatusListResult, StatusToolArgs, StatusView } from './tools/status.js'
 export { resultTool } from './tools/result.js'
