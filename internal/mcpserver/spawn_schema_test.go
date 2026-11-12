@@ -73,6 +73,16 @@ func TestSpawnToolPublishesSharedSchema(t *testing.T) {
 	if got, ok := published["additionalProperties"].(bool); !ok || got {
 		t.Errorf("spawn schema additionalProperties = %v, want false", published["additionalProperties"])
 	}
+	var surfaceDescriptions struct {
+		Descriptions map[string]string `json:"x-avenor-surface-descriptions"`
+	}
+	if err := json.Unmarshal([]byte(spawnInputSchemaJSON), &surfaceDescriptions); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := published["description"], surfaceDescriptions.Descriptions["go"]; got != want {
+		t.Errorf("published description = %v, want the schema's go-surface description", got)
+	}
+
 	required, ok := published["required"].([]any)
 	if !ok || len(required) != 1 || required[0] != "repo_dir" {
 		t.Errorf("spawn schema required = %v, want [repo_dir]", published["required"])
@@ -110,6 +120,11 @@ func TestSpawnToolPublishesSharedSchema(t *testing.T) {
 		}
 		if got, want := entry["type"], source.Properties[name].Type; got != want {
 			t.Errorf("published %q type = %v, want %v", name, got, want)
+		}
+		for key := range entry {
+			if strings.HasPrefix(key, "x-avenor-") {
+				t.Errorf("published property %q carries the internal %q annotation", name, key)
+			}
 		}
 		if name == "launch_wrapper" {
 			items, _ := entry["items"].(map[string]any)

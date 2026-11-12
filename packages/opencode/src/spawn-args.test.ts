@@ -53,6 +53,11 @@ describe('opencode spawn arguments', () => {
     }
   })
 
+  it('keeps wait defaulting to blocking when the caller omits it', async () => {
+    const wait = (await spawnArgs()).wait as unknown as { parse: (value: unknown) => unknown }
+    expect(wait.parse(undefined)).toBe(true)
+  })
+
   it('takes every description from the shared spawn schema', async () => {
     for (const [name, schema] of Object.entries(await spawnArgs())) {
       expect(schema.description ?? '').toBe(spawnFieldDescription(name))

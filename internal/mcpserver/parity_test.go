@@ -522,8 +522,8 @@ func TestMergedSchemaPublished(t *testing.T) {
 		}
 	}
 	for name, want := range map[string][]string{
-		"message":  {"action", "idempotency_key", "label", "message", "message_id", "payload", "reply_to", "target", "timeout_ms"},
-		"peers":    {"action", "name", "session_id", "target"},
+		"message": {"action", "idempotency_key", "label", "message", "message_id", "payload", "reply_to", "target", "timeout_ms"},
+		"peers":   {"action", "name", "session_id", "target"},
 		"spawn": {"agent", "auto_approve", "backend", "idempotency_key", "label", "launch_wrapper",
 			"messaging", "model", "persist_sessions", "prompt", "prompt_file", "repo_dir",
 			"roster_entry", "roster_file", "server_url", "supervisor_id", "thinking", "timeout"},

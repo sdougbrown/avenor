@@ -2,7 +2,6 @@ import { describe, expect, it } from 'bun:test'
 
 import {
   spawnFieldDescription,
-  spawnFieldDescriptions,
   spawnFieldNames,
   spawnFieldProperties,
   spawnSurfaceFields,
@@ -14,7 +13,7 @@ describe('spawn input schema', () => {
   it('describes every field it declares', () => {
     expect(spawnFieldNames.length).toBeGreaterThan(10)
     for (const name of spawnFieldNames) {
-      expect(spawnFieldDescriptions[name]?.length ?? 0).toBeGreaterThan(20)
+      expect(spawnFieldDescription(name).length).toBeGreaterThan(20)
     }
   })
 

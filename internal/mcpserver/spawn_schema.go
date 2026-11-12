@@ -4,8 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 )
+
+// surfaceAnnotation names the surfaces that publish a property. It is
+// repository metadata, so the published schema strips it.
+const surfaceAnnotation = "x-avenor-surfaces"
 
 // publishedSpawnInputSchema is schemas/spawn.input.json reduced to the fields
 // this server publishes, with the one fact this server owns added: which of
@@ -31,18 +36,33 @@ func publishedSpawnInputSchema() json.RawMessage {
 
 	properties := make(map[string]json.RawMessage, len(source.Properties))
 	for name, raw := range source.Properties {
-		var meta struct {
-			Surfaces []string `json:"x-avenor-surfaces"`
-		}
-		if err := json.Unmarshal(raw, &meta); err != nil {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
 			panic(fmt.Sprintf("spawn input schema: property %q: %v", name, err))
 		}
-		for _, surface := range meta.Surfaces {
-			if surface == "go" {
-				properties[name] = raw
-				break
+
+		var surfaces []string
+		if encoded, ok := fields[surfaceAnnotation]; ok {
+			if err := json.Unmarshal(encoded, &surfaces); err != nil {
+				panic(fmt.Sprintf("spawn input schema: property %q surfaces: %v", name, err))
 			}
 		}
+		if !slices.Contains(surfaces, "go") {
+			continue
+		}
+
+		// The surface annotations route this file to four publishers; they are
+		// ours, not the client's, so they do not travel in the wire schema.
+		for key := range fields {
+			if strings.HasPrefix(key, "x-avenor-") {
+				delete(fields, key)
+			}
+		}
+		cleaned, err := json.Marshal(fields)
+		if err != nil {
+			panic(fmt.Sprintf("spawn input schema: property %q: %v", name, err))
+		}
+		properties[name] = cleaned
 	}
 
 	description := source.Description

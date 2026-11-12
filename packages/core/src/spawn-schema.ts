@@ -22,13 +22,6 @@ const properties = spawnInputSchema.properties as Record<string, SpawnSchemaProp
 /** Every property the schema declares, sorted, so callers can iterate deterministically. */
 export const spawnFieldNames: readonly string[] = Object.keys(properties).sort()
 
-/** Each property's canonical description, keyed by property name. */
-export const spawnFieldDescriptions: Readonly<Record<string, string>> = Object.freeze(
-  Object.fromEntries(
-    spawnFieldNames.map((name) => [name, properties[name]?.description ?? '']),
-  ),
-)
-
 /** Each property's canonical schema shape, keyed by property name. */
 export const spawnFieldProperties: Readonly<Record<string, SpawnSchemaProperty>> =
   Object.freeze({ ...properties })
@@ -40,7 +33,11 @@ export function spawnSurfaceFields(surface: SpawnSurface): string[] {
   )
 }
 
-/** One field's canonical description, for a surface that publishes it. */
+/**
+ * One field's canonical description, for a surface that publishes it. This is
+ * the only description accessor: a missing field throws instead of returning an
+ * empty string, so a surface cannot publish a field the schema does not declare.
+ */
 export function spawnFieldDescription(name: string): string {
   const description = properties[name]?.description
   if (!description) {
@@ -48,6 +45,3 @@ export function spawnFieldDescription(name: string): string {
   }
   return description
 }
-
-/** The schema itself, for a surface that publishes it verbatim. */
-export { spawnInputSchema }
