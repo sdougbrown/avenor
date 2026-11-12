@@ -277,9 +277,9 @@ func TestLookupRunAmbiguousLabel(t *testing.T) {
 	}
 
 	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "dup"})
-	if err == nil || !strings.Contains(err.Error(), "ambiguous label dup") ||
-		!strings.Contains(err.Error(), "rt_a") || !strings.Contains(err.Error(), "rt_b") {
-		t.Fatalf("error = %v, want ambiguous label naming both runtimes", err)
+	if err == nil || !strings.Contains(err.Error(), `"dup" matches 2 runs`) ||
+		!strings.Contains(err.Error(), `"rt_a"`) || !strings.Contains(err.Error(), `"rt_b"`) {
+		t.Fatalf("error = %v, want the quoted label, the count and both runtimes", err)
 	}
 	if len(fake.statusCapturedRuntimeIDs) != 0 {
 		t.Fatalf("status calls = %v, want none after ambiguity", fake.statusCapturedRuntimeIDs)
@@ -290,7 +290,8 @@ func TestLookupRunAmbiguousLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, err = s.handleAvenorStatus(context.Background(), nil, statusArgs{RunID: "dup"})
-	if err == nil || !strings.Contains(err.Error(), "ambiguous label dup") {
+	if err == nil || !strings.Contains(err.Error(), `"dup" matches 2 runs`) ||
+		!strings.Contains(err.Error(), `"rt_a"`) || !strings.Contains(err.Error(), `"rt_b"`) {
 		t.Fatalf("cached label lookup error = %v, want ambiguity despite cached entry", err)
 	}
 }
@@ -624,7 +625,8 @@ func TestLookupRunKeepsStillLiveLabelCollision(t *testing.T) {
 	// Both runtimes are live and both claim the label: the ambiguity error
 	// fires and the live entry is not re-pointed.
 	_, err = s.lookupRun(fake, supA, "x")
-	if err == nil || !strings.Contains(err.Error(), "ambiguous label x") {
+	if err == nil || !strings.Contains(err.Error(), `"x" matches 2 runs`) ||
+		!strings.Contains(err.Error(), `"rt-old"`) || !strings.Contains(err.Error(), `"rt-new"`) {
 		t.Fatalf("lookupRun = %v, want ambiguity (both runtimes still live)", err)
 	}
 	if s.registry.Lookup(supA, "run1") == nil {

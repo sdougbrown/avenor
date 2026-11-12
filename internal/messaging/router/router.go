@@ -512,18 +512,25 @@ func resolveTarget(ctx context.Context, p Provider, ref string) (messaging.Resol
 			Facts:   map[string]string{"target": quote(ref)},
 		}
 	case messaging.MatchAmbiguous:
-		facts := map[string]string{
-			"target":     quote(ref),
-			"count":      fmt.Sprint(len(res.Candidates)),
-			"candidates": quoteList(res.Candidates),
-		}
-		return messaging.Resolution{}, &ToolError{
-			Code:    "ambiguous_name",
-			Message: messaging.Repair("ambiguous_name", facts),
-			Facts:   facts,
-		}
+		return messaging.Resolution{}, AmbiguousName(ref, res.Candidates)
 	}
 	return res, nil
+}
+
+// AmbiguousName is the typed denial for a reference that names several runs.
+// Every surface that resolves a label builds it here, so the sentence, its
+// quoting and its facts are one rendering.
+func AmbiguousName(ref string, candidates []string) *ToolError {
+	facts := map[string]string{
+		"target":     quote(ref),
+		"count":      fmt.Sprint(len(candidates)),
+		"candidates": quoteList(candidates),
+	}
+	return &ToolError{
+		Code:    "ambiguous_name",
+		Message: messaging.Repair("ambiguous_name", facts),
+		Facts:   facts,
+	}
 }
 
 func resolutionLabel(res messaging.Resolution, ref string) string {
