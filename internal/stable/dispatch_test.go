@@ -233,6 +233,30 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// TestRuntimeStatusMissingRuntimeIsTheTypedAbsence links the supervisor's status
+// lookup to the control plane's structured answer: the control dispatch
+// classifies this error with errors.Is, so the sentence alone is no longer what
+// a client depends on.
+func TestRuntimeStatusMissingRuntimeIsTheTypedAbsence(t *testing.T) {
+	t.Parallel()
+	sup, _ := newStage2Supervisor(t, 4)
+
+	_, err := sup.RuntimeStatus("rt_missing")
+	if err == nil {
+		t.Fatal("RuntimeStatus found a runtime nobody spawned")
+	}
+	if !errors.Is(err, control.ErrRuntimeNotFound) {
+		t.Fatalf("RuntimeStatus error = %v, want control.ErrRuntimeNotFound", err)
+	}
+	var typed *control.RuntimeNotFoundError
+	if !errors.As(err, &typed) || typed.RuntimeID != "rt_missing" {
+		t.Fatalf("RuntimeStatus error = %#v, want the typed absence naming rt_missing", err)
+	}
+	if want := `runtime "rt_missing" not found`; err.Error() != want {
+		t.Fatalf("message = %q, want the sentence older clients match (%q)", err.Error(), want)
+	}
+}
+
 // TestDispatchConsumesExactlyOneReservation proves one controller dispatch
 // consumes exactly one tree slot and one local slot: no second acquire inside
 // spawn.

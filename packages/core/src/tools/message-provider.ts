@@ -172,6 +172,14 @@ export function isGenerationMismatchError(error: unknown): boolean {
  */
 export function statusReportsNoRuntime(error: unknown, runId: string): boolean {
   if (!(error instanceof RpcError) || error.code !== -32000) return false
+  // The code answers the question the sentence was standing in for, so a
+  // supervisor that sends it is believed whatever its message says.
+  if (controlCode(error) === 'runtime_not_found') {
+    const runtimeId = (error.data as Record<string, unknown>).runtime_id
+    return typeof runtimeId !== 'string' || runtimeId === runId
+  }
+  // An older supervisor sends only the sentence, and stays matched until both
+  // sides are released together.
   return rpcText(error) === runtimeNotFoundMessage(runId)
 }
 

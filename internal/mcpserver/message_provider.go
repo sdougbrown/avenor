@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runstate"
@@ -338,7 +339,29 @@ func statusReportsNoRuntime(err error, runID string) bool {
 	if !errors.As(err, &rpcErr) || rpcErr.Code != -32000 {
 		return false
 	}
+	// The code answers the question the sentence was standing in for, so a
+	// supervisor that sends it is believed whatever its message says.
+	if code, runtimeID := runtimeNotFoundData(rpcErr.Data); code == control.CodeRuntimeNotFound {
+		return runtimeID == "" || runtimeID == runID
+	}
+	// An older supervisor sends only the sentence, and stays matched until both
+	// sides are released together.
 	return rpcErr.Message == fmt.Sprintf("runtime %q not found", runID)
+}
+
+// runtimeNotFoundData reads the structured absence answer, when there is one.
+func runtimeNotFoundData(data json.RawMessage) (code, runtimeID string) {
+	if len(data) == 0 {
+		return "", ""
+	}
+	var payload struct {
+		Code      string `json:"code"`
+		RuntimeID string `json:"runtime_id"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", ""
+	}
+	return payload.Code, payload.RuntimeID
 }
 
 // runFactsFromStatus classifies one supervisor status map into the turn and
