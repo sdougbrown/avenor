@@ -386,6 +386,9 @@ type Broker struct {
 	pollTimeout  time.Duration // max wait for poll-control before returning empty
 	writeTimeout time.Duration // per-connection write deadline (New sets 30s; /wait_reply extends its own deadline)
 
+	// lastReadTimeout bounds one /last_message read, which may cross to another broker.
+	lastReadTimeout time.Duration
+
 	// Ask lifecycle state and the delegate seam for local messaging.
 	store     *askstore.Store
 	messenger messaging.Seam
@@ -450,6 +453,8 @@ func New(globalToken string) *Broker {
 		attachCreds:    make(map[string]string),
 		attachByRun:    make(map[string]string),
 		attachConsumed: make(map[string]string),
+
+		lastReadTimeout: messaging.LastReadTimeout,
 	}
 	b.store.SetBackend(brokerBackend{broker: b})
 	b.store.SetRemoteDeliver(b.lateReplyDeliver)
@@ -2077,7 +2082,9 @@ func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 	// The seam answers a run this broker holds from its own record, a tombstone
 	// included (history, not participation; the reap is what ends this read), and
 	// asks the parent for one it does not.
-	record, err := b.seam().Last(r.Context(), target)
+	ctx, cancel := context.WithTimeout(r.Context(), b.lastReadTimeout)
+	defer cancel()
+	record, err := b.seam().Last(ctx, target)
 	switch {
 	case errors.Is(err, messaging.ErrTargetUnavailable):
 		writeCodedError(w, http.StatusNotFound, "run not found: "+target, "target-unavailable")

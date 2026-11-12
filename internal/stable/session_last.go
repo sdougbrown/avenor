@@ -4,17 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
-
-// sessionLastTimeout bounds one read of a run's last turn. The read is local
-// and instant unless this broker has a parent to ask, so a parent that never
-// answers must fail the control call quickly instead of holding it open.
-const sessionLastTimeout = 5 * time.Second
 
 // SessionLast reads one run's recorded last turn. It resolves the run before
 // reading, so an unknown runtime is a typed unknown_target refusal while a
@@ -30,7 +24,7 @@ func (s *Supervisor) SessionLast(rtID string) (broker.LastAgentMessage, bool, er
 	if s.broker == nil {
 		return broker.LastAgentMessage{}, false, fmt.Errorf("broker not available")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), sessionLastTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), messaging.LastReadTimeout)
 	defer cancel()
 	last, err := s.broker.Last(ctx, rtID)
 	if errors.Is(err, messaging.ErrTargetUnavailable) {
