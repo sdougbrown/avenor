@@ -329,8 +329,8 @@ func TestResumeCarriesIdentityAndSession(t *testing.T) {
 
 // A roster-created run resumes through its roster selector alone: the entry
 // supplies agent, model and backend, and a resume that also carried the
-// inherited direct identity would be refused as "direct identity fields are
-// disabled in roster mode".
+// inherited direct identity would be refused, because a direct identity field
+// is disabled in roster mode.
 func TestResumeRosterRunCarriesOnlyTheRosterSelector(t *testing.T) {
 	t.Parallel()
 	sup, provider := newStage2Supervisor(t, 8)

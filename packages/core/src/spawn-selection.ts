@@ -64,6 +64,14 @@ export function validateSpawnSelection(
     const value = values[field]
     const status = availability[field]
     if (value === undefined || (status?.enabled && status.fair)) continue
+    if (status?.reason && !status.enabled && values.roster_entry !== undefined) {
+      // roster_entry puts the call in roster mode, where the direct identity
+      // fields are refused. The schema's reason describes that rule rather than
+      // the field it blocks, so name the field the caller has to drop.
+      throw new Error(
+        `invalid spawn selector: ${field} is a direct identity field, disabled in roster mode (roster_entry is set); drop ${field} to use the roster entry, or drop roster_file and roster_entry to use direct identity`,
+      )
+    }
     throw new Error(
       `invalid spawn selector: ${status?.reason ?? `${field} is disabled`}`,
     )

@@ -206,9 +206,9 @@ Available tools for LLM sub-agent management:
 | `avenor_workflow` | One workflow tool with an explicit `action`: `status`, `inspect`, `events`, `wait`, `ready`, `controller_status`, `gate`, `complete` or `cancel`. Read-only actions need no permission; `gate`, `complete` and `cancel` keep their authority checks. |
 | `avenor_shutdown` | Shut down the avenor supervisor |
 
-### Direct and roster spawns
+### Direct and roster modes
 
-Direct mode permits `agent`, `model`, and `backend` to be omitted independently, including a backend-only request; omitted values use runtime defaults. Pi supplies `backend: "pi"` for direct tool calls when no backend is given. Roster mode uses both `roster_file` and `roster_entry`, and leaves backend selection to the roster entry instead of applying Pi's direct default:
+Direct mode permits `agent`, `model`, and `backend` to be omitted independently, including a backend-only request; omitted values use runtime defaults. Pi supplies `backend: "pi"` in direct mode when no backend is given. Roster mode uses both `roster_file` and `roster_entry`, and leaves backend selection to the roster entry instead of applying Pi's direct default:
 
 ```json
 {
@@ -218,7 +218,7 @@ Direct mode permits `agent`, `model`, and `backend` to be omitted independently,
 }
 ```
 
-Each roster entry must contain `backend` and at least one of `agent` or `model`. Do not combine roster mode with direct `agent`, `model`, or `backend` overrides. Roster entries currently do not support `system` or `thinking`; `thinking` remains a run-level option and is validated against the effective backend. A resumed session must stay on its original backend. Use an absolute `roster_file` path when the Pi process and target project have different working directories.
+Each roster entry must contain `backend` and at least one of `agent` or `model`. Do not combine roster mode with direct `agent`, `model`, or `backend` overrides. Roster entries reject `system`; an entry's `thinking` is only a default, so a run-level `thinking` still wins and is validated against the effective backend. A resumed session must stay on its original backend. Use an absolute `roster_file` path when the Pi process and target project have different working directories.
 
 ### Pi-specific features
 

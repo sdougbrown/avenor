@@ -1125,7 +1125,7 @@ describe('Avenor Pi extension', () => {
         undefined,
         undefined,
         { cwd: '/tmp' },
-      )).rejects.toThrow('direct identity fields are disabled in roster mode')
+      )).rejects.toThrow('backend is a direct identity field, disabled in roster mode')
       expect(spawnToolMock).toHaveBeenCalledTimes(2)
     })
     spawnToolMock.mockClear()

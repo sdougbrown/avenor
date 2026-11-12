@@ -79,15 +79,15 @@ describe('MCP spawn schema', () => {
       ],
       [
         { roster_file: '/repo/roster.json', roster_entry: 'planner', agent: 'reviewer' },
-        'invalid spawn selector: direct identity fields are disabled in roster mode',
+        'invalid spawn selector: agent is a direct identity field, disabled in roster mode (roster_entry is set); drop agent to use the roster entry, or drop roster_file and roster_entry to use direct identity',
       ],
       [
         { roster_file: '/repo/roster.json', roster_entry: 'planner', model: 'provider/model' },
-        'invalid spawn selector: direct identity fields are disabled in roster mode',
+        'invalid spawn selector: model is a direct identity field, disabled in roster mode (roster_entry is set); drop model to use the roster entry, or drop roster_file and roster_entry to use direct identity',
       ],
       [
         { roster_file: '/repo/roster.json', roster_entry: 'planner', backend: 'agy' },
-        'invalid spawn selector: direct identity fields are disabled in roster mode',
+        'invalid spawn selector: backend is a direct identity field, disabled in roster mode (roster_entry is set); drop backend to use the roster entry, or drop roster_file and roster_entry to use direct identity',
       ],
     ]
 

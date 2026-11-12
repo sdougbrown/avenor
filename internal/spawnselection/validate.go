@@ -47,10 +47,17 @@ func Validate(input Input, rosterConfigured bool) error {
 		if supplied.value == "" || (supplied.state.Enabled && supplied.state.Fair) {
 			continue
 		}
-		if supplied.state.Reason != nil {
-			return fmt.Errorf("invalid spawn selector: %s", *supplied.state.Reason)
+		if supplied.state.Reason == nil {
+			return fmt.Errorf("invalid spawn selector: %s is disabled", supplied.name)
 		}
-		return fmt.Errorf("invalid spawn selector: %s is disabled", supplied.name)
+		if !supplied.state.Enabled && input.RosterEntry != "" {
+			// Two rules disable a field: roster_file's requires (no entry selected)
+			// and the roster-mode disables (an entry selected). Only the second
+			// blocks a direct identity field, and its reason describes the rule
+			// rather than the field, so name the field the caller has to drop.
+			return fmt.Errorf("invalid spawn selector: %s is a direct identity field, disabled in roster mode (roster_entry is set); drop %s to use the roster entry, or drop roster_file and roster_entry to use direct identity", supplied.name, supplied.name)
+		}
+		return fmt.Errorf("invalid spawn selector: %s", *supplied.state.Reason)
 	}
 
 	return nil

@@ -2,6 +2,7 @@ package spawnselection
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -113,6 +114,35 @@ func TestSchemaFieldSet(t *testing.T) {
 		if !generatedConds[goFieldName(name)] {
 			t.Errorf("generated conditions struct missing condition %q (expected field %q)", name, goFieldName(name))
 		}
+	}
+}
+
+// TestMixedSelectorErrorNamesTheField guards the refusal a caller sees when it
+// mixes roster mode with direct identity: the schema's reason describes the
+// rule, so the message itself has to name the field the caller drops.
+func TestMixedSelectorErrorNamesTheField(t *testing.T) {
+	for _, field := range []string{"agent", "model", "backend"} {
+		t.Run(field, func(t *testing.T) {
+			in := Input{RosterFile: "/repo/roster.json", RosterEntry: "planner"}
+			switch field {
+			case "agent":
+				in.Agent = "reviewer"
+			case "model":
+				in.Model = "provider/model"
+			case "backend":
+				in.Backend = "agy"
+			}
+			want := fmt.Sprintf("invalid spawn selector: %s is a direct identity field, disabled in roster mode (roster_entry is set); drop %s to use the roster entry, or drop roster_file and roster_entry to use direct identity", field, field)
+			if err := Validate(in, false); err == nil || err.Error() != want {
+				t.Fatalf("Validate() error = %v, want %q", err, want)
+			}
+		})
+	}
+
+	// A roster selector blocked by its own requires rule keeps that reason: the
+	// roster-mode refusal only applies to a supplied direct identity field.
+	if err := Validate(Input{RosterFile: "/repo/roster.json"}, false); err == nil || err.Error() != "invalid spawn selector: roster_file requires roster_entry" {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }
 

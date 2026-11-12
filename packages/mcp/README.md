@@ -94,17 +94,17 @@ Start a new agent run.
 
 | Parameter | Required | Description |
 |---|---|---|
-| `agent` | no | Agent to invoke; omission uses the supplied model or runtime defaults |
+| `agent` | no | Agent persona to run. The backend resolves the name to a prompt, tool set, and permission policy. Direct identity field: independent of `model` and `backend`. Rejected when `roster_entry` is set |
 | `repo_dir` | yes | Working directory for the agent |
 | `prompt` | no | Prompt text (mutually exclusive with `prompt_file`) |
 | `prompt_file` | no | Path to a prompt file |
 | `label` | no | Human-readable label for this run |
 | `timeout` | no | Duration string (`5m`, `1h`, `90s`) |
-| `model` | no | Model override for the agent |
+| `model` | no | Model override. Independent of `agent` and `backend`, so a model can be named alone; combined with `agent` it runs that persona on this model. Rejected when `roster_entry` is set |
 | `thinking` | no | Run-level reasoning control; unsupported effective backends reject explicit values |
-| `backend` | no | Backend override (`opencode-http`, `opencode-acp`, `codex-app-server`, `agy`) |
-| `roster_file` | no | Path to a top-level roster map |
-| `roster_entry` | no | Key within `roster_file`; selects the complete backend/agent/model identity |
+| `backend` | no | Runtime backend (`opencode-acp`, `codex-app-server`, `agy`, `pi`, `claude`, `poo`, among others). Independent of `agent` and `model`; naming one avoids relying on a runtime default. Rejected when `roster_entry` is set |
+| `roster_file` | no | Path to a top-level roster map; pair it with `roster_entry` |
+| `roster_entry` | no | Key within `roster_file`. The entry supplies backend, agent, and model as one identity, and its optional `thinking` is only a default. Roster mode rejects `agent`, `model`, and `backend` |
 | `server_url` | no | Backend server URL, required by `opencode-http` unless configured by environment |
 | `supervisor_id` | no | Supervisor ID for multi-supervisor setups |
 
@@ -112,7 +112,7 @@ Returns `{ run_id, label, supervisor_id }`. The `run_id` is what you pass to the
 
 #### Direct and roster modes
 
-Use both `roster_file` and `roster_entry` for roster mode. A roster entry requires `backend` plus at least one of `agent` or `model`, and cannot be mixed with direct `agent`, `model`, or `backend` fields. Direct mode permits all three identity fields to be omitted independently, including a backend-only request; omitted values use runtime defaults.
+Use both `roster_file` and `roster_entry` for roster mode. Every entry inside the roster file must declare `backend` and at least one of `agent` or `model`. A call in roster mode cannot also pass direct `agent`, `model`, or `backend` fields, because the entry supplies all three; the refusal names the field to drop. Direct mode permits all three identity fields to be omitted independently, including a backend-only request; omitted values use runtime defaults.
 
 ```json
 {
@@ -123,7 +123,7 @@ Use both `roster_file` and `roster_entry` for roster mode. A roster entry requir
 }
 ```
 
-The roster map is strict and currently supports only `backend`, `agent`, and `model` in each entry. `system` and `thinking` are not roster fields. The `thinking` argument remains run-level and is validated against the effective backend chosen by the direct request or roster entry. A resumed session cannot switch to a different backend.
+The roster map is strict: `system` and unknown entry fields are rejected. An entry's `thinking` is a default, so a run-level `thinking` still wins. Whichever value applies is validated against the effective backend chosen by direct mode or by the roster entry. A resumed session cannot switch to a different backend.
 
 ### `status`
 
