@@ -16,6 +16,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from '@earendil-works/pi-tui'
+import { isTerminalStatus } from '@dougbots/avenor-core'
 import type {
   InspectResult,
   RunObserver,
@@ -37,8 +38,6 @@ const TOOL_PREVIEW_CHARS = 120
 const FINAL_OUTPUT_CHARS = 600
 const TRANSCRIPT_PADDING = 2
 const INSPECT_ERROR_PREFIX = 'error: '
-
-const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
 
 export interface WatchRunRef {
   runId: string
@@ -173,23 +172,23 @@ export function finalOutputPreview(status: Pick<StatusResult, 'final_output'> | 
 
 function currentStatusWord(status: StatusResult | undefined, snapshot: RunSnapshotView): string {
   const raw = status?.status?.toLowerCase()
-  if (raw && TERMINAL_STATUSES.has(raw)) return raw
+  if (raw && isTerminalStatus(raw)) return raw
   if (snapshot.pending_permission) return 'waiting'
   if (snapshot.ended) {
     const stop = snapshot.stop_reason?.toLowerCase()
-    if (stop && TERMINAL_STATUSES.has(stop)) return stop
-    return raw && raw !== 'running' ? raw : 'done'
+    if (stop && isTerminalStatus(stop)) return stop
+    return raw && raw !== 'running' && raw !== 'unknown' ? raw : 'done'
   }
   return raw ?? 'running'
 }
 
 function isPromptable(status: StatusResult | undefined, snapshot: RunSnapshotView): boolean {
   const current = currentStatusWord(status, snapshot)
-  return !TERMINAL_STATUSES.has(current) && current !== 'unavailable'
+  return !isTerminalStatus(current) && current !== 'unavailable'
 }
 
 function isFollowUpable(status: StatusResult | undefined, snapshot: RunSnapshotView): boolean {
-  return TERMINAL_STATUSES.has(currentStatusWord(status, snapshot)) || snapshot.ended
+  return isTerminalStatus(currentStatusWord(status, snapshot)) || snapshot.ended
 }
 
 function transcriptLabel(entry: RunTranscriptEntry, theme: Theme): string {
@@ -378,7 +377,7 @@ export class RunInspectorOverlay implements Component, Focusable {
       await this.cleanup()
 
       if (!withObserver) return
-      if (TERMINAL_STATUSES.has(currentStatusWord(result.status, result.snapshot))) return
+      if (isTerminalStatus(currentStatusWord(result.status, result.snapshot))) return
       const runtimeId = nextRun.runtimeId ?? result.snapshot.identity.runtime_id
       if (!runtimeId) return
 
@@ -569,7 +568,7 @@ export class RunInspectorOverlay implements Component, Focusable {
     lines.push(...renderKv(theme, 'usage', usageSummary(this.state.snapshot.usage ?? this.state.status?.usage), innerWidth))
 
     const finalOutput = finalOutputPreview(this.state.status, this.state.snapshot)
-    if (finalOutput && (this.state.snapshot.ended || TERMINAL_STATUSES.has(statusWord))) {
+    if (finalOutput && (this.state.snapshot.ended || isTerminalStatus(statusWord))) {
       lines.push(...wrapPrefixed(finalOutput, innerWidth, theme.fg('success', 'final: ')))
     }
 

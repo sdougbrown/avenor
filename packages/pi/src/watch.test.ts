@@ -356,6 +356,34 @@ describe('RunInspectorOverlay', () => {
   })
 })
 
+describe('RunInspectorOverlay for a finished run whose status is unknown', () => {
+  it('offers a follow-up, not a prompt, when the runtime is gone and no sentinel remains', async () => {
+    const finished = buildSnapshot([
+      { event: 'session.start', runtime_id: 'rt-6', run_id: 'run-6', run_label: 'gone-run', backend: 'pi', agent: 'horse' },
+      { event: 'session.end', runtime_id: 'rt-6', seq: 1, final_output: 'final answer', stop_reason: 'end_turn' },
+    ])
+    const inspectRun = mock(async () => makeInspectResult(finished, { status: 'unknown' }))
+    const resumeRun = mock(async () => ({ run_id: 'run-6', label: 'gone-run' }))
+    const interruptAndPromptRun = mock(async () => {})
+
+    const overlay = new RunInspectorOverlay(
+      tui as any,
+      theme as any,
+      keybindings as any,
+      makeDeps({ inspectRun, resumeRun, interruptAndPromptRun }),
+      { runId: 'run-6', runtimeId: 'rt-6' },
+      () => {},
+    )
+
+    await flush()
+    ;(overlay as any).submit('more detail')
+    await flush()
+    expect(resumeRun).toHaveBeenCalledWith(expect.objectContaining({ runId: 'run-6' }), 'more detail')
+    expect(interruptAndPromptRun).not.toHaveBeenCalled()
+    overlay.dispose()
+  })
+})
+
 describe('openRunInspector', () => {
   it('warns and returns when TUI mode is unavailable', async () => {
     const notify = mock(() => {})

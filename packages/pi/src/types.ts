@@ -1,4 +1,4 @@
-import type { StatusResult } from '@dougbots/avenor-core'
+import type { StatusResult, TerminalStatus } from '@dougbots/avenor-core'
 
 export interface TrackedRun {
   runId: string
@@ -101,10 +101,6 @@ export interface RunStatusEntry {
   /** Count of active (non-terminal) descendants, if discovered. */
   nestedCount?: number
 }
-
-export type TerminalStatus = 'done' | 'failed' | 'timeout' | 'killed'
-
-export const TERMINAL_STATUSES: ReadonlySet<string> = new Set<TerminalStatus>(['done', 'failed', 'timeout', 'killed'])
 
 export const STATUS_EMOJI: Record<string, string> = {
   running: '🟢',

@@ -206,73 +206,144 @@ describe('eventsTool reading mock NDJSON log file', () => {
 })
 
 describe('translateStatus', () => {
+  const done = { _status: 'DONE' }
+
   // Regression: the "waiting" phase (set by the Go statusTracker when a
   // sub-agent asks a question or requests a permission) used to fall through
   // to the default branch and return "running", causing blocking spawn loops
   // to spin forever instead of returning control to the orchestrator.
   it('returns "waiting" for the waiting phase', () => {
-    expect(translateStatus('waiting', null)).toBe('waiting')
+    expect(translateStatus('running', 'waiting', null)).toBe('waiting')
+    expect(translateStatus('idle', 'waiting', null)).toBe('waiting')
+  })
+
+  it('returns "waiting" for the waiting status', () => {
+    expect(translateStatus('waiting', '', null)).toBe('waiting')
+    expect(translateStatus('waiting', 'waiting', null)).toBe('waiting')
   })
 
   it('returns "waiting" even when a sentinel is present (waiting is not terminal)', () => {
-    expect(translateStatus('waiting', { _status: 'DONE' })).toBe('waiting')
+    expect(translateStatus('running', 'waiting', done)).toBe('waiting')
+    expect(translateStatus('waiting', '', done)).toBe('waiting')
+  })
+
+  it('preserves the waiting phase even with a non-terminal sentinel', () => {
+    expect(translateStatus('running', 'waiting', { _status: 'RUNNING' })).toBe('waiting')
   })
 
   // Regression: in stable mode the supervisor parks a runtime after a clean
   // end_turn, leaving status "running" while the sentinel already reads DONE.
   // translateStatus must consult the sentinel so the orchestrator observes
   // completion instead of polling forever.
-  it('lets a DONE sentinel override a live "running" phase', () => {
-    expect(translateStatus('running', { _status: 'DONE' })).toBe('done')
+  it('lets a DONE sentinel override a live "running" status', () => {
+    expect(translateStatus('running', '', done)).toBe('done')
+    expect(translateStatus('running', 'done', done)).toBe('done')
   })
 
-  it('lets a FAILED sentinel override a live "running" phase', () => {
-    expect(translateStatus('running', { _status: 'FAILED' })).toBe('failed')
+  // A follow-up turn wakes a parked runtime without rotating its sentinel, so a
+  // running runtime in an active phase must not read the previous turn's outcome.
+  it('keeps a running runtime in an active phase running despite an earlier DONE sentinel', () => {
+    for (const phase of ['working', 'thinking']) {
+      expect(translateStatus('running', phase, done)).toBe('running')
+      expect(translateStatus('idle', phase, done)).toBe('running')
+    }
   })
 
-  it('recognizes lowercase terminal phases from the control protocol', () => {
-    expect(translateStatus('done', null)).toBe('done')
-    expect(translateStatus('failed', null)).toBe('failed')
-    expect(translateStatus('timeout', null)).toBe('timeout')
-    expect(translateStatus('killed', null)).toBe('killed')
+  it('lets a FAILED sentinel override a live "running" status', () => {
+    expect(translateStatus('running', '', { _status: 'FAILED' })).toBe('failed')
   })
 
-  it('returns "running" when phase is running and no terminal sentinel exists', () => {
-    expect(translateStatus('running', null)).toBe('running')
+  it('recognizes lowercase terminal statuses from the control protocol', () => {
+    expect(translateStatus('done', '', null)).toBe('done')
+    expect(translateStatus('failed', '', null)).toBe('failed')
+    expect(translateStatus('timeout', '', null)).toBe('timeout')
+    expect(translateStatus('killed', '', null)).toBe('killed')
   })
 
-  it('preserves the waiting phase even with a non-terminal sentinel', () => {
-    expect(translateStatus('waiting', { _status: 'RUNNING' })).toBe('waiting')
+  it('returns "running" when status is running and no sentinel exists', () => {
+    expect(translateStatus('running', '', null)).toBe('running')
   })
 
-  // Uppercase sentinel overrides uppercase RUNNING/IDLE phases.
-  it('lets a DONE sentinel override an uppercase "RUNNING" phase', () => {
-    expect(translateStatus('RUNNING', { _status: 'DONE' })).toBe('done')
+  // The translator lowercases its input, so upper-case and mixed-case raw
+  // values behave like their lowercase forms.
+  it('lets a DONE sentinel override an uppercase "RUNNING" status', () => {
+    expect(translateStatus('RUNNING', '', done)).toBe('done')
   })
 
-  it('lets a FAILED sentinel override an uppercase "IDLE" phase', () => {
-    expect(translateStatus('IDLE', { _status: 'FAILED' })).toBe('failed')
+  it('lets a FAILED sentinel override an uppercase "IDLE" status', () => {
+    expect(translateStatus('IDLE', '', { _status: 'FAILED' })).toBe('failed')
   })
 
-  it('lets a TIMEOUT sentinel override a mixed-case "Running" phase', () => {
-    expect(translateStatus('Running', { _status: 'TIMEOUT' })).toBe('timeout')
+  it('lets a TIMEOUT sentinel override a mixed-case "Running" status', () => {
+    expect(translateStatus('Running', '', { _status: 'TIMEOUT' })).toBe('timeout')
   })
 
-  // Lowercase terminal phases are recognized directly.
-  it('recognizes lowercase terminal phases without sentinel', () => {
-    expect(translateStatus('done', null)).toBe('done')
-    expect(translateStatus('failed', null)).toBe('failed')
-    expect(translateStatus('timeout', null)).toBe('timeout')
-    expect(translateStatus('killed', null)).toBe('killed')
-    expect(translateStatus('blocked', null)).toBe('failed')
+  it('recognizes lowercase terminal statuses without sentinel', () => {
+    expect(translateStatus('done', '', null)).toBe('done')
+    expect(translateStatus('failed', '', null)).toBe('failed')
+    expect(translateStatus('timeout', '', null)).toBe('timeout')
+    expect(translateStatus('killed', '', null)).toBe('killed')
+    expect(translateStatus('blocked', '', null)).toBe('failed')
   })
 
-  // Uppercase terminal phases are also normalized via switch.
-  it('recognizes uppercase terminal phases via normalization', () => {
-    expect(translateStatus('DONE', null)).toBe('done')
-    expect(translateStatus('FAILED', null)).toBe('failed')
-    expect(translateStatus('TIMEOUT', null)).toBe('timeout')
-    expect(translateStatus('KILLED', null)).toBe('killed')
-    expect(translateStatus('BLOCKED', null)).toBe('failed')
+  it('recognizes uppercase terminal statuses via normalization', () => {
+    expect(translateStatus('DONE', '', null)).toBe('done')
+    expect(translateStatus('FAILED', '', null)).toBe('failed')
+    expect(translateStatus('TIMEOUT', '', null)).toBe('timeout')
+    expect(translateStatus('KILLED', '', null)).toBe('killed')
+    expect(translateStatus('BLOCKED', '', null)).toBe('failed')
+  })
+
+  it('reads an idle runtime by its terminal phase', () => {
+    expect(translateStatus('idle', 'failed', null)).toBe('failed')
+    expect(translateStatus('idle', 'working', null)).toBe('running')
+  })
+
+  describe('lifecycle rules shared with Go', () => {
+    it('reports ended with no sentinel as done', () => {
+      expect(translateStatus('ended', '', null)).toBe('done')
+    })
+
+    it('lets a sentinel settle an ended runtime', () => {
+      expect(translateStatus('ended', '', { _status: 'FAILED' })).toBe('failed')
+      expect(translateStatus('ended', '', { _status: 'TIMEOUT' })).toBe('timeout')
+    })
+
+    it('reports an unrecognized or empty status as unknown', () => {
+      expect(translateStatus('', '', null)).toBe('unknown')
+      expect(translateStatus('paused', '', null)).toBe('unknown')
+      expect(translateStatus('unknown', 'working', null)).toBe('unknown')
+    })
+
+    it('lets a sentinel settle an unknown status', () => {
+      expect(translateStatus('', '', done)).toBe('done')
+      expect(translateStatus('paused', '', { _status: 'KILLED' })).toBe('killed')
+    })
+
+    it('keeps a running status running when it carries a terminal phase and no sentinel', () => {
+      expect(translateStatus('running', 'done', null)).toBe('running')
+      expect(translateStatus('running', 'failed', null)).toBe('running')
+    })
+
+    it('lets a sentinel settle a running status that carries a terminal phase', () => {
+      expect(translateStatus('running', 'done', { _status: 'FAILED' })).toBe('failed')
+    })
+
+    it('passes an unrecognized sentinel word through lowercased', () => {
+      expect(translateStatus('running', '', { _status: 'WEIRD' })).toBe('weird')
+      expect(translateStatus('ended', '', { _status: 'WEIRD' })).toBe('weird')
+    })
+
+    it('does not let a sentinel overlay a terminal status the supervisor reported', () => {
+      expect(translateStatus('done', '', { _status: 'FAILED' })).toBe('done')
+      expect(translateStatus('failed', '', done)).toBe('failed')
+      expect(translateStatus('blocked', '', done)).toBe('failed')
+      expect(translateStatus('idle', 'done', { _status: 'FAILED' })).toBe('done')
+    })
+
+    it('treats a sentinel with no status word as no sentinel', () => {
+      expect(translateStatus('ended', '', { _status: '' })).toBe('done')
+      expect(translateStatus('running', '', { _status: '' })).toBe('running')
+    })
   })
 })

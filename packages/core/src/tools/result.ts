@@ -1,4 +1,5 @@
 import { normalizeRunEvent } from '../run-events.js'
+import { isTerminalStatus } from '../run-state.js'
 import { readNdjsonRecords } from './events.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { inspectTool } from './inspect.js'
@@ -7,7 +8,6 @@ import { statusTool, type StatusResult } from './status.js'
 import { validateTimeout } from './validate.js'
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000
-const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
 
 export interface ResultResult {
   run_id: string
@@ -106,7 +106,7 @@ const defaultDeps: ResultToolDeps = {
 }
 
 function toResult(status: StatusResult, timedOut = false): ResultResult {
-  const ready = TERMINAL_STATUSES.has(status.status)
+  const ready = isTerminalStatus(status.status)
   return {
     run_id: status.run_id,
     label: status.label,
@@ -148,7 +148,7 @@ async function executeResultTool(args: ResultToolArgs, deps: ResultToolDeps): Pr
     const status = Array.isArray(raw) ? raw[0] : raw
     if (!status) throw new Error(`run not found: ${args.runId}`)
 
-    if (TERMINAL_STATUSES.has(status.status)) {
+    if (isTerminalStatus(status.status)) {
       // The runtime can already belong to another turn. Only the per-run
       // event log identifies this turn's complete terminal answer.
       let exactOutputRetrieved = false

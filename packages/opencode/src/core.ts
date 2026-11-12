@@ -34,6 +34,7 @@ import {
   getSupervisorClient,
   gitToplevel,
   inspectTool,
+  isTerminalStatus,
   messageTool,
   normalizeTurnStopReason,
   isInvalidNameRefusal,
@@ -166,7 +167,6 @@ type ActiveMonitor = {
   promise: Promise<MonitorOutcome>
 }
 
-const TERMINAL_STATUSES = new Set(['done', 'failed', 'timeout', 'killed'])
 const FINAL_OUTPUT_CHARS = 1_500
 const METADATA_TEXT_CHARS = 400
 const TRANSCRIPT_PREVIEW_ENTRIES = 3
@@ -179,7 +179,7 @@ function clipTail(text: string | undefined, limit: number): string | undefined {
 
 export function terminalStatus(snapshot: RunSnapshotView, fallback?: StatusResult): string {
   if (fallback?.status) return fallback.status
-  if (snapshot.phase && TERMINAL_STATUSES.has(snapshot.phase)) return snapshot.phase
+  if (snapshot.phase && isTerminalStatus(snapshot.phase)) return snapshot.phase
   return snapshot.stop_reason ?? 'done'
 }
 

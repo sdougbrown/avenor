@@ -4,8 +4,7 @@ import type {
   ToolRenderResultOptions,
 } from '@earendil-works/pi-coding-agent'
 import { Text } from '@earendil-works/pi-tui'
-import { extractEventText } from '@dougbots/avenor-core'
-import { TERMINAL_STATUSES } from './types.js'
+import { extractEventText, isTerminalStatus } from '@dougbots/avenor-core'
 import { clipText, sanitizeText } from './watch.js'
 
 const FINAL_OUTPUT_CHARS = 600
@@ -173,10 +172,6 @@ function partial(result: ToolResult): string[] {
   return ['Working…']
 }
 
-function isTerminal(status: string): boolean {
-  return TERMINAL_STATUSES.has(status)
-}
-
 function permission(record: RecordValue | undefined): RecordValue | undefined {
   return asRecord(record?.pending_permission)
 }
@@ -210,7 +205,7 @@ function guidance(status: string, pending: RecordValue | undefined, runId: strin
     }
     return `Guidance: Call avenor_message with action "resume" or avenor_status with run_id "${runId}".`
   }
-  if (isTerminal(status)) return `Guidance: Call avenor_result or avenor_events with run_id "${runId}".`
+  if (isTerminalStatus(status)) return `Guidance: Call avenor_result or avenor_events with run_id "${runId}".`
   return `Guidance: Call avenor_result with run_id "${runId}".`
 }
 
