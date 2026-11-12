@@ -94,15 +94,15 @@ Start a new agent run.
 
 | Parameter | Required | Description |
 |---|---|---|
-| `agent` | no | Agent to invoke. Direct identity field: pair it with `model` and `backend`, or omit it for the runtime default. Rejected when `roster_entry` is set |
+| `agent` | no | Agent persona to run. The backend resolves the name to a prompt, tool set, and permission policy. Direct identity field: independent of `model` and `backend`. Rejected when `roster_entry` is set |
 | `repo_dir` | yes | Working directory for the agent |
 | `prompt` | no | Prompt text (mutually exclusive with `prompt_file`) |
 | `prompt_file` | no | Path to a prompt file |
 | `label` | no | Human-readable label for this run |
 | `timeout` | no | Duration string (`5m`, `1h`, `90s`) |
-| `model` | no | Model override for the agent. Direct identity field, rejected when `roster_entry` is set |
+| `model` | no | Model override. Independent of `agent` and `backend`, so a model can be named alone; combined with `agent` it runs that persona on this model. Rejected when `roster_entry` is set |
 | `thinking` | no | Run-level reasoning control; unsupported effective backends reject explicit values |
-| `backend` | no | Backend override (`opencode-http`, `opencode-acp`, `codex-app-server`, `agy`, `pi`, among others). Direct identity field, rejected when `roster_entry` is set |
+| `backend` | no | Runtime backend (`opencode-acp`, `codex-app-server`, `agy`, `pi`, `claude`, `poo`, among others). Independent of `agent` and `model`; naming one avoids relying on a runtime default. Rejected when `roster_entry` is set |
 | `roster_file` | no | Path to a top-level roster map; pair it with `roster_entry` |
 | `roster_entry` | no | Key within `roster_file`. The entry supplies backend, agent, and model as one identity, and its optional `thinking` is only a default. Roster mode rejects `agent`, `model`, and `backend` |
 | `server_url` | no | Backend server URL, required by `opencode-http` unless configured by environment |
