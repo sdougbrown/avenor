@@ -257,6 +257,8 @@ The supervisor `resume` operation preserves the run's messaging choice. A raw `s
 - `launch_wrapper` — optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion (see [backends.md](backends.md#mcp-surfaces-operator-allowlist))
 - `supervisor_id` — supervisor socket to use instead of the default. Must be an `avenor-mcp-*.sock` directly inside the sockets root (`AVENOR_HOME/sockets` when set, otherwise `~/.avenor/sockets`), the same containment rule the TypeScript core enforces; a custom supervisor location is reachable only by configuring it as the MCP server's `--supervisor-socket`
 
+`schemas/spawn.input.json` is the single source for every field above: the server publishes that file, and the three JavaScript surfaces read their field text from it. Reword or add a spawn field there, not in this list.
+
 #### Direct and roster modes
 
 `spawn` selects its identity one of two ways. Direct mode specifies `agent`, `model`, or `backend`, and each is independently optional: a persona alone, a model alone, a backend alone, any combination, or none. Omitted values come from the runtime default, though naming `backend` explicitly avoids depending on it. Roster mode specifies `roster_file` with `roster_entry`, whose entry supplies all three. The modes are mutually exclusive: a call carrying `roster_entry` rejects `agent`, `model`, and `backend`, and the refusal names the field to drop.

@@ -51,6 +51,15 @@ export type { SpawnToolArgs, SpawnToolResult } from './tools/spawn.js'
 export { validateSpawnSelection } from './spawn-selection.js'
 export type { SpawnSelectionInput } from './spawn-selection.js'
 export {
+  spawnFieldDescription,
+  spawnFieldDescriptions,
+  spawnFieldNames,
+  spawnFieldProperties,
+  spawnInputSchema,
+  spawnSurfaceFields,
+} from './spawn-schema.js'
+export type { SpawnSurface } from './spawn-schema.js'
+export {
   THINKING_LEVELS,
   evaluateThinkingPolicy,
   isThinkingLevel,

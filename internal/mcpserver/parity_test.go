@@ -416,6 +416,13 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 			continue
 		}
 		seen[jsonName] = true
+		// spawnArgs carries no jsonschema tag: the spawn tool publishes
+		// schemas/spawn.input.json, and TestSpawnSchemaMatchesStruct holds the
+		// struct to that file. Requiredness still comes from the json tag here,
+		// which publishedSpawnInputSchema reads for the published required list.
+		if structName == "spawnArgs" {
+			continue
+		}
 		schemaTag := field.Tag.Get("jsonschema")
 		if requiredSet[jsonName] {
 			if !strings.Contains(schemaTag, "required") {
