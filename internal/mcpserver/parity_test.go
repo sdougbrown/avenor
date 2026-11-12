@@ -416,6 +416,13 @@ func assertSchemaTags(t *testing.T, structName string, allowed, required []strin
 			continue
 		}
 		seen[jsonName] = true
+		// spawnArgs carries no jsonschema tag: the spawn tool publishes
+		// schemas/spawn.input.json, and TestSpawnSchemaMatchesStruct holds the
+		// struct to that file. Requiredness still comes from the json tag here,
+		// which publishedSpawnInputSchema reads for the published required list.
+		if structName == "spawnArgs" {
+			continue
+		}
 		schemaTag := field.Tag.Get("jsonschema")
 		if requiredSet[jsonName] {
 			if !strings.Contains(schemaTag, "required") {
@@ -510,13 +517,16 @@ func TestMergedSchemaPublished(t *testing.T) {
 	published := map[string]any{}
 	for _, tool := range tools.Tools {
 		switch tool.Name {
-		case "message", "peers", "workflow":
+		case "message", "peers", "spawn", "workflow":
 			published[tool.Name] = tool.InputSchema
 		}
 	}
 	for name, want := range map[string][]string{
-		"message":  {"action", "idempotency_key", "label", "message", "message_id", "payload", "reply_to", "target", "timeout_ms"},
-		"peers":    {"action", "name", "session_id", "target"},
+		"message": {"action", "idempotency_key", "label", "message", "message_id", "payload", "reply_to", "target", "timeout_ms"},
+		"peers":   {"action", "name", "session_id", "target"},
+		"spawn": {"agent", "auto_approve", "backend", "idempotency_key", "label", "launch_wrapper",
+			"messaging", "model", "persist_sessions", "prompt", "prompt_file", "repo_dir",
+			"roster_entry", "roster_file", "server_url", "supervisor_id", "thinking", "timeout"},
 		"workflow": {"action", "activation_id", "actor", "after_seq", "artifacts", "attempt_id", "controller_id", "evidence_ids", "gate_id", "lease_id", "limit", "node_id", "observed_at", "operation", "outcome", "outputs", "owner_token", "poll_id", "reason", "response_hash", "result", "source", "subject", "supervisor_id", "timeout", "workflow_id"},
 	} {
 		schema, ok := published[name].(map[string]any)

@@ -141,24 +141,24 @@ type resultArgs struct {
 }
 
 type spawnArgs struct {
-	Agent          string   `json:"agent,omitempty" jsonschema:"optional agent persona; the backend resolves this name to a prompt, tool set, and permission policy. Independent of model and backend: supply any of the three, or none. Rejected when roster_entry is set, because the entry names all three"`
-	RepoDir        string   `json:"repo_dir" jsonschema:"required path to the repository"`
-	Prompt         string   `json:"prompt,omitempty" jsonschema:"optional initial prompt"`
-	PromptFile     string   `json:"prompt_file,omitempty" jsonschema:"optional path to file containing the initial prompt"`
-	Label          string   `json:"label,omitempty" jsonschema:"optional label for the run"`
-	Timeout        string   `json:"timeout,omitempty" jsonschema:"optional timeout in seconds (numeric string)"`
-	Model          string   `json:"model,omitempty" jsonschema:"optional model override; independent of agent and backend, so a model can be named alone. Combined with agent, it runs that persona on this model. Rejected when roster_entry is set; to run a roster persona on a different model, send the identity directly"`
-	Thinking       string   `json:"thinking,omitempty" jsonschema:"optional thinking level (off, minimal, low, medium, high, xhigh, max); omission uses the backend default"`
-	Backend        string   `json:"backend,omitempty" jsonschema:"optional runtime backend, such as agy, pi, opencode-acp, codex-app-server, claude, or poo. Independent of agent and model; naming one avoids relying on a runtime default. Rejected when roster_entry is set"`
-	RosterFile     string   `json:"roster_file,omitempty" jsonschema:"optional path to a roster map; pair it with roster_entry to select a whole loadout by key. Setting roster_entry turns on roster mode, which rejects agent, model, and backend"`
-	RosterEntry    string   `json:"roster_entry,omitempty" jsonschema:"optional roster entry key; the selected entry supplies backend, agent, and model as one identity, and its optional thinking is only a default. Requires roster_file. Passing agent, model, or backend alongside it is an error; to change one part of a roster persona, send the identity directly instead"`
-	ServerURL      string   `json:"server_url,omitempty" jsonschema:"optional opencode serve URL for opencode-http backend"`
-	SupervisorID   string   `json:"supervisor_id,omitempty" jsonschema:"optional supervisor socket path"`
-	IdempotencyKey string   `json:"idempotency_key,omitempty" jsonschema:"optional idempotency key; a retry with the same key and parameters returns the original run instead of spawning a second one"`
-	LaunchWrapper  []string `json:"launch_wrapper,omitempty" jsonschema:"optional argv prefix; disabled unless the selected supervisor enables an operator allowlist. Must exactly match an approved argv array. No shell expansion."`
-	AutoApprove    bool     `json:"auto_approve,omitempty" jsonschema:"optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)"`
-	PersistSession *bool    `json:"persist_sessions,omitempty" jsonschema:"optional persist the run's backend session (pi: a session directory instead of --no-session, enabling post-hoc transcripts and cross-process resume). Omitted inherits the supervisor's AVENOR_PI_SESSIONS environment; true and false force the choice for this run"`
-	Messaging      *bool    `json:"messaging,omitempty" jsonschema:"optional let a poo child send and receive Avenor messages; defaults on for a delegation spawn, and off for a workflow node, a loop or team phase, and a permission-decider run"`
+	Agent          string   `json:"agent,omitempty"`
+	RepoDir        string   `json:"repo_dir"`
+	Prompt         string   `json:"prompt,omitempty"`
+	PromptFile     string   `json:"prompt_file,omitempty"`
+	Label          string   `json:"label,omitempty"`
+	Timeout        string   `json:"timeout,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	Thinking       string   `json:"thinking,omitempty"`
+	Backend        string   `json:"backend,omitempty"`
+	RosterFile     string   `json:"roster_file,omitempty"`
+	RosterEntry    string   `json:"roster_entry,omitempty"`
+	ServerURL      string   `json:"server_url,omitempty"`
+	SupervisorID   string   `json:"supervisor_id,omitempty"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+	LaunchWrapper  []string `json:"launch_wrapper,omitempty"`
+	AutoApprove    bool     `json:"auto_approve,omitempty"`
+	PersistSession *bool    `json:"persist_sessions,omitempty"`
+	Messaging      *bool    `json:"messaging,omitempty"`
 }
 
 // UnmarshalJSON makes the Go MCP spawn tool a strict raw boundary: unknown
@@ -295,6 +295,7 @@ func NewServer(opts Options) (*Server, error) {
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "spawn",
 		Description: "Spawn a new avenor run. Identity comes from one of two modes. In direct mode pass any of agent, model, and backend, and omitted values use runtime defaults. In roster mode pass roster_file with roster_entry, which names all three and rejects them as arguments.",
+		InputSchema: publishedSpawnInputSchema(),
 	}, s.handleAvenorSpawn)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{

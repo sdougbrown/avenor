@@ -53,6 +53,8 @@ import {
   Supervisor,
   SUPERVISOR_RUN_ID,
   THINKING_LEVELS,
+  spawnFieldDescription,
+  spawnFieldEnum,
   validateSpawnSelection,
   runWorkflowTool,
   takenLabelsFromListing,
@@ -2403,27 +2405,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         'When roster_entry is set, the roster selects agent, model, and backend; do not pass those fields alongside it.',
         'If a roster spawn fails validation or resolution, do not retry the roster: respawn without roster_file/roster_entry. Direct selectors (agent, model, backend) are optional; omission uses runtime defaults.',
       ],
-      parameters: Type.Object({
-        agent: Type.Optional(Type.String({ description: 'Optional agent persona; the backend resolves this name to a prompt, tool set, and permission policy. Independent of model and backend: supply any of the three, or none. Rejected when roster_entry is set, because the entry names all three' })),
-        prompt: Type.Optional(Type.String({ description: 'Prompt text' })),
-        prompt_file: Type.Optional(Type.String({ description: 'Path to prompt file' })),
-        dir: Type.Optional(Type.String({ description: 'Working directory (defaults to session directory)' })),
-        label: Type.Optional(Type.String({ description: 'Human-readable label for the run' })),
-        timeout: Type.Optional(Type.String({ description: 'Timeout duration (e.g. 3600s)' })),
-        model: Type.Optional(Type.String({ description: 'Optional model override; independent of agent and backend, so a model can be named alone. Combined with agent, it runs that persona on this model. Rejected when roster_entry is set; to run a roster persona on a different model, send the identity directly' })),
-        thinking: Type.Optional(Type.Union([
-          Type.Literal('off'), Type.Literal('minimal'), Type.Literal('low'), Type.Literal('medium'),
-          Type.Literal('high'), Type.Literal('xhigh'), Type.Literal('max'),
-        ], { description: 'Thinking level; omission uses the backend default' })),
-        backend: Type.Optional(Type.String({ description: 'Optional runtime backend, such as agy, pi, opencode-acp, codex-app-server, claude, or poo. Omitting it in direct mode uses pi. Independent of agent and model. Rejected when roster_entry is set' })),
-        roster_file: Type.Optional(Type.String({ description: 'Optional path to a roster map; pair it with roster_entry to select a whole loadout by key. Setting roster_entry turns on roster mode, which rejects agent, model, and backend' })),
-        roster_entry: Type.Optional(Type.String({ description: 'Optional roster entry key; the selected entry supplies backend, agent, and model as one identity, and its optional thinking is only a default. Requires roster_file. Passing agent, model, or backend alongside it is an error; to change one part of a roster persona, send the identity directly instead' })),
-        server_url: Type.Optional(Type.String({ description: 'Backend server URL' })),
-        persist_sessions: Type.Optional(Type.Boolean({ description: 'Persist the backend session (pi: a session directory instead of --no-session, enabling cross-process resume). Omitted inherits the supervisor environment; true and false force the choice for this run' })),
-        messaging: Type.Optional(Type.Boolean({ description: 'Let a poo child send and receive Avenor messages; defaults on for a delegation spawn, and off for a workflow node, a loop or team phase, and a permission-decider run' })),
-        supervisor_id: Type.Optional(Type.String({ description: 'Reuse an existing supervisor by socket path' })),
-        wait: Type.Optional(Type.Boolean({ description: 'Block until complete (default true)' })),
-      }),
+      parameters: spawnToolParameters,
       async execute(_toolCallId, params, signal, onUpdate, ctx) {
         if (signal?.aborted) {
           return { content: [{ type: 'text', text: 'Cancelled' }], details: {} }
@@ -3332,5 +3314,33 @@ export type {
   RunTerminalPayload,
   RunTerminalPayloadInput,
 } from './events.js'
+
+// spawnToolParameters is the spawn tool's published parameter text. Every
+// description comes from schemas/spawn.input.json through @dougbots/avenor-core,
+// so this surface cannot reword what the others publish.
+export const spawnToolParameters = Type.Object({
+  agent: Type.Optional(Type.String({ description: spawnFieldDescription('agent') })),
+  prompt: Type.Optional(Type.String({ description: spawnFieldDescription('prompt') })),
+  prompt_file: Type.Optional(Type.String({ description: spawnFieldDescription('prompt_file') })),
+  dir: Type.Optional(Type.String({ description: spawnFieldDescription('dir') })),
+  label: Type.Optional(Type.String({ description: spawnFieldDescription('label') })),
+  timeout: Type.Optional(Type.String({ description: spawnFieldDescription('timeout') })),
+  model: Type.Optional(Type.String({ description: spawnFieldDescription('model') })),
+  thinking: Type.Optional(Type.Union([
+    Type.Literal('off'), Type.Literal('minimal'), Type.Literal('low'), Type.Literal('medium'),
+    Type.Literal('high'), Type.Literal('xhigh'), Type.Literal('max'),
+  ], { description: spawnFieldDescription('thinking') })),
+  backend: Type.Optional(Type.Union(
+    spawnFieldEnum('backend').map((value) => Type.Literal(value)),
+    { description: spawnFieldDescription('backend') },
+  )),
+  roster_file: Type.Optional(Type.String({ description: spawnFieldDescription('roster_file') })),
+  roster_entry: Type.Optional(Type.String({ description: spawnFieldDescription('roster_entry') })),
+  server_url: Type.Optional(Type.String({ description: spawnFieldDescription('server_url') })),
+  persist_sessions: Type.Optional(Type.Boolean({ description: spawnFieldDescription('persist_sessions') })),
+  messaging: Type.Optional(Type.Boolean({ description: spawnFieldDescription('messaging') })),
+  supervisor_id: Type.Optional(Type.String({ description: spawnFieldDescription('supervisor_id') })),
+  wait: Type.Optional(Type.Boolean({ description: spawnFieldDescription('wait') })),
+})
 
 export default createExtension()

@@ -1,29 +1,36 @@
 import { describe, expect, it } from 'bun:test'
-import { THINKING_LEVELS, validateSpawnSelection } from '@dougbots/avenor-core'
+import {
+  THINKING_LEVELS,
+  spawnFieldDescription,
+  spawnFieldEnum,
+  spawnSurfaceFields,
+  validateSpawnSelection,
+} from '@dougbots/avenor-core'
 import { z } from 'zod'
 import { spawnInputShape } from './spawn-schema'
 
 const spawnSchema = z.object(spawnInputShape)
 
-const expectedFields = [
-  'agent',
-  'repo_dir',
-  'prompt',
-  'prompt_file',
-  'label',
-  'timeout',
-  'model',
-  'thinking',
-  'backend',
-  'roster_file',
-  'roster_entry',
-  'server_url',
-  'supervisor_id',
-]
+// The published field set comes from schemas/spawn.input.json, not from a list
+// remembered here: a field this surface gains or loses shows up as a failure.
+const expectedFields = spawnSurfaceFields('mcp')
 
 describe('MCP spawn schema', () => {
+  it('refuses a backend the schema does not declare', () => {
+    for (const backend of spawnFieldEnum('backend')) {
+      expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', backend }).success).toBe(true)
+    }
+    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', backend: 'opencode-htt' }).success).toBe(false)
+  })
+
+  it('takes every description from the shared spawn schema', () => {
+    for (const [name, schema] of Object.entries(spawnInputShape)) {
+      expect(schema.description ?? '').toBe(spawnFieldDescription(name))
+    }
+  })
+
   it('keeps the flat field contract and makes selectors optional', () => {
-    expect(Object.keys(spawnInputShape)).toEqual(expectedFields)
+    expect(Object.keys(spawnInputShape).sort()).toEqual(expectedFields)
     expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo' }).success).toBe(true)
     expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', agent: 'reviewer' }).success).toBe(true)
     expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', model: 'provider/model' }).success).toBe(true)
