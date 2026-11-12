@@ -1,12 +1,15 @@
 package mcpserver
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // TestGeneratedSpawnSchemaIsCurrent fails when the checked-in schema file and
@@ -21,6 +24,99 @@ func TestGeneratedSpawnSchemaIsCurrent(t *testing.T) {
 	}
 	if string(onDisk) != spawnInputSchemaJSON {
 		t.Fatal("spawn_schema.gen.go is stale: run go generate ./internal/mcpserver")
+	}
+}
+
+// TestSpawnToolPublishesSharedSchema drives the registered tool over the real
+// protocol, because every other guard here tests a function. Without this,
+// deleting the InputSchema line from the registration would leave the server
+// publishing the SDK's reflection-derived schema — eighteen properties, no
+// descriptions, no additionalProperties — with every other test green.
+func TestSpawnToolPublishesSharedSchema(t *testing.T) {
+	s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: &fakeClient{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
+	serverSession, err := s.mcpServer.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("connect server: %v", err)
+	}
+	defer serverSession.Close()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("connect client: %v", err)
+	}
+	defer clientSession.Close()
+
+	tools, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+
+	var published map[string]any
+	for _, tool := range tools.Tools {
+		if tool.Name == "spawn" {
+			published, _ = tool.InputSchema.(map[string]any)
+		}
+	}
+	if published == nil {
+		t.Fatal("spawn tool not published with an object schema")
+	}
+	if got := published["type"]; got != "object" {
+		t.Errorf("spawn schema type = %v, want object", got)
+	}
+	if got, ok := published["additionalProperties"].(bool); !ok || got {
+		t.Errorf("spawn schema additionalProperties = %v, want false", published["additionalProperties"])
+	}
+	required, ok := published["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "repo_dir" {
+		t.Errorf("spawn schema required = %v, want [repo_dir]", published["required"])
+	}
+
+	properties, ok := published["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("spawn schema has no properties object")
+	}
+	for name := range properties {
+		if name == "dir" || name == "wait" {
+			t.Errorf("spawn schema publishes %q, which this server does not accept", name)
+		}
+	}
+
+	var source struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+			Type        string `json:"type"`
+			Items       struct {
+				Type string `json:"type"`
+			} `json:"items"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(spawnInputSchemaJSON), &source); err != nil {
+		t.Fatal(err)
+	}
+	for name, property := range properties {
+		entry, ok := property.(map[string]any)
+		if !ok {
+			t.Fatalf("spawn property %q is not an object", name)
+		}
+		if got, want := entry["description"], source.Properties[name].Description; got != want {
+			t.Errorf("published %q description = %v, want %v", name, got, want)
+		}
+		if got, want := entry["type"], source.Properties[name].Type; got != want {
+			t.Errorf("published %q type = %v, want %v", name, got, want)
+		}
+		if name == "launch_wrapper" {
+			items, _ := entry["items"].(map[string]any)
+			if items["type"] != "string" {
+				t.Errorf("launch_wrapper items.type = %v, want string", items["type"])
+			}
+		}
 	}
 }
 

@@ -20,6 +20,7 @@ func publishedSpawnInputSchema() json.RawMessage {
 		ID                   string                     `json:"$id"`
 		Title                string                     `json:"title"`
 		Description          string                     `json:"description"`
+		SurfaceDescriptions  map[string]string          `json:"x-avenor-surface-descriptions"`
 		Type                 string                     `json:"type"`
 		AdditionalProperties bool                       `json:"additionalProperties"`
 		Properties           map[string]json.RawMessage `json:"properties"`
@@ -44,6 +45,11 @@ func publishedSpawnInputSchema() json.RawMessage {
 		}
 	}
 
+	description := source.Description
+	if surface := source.SurfaceDescriptions["go"]; surface != "" {
+		description = surface
+	}
+
 	published := struct {
 		Schema               string                     `json:"$schema"`
 		ID                   string                     `json:"$id"`
@@ -57,7 +63,7 @@ func publishedSpawnInputSchema() json.RawMessage {
 		Schema:               source.Schema,
 		ID:                   source.ID,
 		Title:                source.Title,
-		Description:          source.Description,
+		Description:          description,
 		Type:                 source.Type,
 		AdditionalProperties: source.AdditionalProperties,
 		Required:             requiredSpawnFields(),

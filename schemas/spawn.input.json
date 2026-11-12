@@ -2,7 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://avenor.dev/schemas/spawn.input.json",
   "title": "avenor spawn input",
-  "description": "The one place a spawn field's name, type, and description is written. The MCP server publishes this file verbatim, from the copy internal/mcpserver compiles into the binary, and every JavaScript surface reads the same file for its field text, so a field is renamed or reworded once. `required` is deliberately absent: which fields a caller must supply is a per-surface fact, and each surface keeps its own list. `x-avenor-surfaces` names the surfaces that publish the field, so a test can hold every surface to this file instead of to a remembered list.",
+  "description": "The one place a spawn field's name, type, and description is written: the Go MCP server publishes a filtered copy of it, and the JavaScript surfaces build their field text from it, so a field is renamed or reworded once. `required` is deliberately absent: which fields a caller must supply is a per-surface fact, and each surface keeps its own list. `x-avenor-surfaces` names the surfaces that publish the field, so a test can hold every surface to this file instead of to a remembered list.",
+  "x-avenor-surface-descriptions": {
+    "go": "The spawn tool's input schema: every field this server accepts, with the fields only the JavaScript surfaces publish removed. Required names the fields the decoder cannot default, and additionalProperties false refuses any other key. Compiled from schemas/spawn.input.json."
+  },
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -22,7 +25,8 @@
         "go",
         "mcp"
       ],
-      "description": "Required. Working directory for the run."
+      "description": "Required. Working directory for the run.",
+      "minLength": 1
     },
     "dir": {
       "type": "string",
@@ -140,7 +144,7 @@
         "pi",
         "opencode"
       ],
-      "description": "Supervisor socket path to use instead of the default."
+      "description": "Supervisor socket path to use instead of the default. Must be an avenor-mcp-*.sock directly inside the sockets root (AVENOR_HOME/sockets when set, otherwise ~/.avenor/sockets)."
     },
     "idempotency_key": {
       "type": "string",
