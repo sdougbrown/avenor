@@ -5,7 +5,8 @@ import { type Client } from '../client.js'
 import { asRecord } from '../value-fields.js'
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { validateRunId } from './validate.js'
-import { BROKER_PEER_NO_EVENTS, findBrokerPeer } from './broker-peer.js'
+import { BROKER_PEER_NO_EVENTS, lookupBrokerPeer, type BrokerPeerLookup } from './broker-peer.js'
+import { ambiguousName } from '../message.js'
 import { statusReportsNoRuntime } from './message-provider.js'
 import { findExternalRun } from './run-registry.js'
 import { findLocalRunByReference } from './run-resolution.js'
@@ -139,6 +140,13 @@ async function readNdjsonEvents(
   return events
 }
 
+const NO_PEER: BrokerPeerLookup = { match: 'none' }
+
+function throwForPeerLookup(runId: string, lookup: BrokerPeerLookup): void {
+  if (lookup.match === 'unique') throw new Error(BROKER_PEER_NO_EVENTS)
+  if (lookup.match === 'ambiguous') throw ambiguousName(runId, lookup.candidates)
+}
+
 async function resolveRun(
   args: { runId: string; supervisorId?: string },
   getSupervisorClient: typeof realGetSupervisorClient,
@@ -193,11 +201,11 @@ async function resolveRun(
         return runtime === args.runId || label === args.runId || runId === args.runId
       })
       if (!match) {
-        const peer = statusReportsNoRuntime(statusError, args.runId)
-          ? await findBrokerPeer(client, args.runId)
-          : undefined
+        const lookup = statusReportsNoRuntime(statusError, args.runId)
+          ? await lookupBrokerPeer(client, args.runId)
+          : NO_PEER
         if (!isSingleton) client.close()
-        if (peer) throw new Error(BROKER_PEER_NO_EVENTS)
+        throwForPeerLookup(args.runId, lookup)
         throw contextualError(`unable to resolve run ${args.runId}`, statusError)
       }
       runtimeId = String(match.runtime_id ?? match.id ?? '') || undefined
@@ -231,10 +239,9 @@ async function resolveRun(
       (direct.event_path as string | undefined) ??
       (direct.on_event as string | undefined)
   } catch (error) {
-    if (
-      statusReportsNoRuntime(error, args.runId) &&
-      await findBrokerPeer(sup.getClient(), args.runId)
-    ) throw new Error(BROKER_PEER_NO_EVENTS)
+    if (statusReportsNoRuntime(error, args.runId)) {
+      throwForPeerLookup(args.runId, await lookupBrokerPeer(sup.getClient(), args.runId))
+    }
     throw contextualError(`unable to resolve run ${args.runId}`, error)
   }
 

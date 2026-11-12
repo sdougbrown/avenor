@@ -6,25 +6,32 @@ import type { StatusResult } from './status.js'
 export const BROKER_PEER_NO_EVENTS =
   'this run is a broker peer with no event log; peers action last reads its last agent message'
 
+export type BrokerPeerLookup =
+  | { match: 'unique'; peer: PeerRecord }
+  | { match: 'ambiguous'; candidates: string[] }
+  | { match: 'none' }
+
 /**
- * Find ref in the broker's peer listing, the one `peers list` reads: an exact
- * run id, else a label that names a single peer. A run a plugin session
- * registered lives only there and has no runtime on the supervisor. A listing
- * that cannot be read or is partial, and a label two peers share, answer no
- * peer, so the caller keeps its own failure.
+ * Resolve ref against the broker's peer listing, the one `peers list` reads: an
+ * exact run id, else a label. A run a plugin session registered lives only
+ * there and has no runtime on the supervisor. It answers one peer, several
+ * peers that share the name, or none. A listing that cannot be read or is
+ * partial answers none, so the caller keeps its own failure.
  */
-export async function findBrokerPeer(
+export async function lookupBrokerPeer(
   client: Pick<Client, 'messagePreflight' | 'messagePeers'>,
   ref: string,
-): Promise<PeerRecord | undefined> {
+): Promise<BrokerPeerLookup> {
   try {
     const { generation } = await client.messagePreflight()
     const listing = await client.messagePeers({ generation })
-    if (listing.peers_error) return undefined
+    if (listing.peers_error) return { match: 'none' }
     const { resolution, row } = matchPeerRows(peerRecords(listing), ref)
-    return resolution.match === 'unique' ? row : undefined
+    if (resolution.match === 'unique' && row) return { match: 'unique', peer: row }
+    if (resolution.match === 'ambiguous') return { match: 'ambiguous', candidates: resolution.candidates ?? [] }
+    return { match: 'none' }
   } catch {
-    return undefined
+    return { match: 'none' }
   }
 }
 
