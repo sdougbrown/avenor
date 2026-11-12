@@ -445,9 +445,9 @@ func TestParallelSpawnLazilyStartsOneSharedSupervisor(t *testing.T) {
 	spawn := func(wg *sync.WaitGroup) {
 		defer wg.Done()
 		_, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-			Agent:   "test",
-			RepoDir: ".",
-			Prompt:  "hello",
+			Agent:  "test",
+			Dir:    ".",
+			Prompt: "hello",
 		})
 		if err != nil {
 			t.Errorf("spawn: %v", err)
@@ -1933,8 +1933,8 @@ func TestAvenorSpawn(t *testing.T) {
 	}
 
 	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		Agent:   "claude",
-		RepoDir: "/tmp/test-repo",
+		Agent: "claude",
+		Dir:   "/tmp/test-repo",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2001,7 +2001,7 @@ func TestAvenorSpawnRosterSelectorAndResolvedIdentity(t *testing.T) {
 	}
 
 	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:     "/tmp/roster-repo",
+		Dir:         "/tmp/roster-repo",
 		RosterFile:  rosterPath,
 		RosterEntry: "planner",
 	})
@@ -2029,11 +2029,11 @@ func TestAvenorSpawnRosterSelectorAndResolvedIdentity(t *testing.T) {
 
 func TestAvenorSpawnRejectsMixedRosterSelectors(t *testing.T) {
 	cases := []spawnArgs{
-		{RepoDir: "/tmp/repo", RosterFile: "/tmp/roster.json"},
-		{RepoDir: "/tmp/repo", RosterEntry: "planner"},
-		{RepoDir: "/tmp/repo", RosterFile: "/tmp/roster.json", RosterEntry: "planner", Agent: "inline"},
-		{RepoDir: "/tmp/repo", RosterFile: "/tmp/roster.json", RosterEntry: "planner", Model: "inline"},
-		{RepoDir: "/tmp/repo", RosterFile: "/tmp/roster.json", RosterEntry: "planner", Backend: "pi"},
+		{Dir: "/tmp/repo", RosterFile: "/tmp/roster.json"},
+		{Dir: "/tmp/repo", RosterEntry: "planner"},
+		{Dir: "/tmp/repo", RosterFile: "/tmp/roster.json", RosterEntry: "planner", Agent: "inline"},
+		{Dir: "/tmp/repo", RosterFile: "/tmp/roster.json", RosterEntry: "planner", Model: "inline"},
+		{Dir: "/tmp/repo", RosterFile: "/tmp/roster.json", RosterEntry: "planner", Backend: "pi"},
 	}
 	for i, args := range cases {
 		t.Run(fmt.Sprintf("case-%d", i), func(t *testing.T) {
@@ -2060,7 +2060,7 @@ func TestAvenorSpawnError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Agent: "claude", RepoDir: "/tmp/test-repo"})
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Agent: "claude", Dir: "/tmp/test-repo"})
 	if !errors.Is(err, cause) {
 		t.Fatalf("spawn error does not wrap cause: %v", err)
 	}
@@ -2086,9 +2086,9 @@ func TestAvenorSpawnWithLabel(t *testing.T) {
 	}
 
 	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		Agent:   "codex",
-		RepoDir: "/tmp/test-repo",
-		Label:   "my-label",
+		Agent: "codex",
+		Dir:   "/tmp/test-repo",
+		Label: "my-label",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2126,7 +2126,7 @@ func TestAvenorSpawnWithOptionalParams(t *testing.T) {
 
 	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
 		Agent:      "codex",
-		RepoDir:    "/tmp/test-repo",
+		Dir:        "/tmp/test-repo",
 		Prompt:     "initial prompt text",
 		PromptFile: "/tmp/prompt.md",
 		Model:      "gpt-5",
@@ -2215,7 +2215,7 @@ func TestAvenorSpawnRejectsInvalidThinkingBeforeClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/test-repo", Thinking: "HIGH"})
+	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Dir: "/tmp/test-repo", Thinking: "HIGH"})
 	if err == nil || !strings.Contains(err.Error(), "invalid thinking value") {
 		t.Fatalf("error = %v", err)
 	}
@@ -2244,7 +2244,7 @@ func TestAvenorSpawnAutoApproveTrue(t *testing.T) {
 
 	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
 		Agent:       "codex",
-		RepoDir:     "/tmp/test-repo",
+		Dir:         "/tmp/test-repo",
 		AutoApprove: true,
 	})
 	if err != nil {
@@ -2281,7 +2281,7 @@ func TestAvenorSpawnTimeoutDurationString(t *testing.T) {
 
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
 		Agent:   "claude",
-		RepoDir: "/tmp/test-repo",
+		Dir:     "/tmp/test-repo",
 		Timeout: "5m",
 	})
 	if err != nil {
@@ -2305,7 +2305,7 @@ func TestAvenorSpawnTimeoutInvalid(t *testing.T) {
 
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
 		Agent:   "claude",
-		RepoDir: "/tmp/test-repo",
+		Dir:     "/tmp/test-repo",
 		Timeout: "forever",
 	})
 	if err == nil {
@@ -2324,16 +2324,16 @@ func TestAvenorSpawnWithoutAgent(t *testing.T) {
 	}{
 		{
 			name: "neither agent nor model",
-			args: spawnArgs{RepoDir: "/tmp/test-repo"},
+			args: spawnArgs{Dir: "/tmp/test-repo"},
 		},
 		{
 			name:      "model only",
-			args:      spawnArgs{RepoDir: "/tmp/test-repo", Model: "gpt-5"},
+			args:      spawnArgs{Dir: "/tmp/test-repo", Model: "gpt-5"},
 			wantModel: "gpt-5",
 		},
 		{
 			name:      "empty agent is omitted",
-			args:      spawnArgs{RepoDir: "/tmp/test-repo", Agent: "", Model: "gpt-5"},
+			args:      spawnArgs{Dir: "/tmp/test-repo", Agent: "", Model: "gpt-5"},
 			wantModel: "gpt-5",
 		},
 	}
@@ -2375,7 +2375,7 @@ func TestAvenorSpawnWithoutAgent(t *testing.T) {
 	}
 }
 
-func TestAvenorSpawnMissingRepoDir(t *testing.T) {
+func TestAvenorSpawnMissingDir(t *testing.T) {
 	fake := &fakeClient{}
 	s, err := NewServer(Options{
 		Transport:     "stdio",
@@ -2390,10 +2390,10 @@ func TestAvenorSpawnMissingRepoDir(t *testing.T) {
 		Agent: "claude",
 	})
 	if err == nil {
-		t.Fatal("expected error for missing repo_dir")
+		t.Fatal("expected error for missing dir")
 	}
-	if !strings.Contains(err.Error(), "repo_dir is required") {
-		t.Errorf("expected 'repo_dir is required', got: %v", err)
+	if !strings.Contains(err.Error(), "dir is required") {
+		t.Errorf("expected 'dir is required', got: %v", err)
 	}
 }
 
@@ -2657,9 +2657,9 @@ func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 	spawn := func(what string) {
 		t.Helper()
 		if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-			Agent:   "test",
-			RepoDir: ".",
-			Prompt:  "hello",
+			Agent:  "test",
+			Dir:    ".",
+			Prompt: "hello",
 		}); err != nil {
 			t.Fatalf("%s: %v", what, err)
 		}
@@ -2706,9 +2706,9 @@ func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		Agent:   "test",
-		RepoDir: ".",
-		Prompt:  "hello",
+		Agent:  "test",
+		Dir:    ".",
+		Prompt: "hello",
 	}); err == nil || !strings.Contains(err.Error(), "control client not available") {
 		t.Fatalf("spawn after Close error = %v, want 'control client not available'", err)
 	}
@@ -2737,9 +2737,9 @@ func TestSpawnAutostartForwardsMCPLaunchWrapperPolicyPath(t *testing.T) {
 	defer s.Close()
 
 	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		Agent:   "test",
-		RepoDir: ".",
-		Prompt:  "hello",
+		Agent:  "test",
+		Dir:    ".",
+		Prompt: "hello",
 	}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

@@ -75,10 +75,10 @@ func TestMCPControlToolsAttachAsOwner(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if _, _, err := s.handleAvenorSpawn(ctx, nil, spawnArgs{RepoDir: dir, Prompt: "work"}); err != nil {
+	if _, _, err := s.handleAvenorSpawn(ctx, nil, spawnArgs{Dir: dir, Prompt: "work"}); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	if _, _, err := s.handleAvenorSpawn(ctx, nil, spawnArgs{RepoDir: dir, Prompt: "work", LaunchWrapper: []string{"nice"}}); err != nil {
+	if _, _, err := s.handleAvenorSpawn(ctx, nil, spawnArgs{Dir: dir, Prompt: "work", LaunchWrapper: []string{"nice"}}); err != nil {
 		t.Fatalf("wrapped spawn: %v", err)
 	}
 	if _, _, err := s.handleAvenorKill(ctx, nil, killArgs{RunID: "run_1"}); err != nil {

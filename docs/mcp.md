@@ -98,7 +98,7 @@ because each requires a different action.
 **Option A: Blocking** — let `result` handle the loop:
 
 ```
-spawn(agent="jockey", repo_dir="/path/to/repo", prompt="fix the tests")
+spawn(agent="jockey", dir="/path/to/repo", prompt="fix the tests")
 → { "run_id": "...", "label": "...", "supervisor_id": "..." }
 
 result(run_id="...")
@@ -122,7 +122,7 @@ shutdown()
 control without implementing a caller-side poll loop:
 
 ```
-spawn(agent="jockey", repo_dir="/path/to/repo", prompt="fix the tests")
+spawn(agent="jockey", dir="/path/to/repo", prompt="fix the tests")
 → { "run_id": "...", "label": "...", "supervisor_id": "..." }
 
 status(run_id="...", wait_for="turn_complete", timeout="5m", view="lifecycle")
@@ -240,7 +240,7 @@ Starts a new run.
 The supervisor `resume` operation preserves the run's messaging choice. A raw `spawn` with `session_id` uses the caller's `messaging` choice or its default instead. `avenor run --resume` has no supervisor choice and treats messaging as off; a poo session created with messaging on may fail to resume when its recorded tools are unavailable.
 
 **Required:**
-- `repo_dir` — working directory for the run
+- `dir` — working directory for the run
 
 **Optional:**
 - `agent` — agent persona to run (e.g., `"jockey"`, `"butler"`). The backend resolves the name to a prompt, tool set, and permission policy

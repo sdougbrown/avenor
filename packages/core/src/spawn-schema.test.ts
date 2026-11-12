@@ -29,12 +29,13 @@ describe('spawn input schema', () => {
 
   it('gives each surface the field set its annotations name', () => {
     expect(spawnSurfaceFields('go')).toEqual([
-      'agent', 'auto_approve', 'backend', 'idempotency_key', 'label', 'launch_wrapper',
-      'messaging', 'model', 'persist_sessions', 'prompt', 'prompt_file', 'repo_dir',
-      'roster_entry', 'roster_file', 'server_url', 'supervisor_id', 'thinking', 'timeout',
+      'agent', 'auto_approve', 'backend', 'dir', 'idempotency_key', 'label',
+      'launch_wrapper', 'messaging', 'model', 'persist_sessions', 'prompt',
+      'prompt_file', 'roster_entry', 'roster_file', 'server_url', 'supervisor_id',
+      'thinking', 'timeout',
     ])
     expect(spawnSurfaceFields('mcp')).toEqual([
-      'agent', 'backend', 'label', 'model', 'prompt', 'prompt_file', 'repo_dir',
+      'agent', 'backend', 'dir', 'label', 'model', 'prompt', 'prompt_file',
       'roster_entry', 'roster_file', 'server_url', 'supervisor_id', 'thinking', 'timeout',
     ])
     expect(spawnSurfaceFields('pi')).toEqual([

@@ -95,7 +95,7 @@ Start a new agent run.
 | Parameter | Required | Description |
 |---|---|---|
 | `agent` | no | Agent persona to run. The backend resolves the name to a prompt, tool set, and permission policy. Direct identity field: independent of `model` and `backend`. Rejected when `roster_entry` is set |
-| `repo_dir` | yes | Working directory for the agent |
+| `dir` | yes | Working directory for the run |
 | `prompt` | no | Prompt text (mutually exclusive with `prompt_file`) |
 | `prompt_file` | no | Path to a prompt file |
 | `label` | no | Human-readable label for this run |
@@ -116,7 +116,7 @@ Use both `roster_file` and `roster_entry` for roster mode. Every entry inside th
 
 ```json
 {
-  "repo_dir": "/repo",
+  "dir": "/repo",
   "prompt": "Analyze the repository",
   "roster_file": "/repo/roster.json",
   "roster_entry": "planner"
@@ -246,7 +246,7 @@ The underlying control methods are in [`docs/control-protocol.md`](../../docs/co
 
 ## Typical workflow
 
-1. **Spawn a run:** `spawn(agent: "codex", repo_dir: "/path/to/project", prompt: "audit the API routes for auth gaps")`
+1. **Spawn a run:** `spawn(agent: "codex", dir: "/path/to/project", prompt: "audit the API routes for auth gaps")`
 2. **Check lifecycle when needed:** `status(run_id: "<id>", view: "lifecycle")` for progress or pending permissions.
 3. **If permission requested:** run `answer_permission` with the offered option.
 4. **Retrieve the result:** `result(run_id: "<id>")` waits and returns the complete final output.

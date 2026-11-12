@@ -19,7 +19,7 @@ func TestAvenorSpawnThreadsLaunchWrapper(t *testing.T) {
 	}
 
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:       "/tmp/test-repo",
+		Dir:           "/tmp/test-repo",
 		LaunchWrapper: []string{"nice", "-n", "5"},
 	})
 	if err != nil {
@@ -46,7 +46,7 @@ func TestAvenorSpawnRejectsEmptyLaunchWrapperElement(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:       "/tmp/test-repo",
+		Dir:           "/tmp/test-repo",
 		LaunchWrapper: []string{"nice", ""},
 	})
 	if err == nil {

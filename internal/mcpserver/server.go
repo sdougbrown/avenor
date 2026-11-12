@@ -142,7 +142,7 @@ type resultArgs struct {
 
 type spawnArgs struct {
 	Agent          string   `json:"agent,omitempty"`
-	RepoDir        string   `json:"repo_dir"`
+	Dir            string   `json:"dir"`
 	Prompt         string   `json:"prompt,omitempty"`
 	PromptFile     string   `json:"prompt_file,omitempty"`
 	Label          string   `json:"label,omitempty"`
@@ -1107,8 +1107,8 @@ func resolveSpawnIdentity(cl ControlClient, runtimeID string, result map[string]
 }
 
 func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest, args spawnArgs) (*mcp.CallToolResult, any, error) {
-	if args.RepoDir == "" {
-		return nil, nil, fmt.Errorf("repo_dir is required")
+	if args.Dir == "" {
+		return nil, nil, fmt.Errorf("dir is required")
 	}
 	if err := spawnselection.Validate(spawnselection.Input{
 		Agent:       args.Agent,
@@ -1139,7 +1139,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	sentinelPath, eventLogPath := runArtifactPaths(runID)
 
 	params := map[string]any{
-		"dir":           args.RepoDir,
+		"dir":           args.Dir,
 		"label":         label,
 		"sentinel_file": sentinelPath,
 		"on_event":      eventLogPath,
@@ -1261,7 +1261,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 		Identity:     identity,
 	})
 	info.Thinking = args.Thinking
-	info.Dir = args.RepoDir
+	info.Dir = args.Dir
 	info.AutoApprove = args.AutoApprove
 	if err := s.registry.Store(info); err != nil {
 		return nil, nil, fmt.Errorf("registry store: %w", err)

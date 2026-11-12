@@ -18,9 +18,9 @@ const expectedFields = spawnSurfaceFields('mcp')
 describe('MCP spawn schema', () => {
   it('refuses a backend the schema does not declare', () => {
     for (const backend of spawnFieldEnum('backend')) {
-      expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', backend }).success).toBe(true)
+      expect(spawnSchema.safeParse({ dir: '/tmp/repo', backend }).success).toBe(true)
     }
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', backend: 'opencode-htt' }).success).toBe(false)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', backend: 'opencode-htt' }).success).toBe(false)
   })
 
   it('takes every description from the shared spawn schema', () => {
@@ -31,29 +31,29 @@ describe('MCP spawn schema', () => {
 
   it('keeps the flat field contract and makes selectors optional', () => {
     expect(Object.keys(spawnInputShape).sort()).toEqual(expectedFields)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', agent: 'reviewer' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', model: 'provider/model' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', backend: 'agy' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', roster_file: '/repo/roster.json' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', roster_entry: 'planner' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', agent: 'reviewer' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', model: 'provider/model' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', backend: 'agy' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', roster_file: '/repo/roster.json' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', roster_entry: 'planner' }).success).toBe(true)
     expect(spawnSchema.safeParse({
-      repo_dir: '/tmp/repo',
+      dir: '/tmp/repo',
       roster_file: '/repo/roster.json',
       roster_entry: 'planner',
     }).success).toBe(true)
 
     // Exercise the remaining optional flat fields
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', prompt: 'hello' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', prompt_file: '/tmp/prompt.md' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', label: 'test-run' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', timeout: '5m' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', server_url: 'http://localhost:3000' }).success).toBe(true)
-    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo', supervisor_id: 'svc-1' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', prompt: 'hello' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', prompt_file: '/tmp/prompt.md' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', label: 'test-run' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', timeout: '5m' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', server_url: 'http://localhost:3000' }).success).toBe(true)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo', supervisor_id: 'svc-1' }).success).toBe(true)
 
     // All optional flat fields together
     expect(spawnSchema.safeParse({
-      repo_dir: '/tmp/repo',
+      dir: '/tmp/repo',
       prompt: 'hello',
       prompt_file: '/tmp/prompt.md',
       label: 'test-run',
@@ -62,7 +62,7 @@ describe('MCP spawn schema', () => {
       supervisor_id: 'svc-1',
     }).success).toBe(true)
 
-    // repo_dir is required
+    // dir is required
     expect(spawnSchema.safeParse({}).success).toBe(false)
     expect(spawnSchema.safeParse({ agent: 'reviewer' }).success).toBe(false)
 

@@ -6,7 +6,7 @@ import { THINKING_LEVELS, spawnFieldDescription, spawnFieldEnum } from '@dougbot
 // Only the shapes, and which fields this surface publishes, are written here.
 export const spawnInputShape = {
   agent: z.string().optional().describe(spawnFieldDescription('agent')),
-  repo_dir: z.string().describe(spawnFieldDescription('repo_dir')),
+  dir: z.string().describe(spawnFieldDescription('dir')),
   prompt: z.string().optional().describe(spawnFieldDescription('prompt')),
   prompt_file: z.string().optional().describe(spawnFieldDescription('prompt_file')),
   label: z.string().optional().describe(spawnFieldDescription('label')),

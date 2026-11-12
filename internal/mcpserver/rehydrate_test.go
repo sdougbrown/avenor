@@ -727,7 +727,7 @@ func TestSpawnSkipsLabelPrecheckForKeyedSpawn(t *testing.T) {
 	// request reaches the supervisor's idempotency gate (modeled here as the
 	// Spawn call).
 	_, spawnRes, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/test-repo",
+		Dir:            "/tmp/test-repo",
 		Label:          "taken",
 		IdempotencyKey: "k1",
 	})
@@ -783,8 +783,8 @@ func TestSpawnRejectsLabelClaimedByLiveRun(t *testing.T) {
 	}
 
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir: "/tmp/test-repo",
-		Label:   "taken",
+		Dir:   "/tmp/test-repo",
+		Label: "taken",
 	})
 	if err == nil || !strings.Contains(err.Error(), "label already in use: taken") {
 		t.Fatalf("error = %v, want label already in use", err)
@@ -817,8 +817,8 @@ func TestSpawnRejectsLabelClaimedByOtherSupervisor(t *testing.T) {
 	// Supervisor A's live list does not carry the label: the pre-check must
 	// reject before spawn so no run is left live but untracked.
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir: "/tmp/test-repo",
-		Label:   "shared",
+		Dir:   "/tmp/test-repo",
+		Label: "shared",
 	})
 	if err == nil || !strings.Contains(err.Error(), "label already in use: shared") ||
 		!strings.Contains(err.Error(), supB) {
@@ -866,8 +866,8 @@ func TestSpawnReclaimsLabelFromEndedRunOnOtherSupervisor(t *testing.T) {
 	// The ended run no longer holds the label: the pre-check must repoint
 	// the mapping and let the spawn proceed.
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir: "/tmp/test-repo",
-		Label:   "shared",
+		Dir:   "/tmp/test-repo",
+		Label: "shared",
 	})
 	if err != nil {
 		t.Fatalf("spawn with ended cross-supervisor holder failed: %v", err)
@@ -903,8 +903,8 @@ func TestSpawnToleratesListErrorInLabelPrecheck(t *testing.T) {
 	// A list failure must not block the spawn: the registry collision check
 	// remains the backstop.
 	_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir: "/tmp/test-repo",
-		Label:   "anything",
+		Dir:   "/tmp/test-repo",
+		Label: "anything",
 	})
 	if err != nil {
 		t.Fatalf("spawn with list-error pre-check failed: %v", err)
@@ -933,8 +933,8 @@ func TestSpawnReapsStaleLabelMapping(t *testing.T) {
 	}
 
 	_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir: "/tmp/test-repo",
-		Label:   "taken",
+		Dir:   "/tmp/test-repo",
+		Label: "taken",
 	})
 	if err != nil {
 		t.Fatalf("spawn = %v, want success after reaping the stale mapping", err)
@@ -973,8 +973,8 @@ func TestSpawnReclaimsLabelFromEndedRun(t *testing.T) {
 
 		// An ended run's label is free to re-claim: the spawn must succeed.
 		_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-			RepoDir: "/tmp/test-repo",
-			Label:   "taken",
+			Dir:   "/tmp/test-repo",
+			Label: "taken",
 		})
 		if err != nil {
 			t.Fatalf("spawn = %v, want success (an ended run does not hold the label)", err)
@@ -1004,8 +1004,8 @@ func TestSpawnReclaimsLabelFromEndedRun(t *testing.T) {
 		}
 
 		_, result, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-			RepoDir: "/tmp/test-repo",
-			Label:   "taken",
+			Dir:   "/tmp/test-repo",
+			Label: "taken",
 		})
 		if err != nil {
 			t.Fatalf("spawn = %v, want success after unlinking the ended mapping", err)

@@ -299,6 +299,6 @@ Read these against the binary before promising the drive above works end to end.
 - A rename replaces the label (it is an alias, not an extra name): after a
   child renames itself, `target "<old label>"` answers
   `no run matches "<old label>"`; address it by its new label or its run id.
-- The spawn argument is `dir`, not `repo_dir`; a `tell`/`ask` target is a run id, a
+- The spawn argument is `dir` on every surface; a `tell`/`ask` target is a run id, a
   label, `self`, or `supervisor` — a public run id is a host-surface concept, not
   a broker address.
