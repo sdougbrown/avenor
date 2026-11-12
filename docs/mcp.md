@@ -240,7 +240,7 @@ Starts a new run.
 The supervisor `resume` operation preserves the run's messaging choice. A raw `spawn` with `session_id` uses the caller's `messaging` choice or its default instead. `avenor run --resume` has no supervisor choice and treats messaging as off; a poo session created with messaging on may fail to resume when its recorded tools are unavailable.
 
 **Required:**
-- `dir` — working directory for the run
+- `dir` — working directory for the run. Before 0.47.0 this field was `repo_dir`; a client that still sends that name is refused with `unexpected additional properties ["repo_dir"]` rather than having it ignored
 
 **Optional:**
 - `agent` — agent persona to run (e.g., `"jockey"`, `"butler"`). The backend resolves the name to a prompt, tool set, and permission policy
