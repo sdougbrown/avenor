@@ -14,6 +14,7 @@ type SpawnSchemaProperty = {
   type: string
   description?: string
   enum?: string[]
+  minLength?: number
   items?: { type: string }
   'x-avenor-surfaces'?: string[]
 }

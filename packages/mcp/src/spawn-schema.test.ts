@@ -23,6 +23,17 @@ describe('MCP spawn schema', () => {
     expect(spawnSchema.safeParse({ dir: '/tmp/repo', backend: 'opencode-htt' }).success).toBe(false)
   })
 
+  it('refuses an empty dir and the pre-0.47 name', () => {
+    // The shared schema declares minLength 1 and the Go surface refuses an
+    // empty value; the supervisor would otherwise default it to its own
+    // working directory, which is not the caller's directory.
+    expect(spawnSchema.safeParse({ dir: '' }).success).toBe(false)
+    expect(spawnSchema.safeParse({ dir: '/tmp/repo' }).success).toBe(true)
+    // repo_dir is not an alias: unknown keys are stripped, so the old name
+    // leaves dir missing and the call fails here rather than at the supervisor.
+    expect(spawnSchema.safeParse({ repo_dir: '/tmp/repo' }).success).toBe(false)
+  })
+
   it('takes every description from the shared spawn schema', () => {
     for (const [name, schema] of Object.entries(spawnInputShape)) {
       expect(schema.description ?? '').toBe(spawnFieldDescription(name))

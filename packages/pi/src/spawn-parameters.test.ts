@@ -36,6 +36,12 @@ describe('pi spawn parameters', () => {
     }
   })
 
+  it('publishes the minimum length the shared schema declares for dir', () => {
+    const dir = spawnToolParameters.properties.dir as unknown as { minLength?: number }
+    expect(dir.minLength).toBe(spawnFieldProperties.dir?.minLength)
+    expect(dir.minLength).toBe(1)
+  })
+
   it('takes every description from the shared spawn schema', () => {
     // TypeBox keeps annotations on the schema object but does not type
     // `description`, so read it through its published shape.

@@ -68,6 +68,12 @@ describe('opencode spawn arguments', () => {
     expect(wait.parse(undefined)).toBe(true)
   })
 
+  it('refuses an empty dir', async () => {
+    const dir = (await spawnArgs()).dir as unknown as { safeParse: (v: unknown) => { success: boolean } }
+    expect(dir.safeParse('').success).toBe(false)
+    expect(dir.safeParse('/tmp/repo').success).toBe(true)
+  })
+
   it('takes every description from the shared spawn schema', async () => {
     for (const [name, schema] of Object.entries(await spawnArgs())) {
       expect(schema.description ?? '').toBe(spawnFieldDescription(name))

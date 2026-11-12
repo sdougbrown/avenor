@@ -3322,7 +3322,7 @@ export const spawnToolParameters = Type.Object({
   agent: Type.Optional(Type.String({ description: spawnFieldDescription('agent') })),
   prompt: Type.Optional(Type.String({ description: spawnFieldDescription('prompt') })),
   prompt_file: Type.Optional(Type.String({ description: spawnFieldDescription('prompt_file') })),
-  dir: Type.Optional(Type.String({ description: spawnFieldDescription('dir') })),
+  dir: Type.Optional(Type.String({ minLength: 1, description: spawnFieldDescription('dir') })),
   label: Type.Optional(Type.String({ description: spawnFieldDescription('label') })),
   timeout: Type.Optional(Type.String({ description: spawnFieldDescription('timeout') })),
   model: Type.Optional(Type.String({ description: spawnFieldDescription('model') })),

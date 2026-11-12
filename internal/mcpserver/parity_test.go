@@ -208,6 +208,19 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 		})
 	}
 
+	// The old name is not silently accepted: a client written against the
+	// pre-0.47.0 contract sends repo_dir, and the strict decoder refuses it
+	// instead of spawning a run with no directory.
+	t.Run("renamed dir field", func(t *testing.T) {
+		var args spawnArgs
+		if err := json.Unmarshal([]byte(`{"repo_dir":"/tmp/r"}`), &args); err == nil {
+			t.Error("spawnArgs accepted repo_dir, which 0.47.0 renamed to dir")
+		}
+		if err := json.Unmarshal([]byte(`{"dir":"/tmp/r"}`), &args); err != nil {
+			t.Errorf("spawnArgs rejected dir: %v", err)
+		}
+	})
+
 	// Mixed input: a known provider option coexisting with an unknown key must
 	// still be rejected — the strict boundary does not relax for familiar keys.
 	t.Run("known plus unknown key", func(t *testing.T) {
