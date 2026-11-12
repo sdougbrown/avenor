@@ -610,13 +610,10 @@ describe('statusTool broker peers', () => {
     expect(result).toEqual({ run_id: 'claude-1', label: 'planner', status: 'done', backend: 'claude', runtime_output_available: false })
   })
 
-  describe('keeps the existing answer for an unknown run', () => {
-    const unknown = { run_id: 'ghost-1', label: 'ghost-1', status: 'running' }
+  describe('reports an unknown run as not found', () => {
+    const notFound = 'runtime "ghost-1" not found'
     const listings: Array<[string, () => void]> = [
       ['the run is on no listing', () => peersMock.mockResolvedValueOnce({ peers: [peerRow('claude-1', { label: 'planner', status: 'ended' })] })],
-      ['two peers share the label', () => peersMock.mockResolvedValueOnce({
-        peers: [peerRow('claude-1', { label: 'ghost-1', status: 'ended' }), peerRow('claude-2', { label: 'ghost-1', status: 'ended' })],
-      })],
       ['the listing cannot be read', () => peersMock.mockRejectedValueOnce(new Error('broker offline'))],
       ['the listing is partial', () => peersMock.mockResolvedValueOnce({
         peers: [peerRow('ghost-1', { label: 'ghost-1', status: 'ended' })],
@@ -628,14 +625,15 @@ describe('statusTool broker peers', () => {
       it(`when ${name} (supervisorId path)`, async () => {
         arrange()
 
-        expect(await peerStatusTool({ runId: 'ghost-1', supervisorId })).toMatchObject(unknown)
+        await expect(peerStatusTool({ runId: 'ghost-1', supervisorId })).rejects.toThrow(new Error(notFound))
         expect(peersMock).toHaveBeenCalledTimes(1)
+        expect(peerCloseMock).toHaveBeenCalledTimes(1)
       })
 
       it(`when ${name} (singleton path)`, async () => {
         arrange()
 
-        expect(await onSingleton(() => statusTool({ runId: 'ghost-1' }))).toMatchObject(unknown)
+        await expect(onSingleton(() => statusTool({ runId: 'ghost-1' }))).rejects.toThrow(new Error(notFound))
         expect(peersMock).toHaveBeenCalledTimes(1)
       })
     }
@@ -643,8 +641,38 @@ describe('statusTool broker peers', () => {
     it('when the broker preflight fails', async () => {
       preflightMock.mockRejectedValueOnce(new Error('no broker'))
 
-      expect(await peerStatusTool({ runId: 'ghost-1', supervisorId })).toMatchObject(unknown)
+      await expect(peerStatusTool({ runId: 'ghost-1', supervisorId })).rejects.toThrow(new Error(notFound))
       expect(peersMock).not.toHaveBeenCalled()
+    })
+
+    it('with the sentence the absence gate recognizes as the supervisor\'s own', async () => {
+      const { statusReportsNoRuntime } = await import('./message-provider.js')
+      peersMock.mockResolvedValueOnce({ peers: [] })
+
+      const thrown = await peerStatusTool({ runId: 'ghost-1', supervisorId }).catch((error: unknown) => error)
+
+      expect(thrown).toBeInstanceOf(Error)
+      expect(statusReportsNoRuntime(new RpcError(-32000, (thrown as Error).message), 'ghost-1')).toBe(true)
+    })
+  })
+
+  describe('reports a label two peers share as ambiguous', () => {
+    const twins = () => peersMock.mockResolvedValueOnce({
+      peers: [peerRow('rt_a', { label: 'twin', status: 'idle' }), peerRow('rt_b', { label: 'twin', status: 'idle' })],
+    })
+    const ambiguity = '"twin" matches 2 runs: "rt_a", "rt_b"'
+
+    it('on the supervisorId path', async () => {
+      twins()
+
+      await expect(peerStatusTool({ runId: 'twin', supervisorId })).rejects.toThrow(new Error(ambiguity))
+      expect(peerCloseMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('on the singleton path', async () => {
+      twins()
+
+      await expect(onSingleton(() => statusTool({ runId: 'twin' }))).rejects.toThrow(new Error(ambiguity))
     })
   })
 
@@ -683,6 +711,35 @@ describe('statusTool broker peers', () => {
 
       expect(await peerStatusTool({ runId: 'claude-1', supervisorId })).toMatchObject({
         run_id: 'claude-1', label: 'claude-1', status: 'running',
+      })
+      brokerNotRead()
+    })
+  })
+
+  describe('on the singleton path, finds a live run on the runtime list', () => {
+    function liveByRunId() {
+      peerStatusMock.mockImplementation(async (runtimeId?: string) => {
+        if (runtimeId === 'rt-9') return { runtime_id: 'rt-9', phase: 'waiting' }
+        throw absentRuntime(runtimeId ?? '')
+      })
+      peerListMock.mockResolvedValue([{ runtime_id: 'rt-9', run_id: 'live-run', label: 'worker' }])
+    }
+
+    it('by its run id, without reading the broker', async () => {
+      liveByRunId()
+
+      const result = singleRun(await onSingleton(() => statusTool({ runId: 'live-run' })))
+
+      expect(result).toMatchObject({ run_id: 'live-run', runtime_id: 'rt-9', status: 'waiting' })
+      brokerNotRead()
+    })
+
+    it('keeping the stub when the list cannot be read', async () => {
+      peerListMock.mockRejectedValueOnce(new Error('list offline'))
+      peersMock.mockResolvedValue({ peers: [peerRow('live-run', { label: 'planner', status: 'ended' })] })
+
+      expect(await onSingleton(() => statusTool({ runId: 'live-run' }))).toMatchObject({
+        run_id: 'live-run', label: 'live-run', status: 'running',
       })
       brokerNotRead()
     })

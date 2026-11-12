@@ -6,6 +6,7 @@ import outcomeSchema from '../../../schemas/message.outcome.json'
 import peersInputSchema from '../../../schemas/peers.input.json'
 import resultFixture from '../../../schemas/message_route.result.json'
 import {
+  ambiguousName,
   assertMessageInput,
   assertPeersInput,
   executeMessage,
@@ -783,6 +784,21 @@ describe('router invariants', () => {
     await expect(executeMessage(provider, { action: 'resume', target: 'rt_9', message: 'again' }))
       .rejects.toThrow('a broker-authenticated run may resume only a run it spawned')
     expect(stateReads).toBe(0)
+  })
+
+  it('words an ambiguous target the way every tool that resolves a run words it', async () => {
+    const provider = fakeProvider({
+      name: 'tell to a shared label',
+      input: { action: 'tell', target: 'twin', message: 'hi' },
+      conditions: { callerKind: 'broker', surface: 'channeltools', targetMatch: 'ambiguous' },
+      provider: { resolved: { candidates: ['rt_a', 'rt_b'] } },
+      expect: { message: '' },
+    })
+    const sentence = '"twin" matches 2 runs: "rt_a", "rt_b"'
+
+    await expect(executeMessage(provider, { action: 'tell', target: 'twin', message: 'hi' }))
+      .rejects.toMatchObject({ code: 'ambiguous_name', message: sentence })
+    expect(ambiguousName('twin', ['rt_a', 'rt_b']).message).toBe(sentence)
   })
 
   it('leaves an in-vocabulary unlisted outcome unrendered instead of rewriting it', async () => {

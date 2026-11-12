@@ -121,7 +121,7 @@ server.registerTool('spawn', {
 })
 
 server.registerTool('status', {
-  description: 'Get lifecycle status of one or all runs. Use lifecycle view for compact polling. Without run_id, returns an object with runs (array of status objects) and count. A broker peer with no runtime answers with its identity and broker status only.',
+  description: 'Get lifecycle status of one or all runs. Use lifecycle view for compact polling. Without run_id, returns an object with runs (array of status objects) and count. A broker peer with no runtime answers with its identity and broker status only. A label shared by several peers answers with the matching run ids.',
   inputSchema: {
     run_id: z.string().optional().describe('Run ID or label to query'),
     view: z.enum(['lifecycle', 'full']).optional().describe('Response detail (default full for compatibility)'),
@@ -314,7 +314,7 @@ server.registerTool('shutdown', {
 })
 
 server.registerTool('events', {
-  description: 'Get event log for a run. A broker peer has no event log; peers action last reads its last agent message.',
+  description: 'Get event log for a run. A broker peer has no event log; peers action last reads its last agent message. A label shared by several peers answers with the matching run ids.',
   inputSchema: {
     run_id: z.string().describe('Run ID or label'),
     types: z.array(z.string()).optional().describe('Filter by event types'),

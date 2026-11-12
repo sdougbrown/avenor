@@ -104,4 +104,12 @@ describe('inspectTool', () => {
       .rejects.toThrow('this run is a broker peer with no event log; peers action last reads its last agent message')
     expect(historyMock).not.toHaveBeenCalled()
   })
+
+  it('rejects an unknown run as not found instead of inspecting a stub', async () => {
+    statusMock.mockRejectedValueOnce(new RpcError(-32000, 'runtime "ghost-9" not found'))
+
+    await expect(inspectTool({ runId: 'ghost-9', supervisorId: '/tmp/avenor-inspect.sock' }))
+      .rejects.toThrow(new Error('runtime "ghost-9" not found'))
+    expect(historyMock).not.toHaveBeenCalled()
+  })
 })

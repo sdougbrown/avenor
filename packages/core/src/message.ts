@@ -520,6 +520,16 @@ export function stripDisallowedSessionNameRunes(name: string): string {
   return name.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '')
 }
 
+/** The error for a reference that names several runs, worded once for every tool that resolves one. */
+export function ambiguousName(ref: string, candidates: string[]): ToolError {
+  const facts = {
+    target: quote(ref),
+    count: String(candidates.length),
+    candidates: quoteList(candidates),
+  }
+  return new ToolError('ambiguous_name', repair('ambiguous_name', facts), facts)
+}
+
 async function resolveTarget(provider: MessageProvider, ref: string) {
   const target = ref === 'self' ? provider.caller().runId : ref
   let resolution
@@ -533,13 +543,7 @@ async function resolveTarget(provider: MessageProvider, ref: string) {
     throw new ToolError('unknown_target', repair('unknown_target', facts), facts)
   }
   if (resolution.match === 'ambiguous') {
-    const candidates = resolution.candidates ?? []
-    const facts = {
-      target: quote(ref),
-      count: String(candidates.length),
-      candidates: quoteList(candidates),
-    }
-    throw new ToolError('ambiguous_name', repair('ambiguous_name', facts), facts)
+    throw ambiguousName(ref, resolution.candidates ?? [])
   }
   return resolution
 }

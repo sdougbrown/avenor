@@ -291,15 +291,33 @@ describe('eventsTool broker peers', () => {
     expect(closeMock).toHaveBeenCalledTimes(1)
   })
 
+  describe('reports a label two peers share as ambiguous', () => {
+    const twins = () => listed(
+      peerRow('rt_a', { label: 'twin', status: 'running' }),
+      peerRow('rt_b', { label: 'twin', status: 'running' }),
+    )
+    const ambiguity = '"twin" matches 2 runs: "rt_a", "rt_b"'
+
+    it('on the supervisorId path', async () => {
+      twins()
+
+      await expect(eventsTool({ runId: 'twin', supervisorId })).rejects.toThrow(new Error(ambiguity))
+      expect(historyMock).not.toHaveBeenCalled()
+      expect(closeMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('on the singleton path', async () => {
+      twins()
+
+      await expect(onSingleton(() => eventsTool({ runId: 'twin' }))).rejects.toThrow(new Error(ambiguity))
+    })
+  })
+
   describe('keeps the existing error for an unknown run', () => {
     const existing = 'unable to resolve run ghost-1: rpc error [-32000]: runtime "ghost-1" not found'
     const listings: Array<[string, () => void]> = [
       ['the run is on no listing', () => listed(peerRow('claude-1', { label: 'planner', status: 'running' }))],
       ['the listing is empty', () => listed()],
-      ['two peers share the label', () => listed(
-        peerRow('claude-1', { label: 'ghost-1', status: 'running' }),
-        peerRow('claude-2', { label: 'ghost-1', status: 'running' }),
-      )],
       ['the listing cannot be read', () => peersMock.mockRejectedValue(new Error('broker offline'))],
       ['the listing is partial', () => peersMock.mockResolvedValue({
         peers: [peerRow('ghost-1', { label: 'ghost-1', status: 'running' })],
