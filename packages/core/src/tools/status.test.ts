@@ -644,6 +644,16 @@ describe('statusTool broker peers', () => {
       await expect(peerStatusTool({ runId: 'ghost-1', supervisorId })).rejects.toThrow(new Error(notFound))
       expect(peersMock).not.toHaveBeenCalled()
     })
+
+    it('with the sentence the absence gate recognizes as the supervisor\'s own', async () => {
+      const { statusReportsNoRuntime } = await import('./message-provider.js')
+      peersMock.mockResolvedValueOnce({ peers: [] })
+
+      const thrown = await peerStatusTool({ runId: 'ghost-1', supervisorId }).catch((error: unknown) => error)
+
+      expect(thrown).toBeInstanceOf(Error)
+      expect(statusReportsNoRuntime(new RpcError(-32000, (thrown as Error).message), 'ghost-1')).toBe(true)
+    })
   })
 
   describe('reports a label two peers share as ambiguous', () => {

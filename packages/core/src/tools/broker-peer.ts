@@ -27,9 +27,19 @@ export async function lookupBrokerPeer(
     const listing = await client.messagePeers({ generation })
     if (listing.peers_error) return { match: 'none' }
     const { resolution, row } = matchPeerRows(peerRecords(listing), ref)
-    if (resolution.match === 'unique' && row) return { match: 'unique', peer: row }
-    if (resolution.match === 'ambiguous') return { match: 'ambiguous', candidates: resolution.candidates ?? [] }
-    return { match: 'none' }
+    switch (resolution.match) {
+      case 'unique':
+        return row ? { match: 'unique', peer: row } : { match: 'none' }
+      case 'ambiguous':
+        return { match: 'ambiguous', candidates: resolution.candidates ?? [] }
+      case 'none':
+        return { match: 'none' }
+      default: {
+        const unhandled: never = resolution.match
+        void unhandled
+        return { match: 'none' }
+      }
+    }
   } catch {
     return { match: 'none' }
   }

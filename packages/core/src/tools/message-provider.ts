@@ -177,7 +177,12 @@ export function isGenerationMismatchError(error: unknown): boolean {
  */
 export function statusReportsNoRuntime(error: unknown, runId: string): boolean {
   if (!(error instanceof RpcError) || error.code !== -32000) return false
-  return rpcText(error) === `runtime ${goQuote(runId)} not found`
+  return rpcText(error) === runtimeNotFoundMessage(runId)
+}
+
+/** The sentence the supervisor answers for a runtime it does not run. */
+export function runtimeNotFoundMessage(runId: string): string {
+  return `runtime ${goQuote(runId)} not found`
 }
 
 

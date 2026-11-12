@@ -10,8 +10,7 @@ import {
 import { getSupervisorClient as realGetSupervisorClient } from './get-supervisor-client.js'
 import { brokerPeerStatus, lookupBrokerPeer, type BrokerPeerLookup } from './broker-peer.js'
 import { ambiguousName } from '../message.js'
-import { goQuote } from '../messaging-text.js'
-import { statusReportsNoRuntime } from './message-provider.js'
+import { runtimeNotFoundMessage, statusReportsNoRuntime } from './message-provider.js'
 import { sentinelStatusToResult } from './sentinel-status.js'
 import { findExternalRun, listExternalRuns } from './run-registry.js'
 import { findLocalRunByReference, findLocalRunByRuntimeId } from './run-resolution.js'
@@ -347,7 +346,7 @@ async function queryRuntimeStatus(
 function unresolvedRunError(runId: string, lookup: Exclude<BrokerPeerLookup, { match: 'unique' }>): Error {
   return lookup.match === 'ambiguous'
     ? ambiguousName(runId, lookup.candidates)
-    : new Error(`runtime ${goQuote(runId)} not found`)
+    : new Error(runtimeNotFoundMessage(runId))
 }
 
 async function queryLiveStatus(
