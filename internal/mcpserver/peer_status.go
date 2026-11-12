@@ -8,27 +8,34 @@ import (
 )
 
 // brokerPeer finds key in the broker's peer listing, the one `peers list`
-// reads: an exact run id, else an exact label that names a single peer. A run a
-// plugin session registered, or a run seen through a parent, lives only there
-// and has no runtime on the supervisor. A listing that cannot be read, or a
-// label two peers share, answers no peer, so the caller keeps its own failure.
-func (s *Server) brokerPeer(ctx context.Context, cl ControlClient, supervisorPath, key string) (messaging.PeerRecord, bool) {
+// reads: an exact run id, else an exact label. A run a plugin session
+// registered, or a run seen through a parent, lives only there and has no
+// runtime on the supervisor. The resolution says what the listing named: a
+// unique match carries the peer, an ambiguous one carries the candidate run
+// ids. A listing that cannot be read answers no match, so the caller keeps its
+// own failure.
+func (s *Server) brokerPeer(ctx context.Context, cl ControlClient, supervisorPath, key string) (messaging.PeerRecord, messaging.Resolution) {
+	none := messaging.Resolution{Match: messaging.MatchNone}
 	provider, err := newMCPMessageProvider(ctx, s, cl, supervisorPath)
 	if err != nil {
-		return messaging.PeerRecord{}, false
+		return messaging.PeerRecord{}, none
 	}
 	peers, err := provider.listedPeers(ctx)
 	if err != nil {
-		return messaging.PeerRecord{}, false
+		return messaging.PeerRecord{}, none
 	}
-	if res := matchListedPeer(peers, key); res.Match == messaging.MatchUnique {
+	res := matchListedPeer(peers, key)
+	switch res.Match {
+	case messaging.MatchAmbiguous:
+		return messaging.PeerRecord{}, res
+	case messaging.MatchUnique:
 		for _, peer := range peers {
 			if peer.RunID == res.RunID {
-				return peer, true
+				return peer, res
 			}
 		}
 	}
-	return messaging.PeerRecord{}, false
+	return messaging.PeerRecord{}, none
 }
 
 // brokerPeerStatus is the status a broker peer can answer: its identity and the

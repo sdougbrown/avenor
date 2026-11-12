@@ -23,6 +23,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runstate"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/spawnselection"
@@ -283,7 +284,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "status",
-		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission. Without run_id, returns an object with runs (array of status objects) and count. The wait budget is approximate: a single underlying status poll may add up to its own timeout. A broker peer with no runtime answers with its identity and broker status only, and cannot be waited on.",
+		Description: "Get lifecycle status of avenor runs; optionally wait for terminal, phase_change, turn_complete, or permission. Without run_id, returns an object with runs (array of status objects) and count. The wait budget is approximate: a single underlying status poll may add up to its own timeout. A broker peer with no runtime answers with its identity and broker status only, and cannot be waited on. A label shared by several peers answers with the matching run ids.",
 	}, s.handleAvenorStatus)
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -313,7 +314,7 @@ func NewServer(opts Options) (*Server, error) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "events",
-		Description: "Read recent events from a run's event log. A broker peer has no event log: use peers action last.",
+		Description: "Read recent events from a run's event log. A broker peer has no event log: use peers action last. A label shared by several peers answers with the matching run ids.",
 	}, s.handleAvenorEvents)
 
 	// The merged tools publish the flat object schema compiled from the shared
@@ -491,7 +492,10 @@ func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolReques
 	}
 	if err != nil {
 		if ri == nil && statusReportsNoRuntime(err, key) {
-			if peer, ok := s.brokerPeer(ctx, cl, supervisorPath, key); ok {
+			switch peer, res := s.brokerPeer(ctx, cl, supervisorPath, key); res.Match {
+			case messaging.MatchAmbiguous:
+				return nil, statusToolOutput{}, router.AmbiguousName(key, res.Candidates)
+			case messaging.MatchUnique:
 				if condition != "" {
 					return nil, statusToolOutput{}, errBrokerPeerNoWait
 				}
@@ -595,7 +599,7 @@ func (s *Server) lookupRun(cl ControlClient, supervisorPath, key string) (*RunIn
 			id, _ := entries[i]["runtime_id"].(string)
 			ids = append(ids, id)
 		}
-		return nil, fmt.Errorf("ambiguous label %s: matches runtimes %v", key, ids)
+		return nil, router.AmbiguousName(key, ids)
 	}
 	if matched != -1 {
 		s.reapStaleLabel(supervisorPath, entries, entries[matched])
@@ -1501,7 +1505,10 @@ func (s *Server) handleAvenorEvents(ctx context.Context, req *mcp.CallToolReques
 			return nil, nil, err
 		}
 		if ri == nil {
-			if _, ok := s.brokerPeer(ctx, cl, supervisorPath, args.RunID); ok {
+			switch _, res := s.brokerPeer(ctx, cl, supervisorPath, args.RunID); res.Match {
+			case messaging.MatchAmbiguous:
+				return nil, nil, router.AmbiguousName(args.RunID, res.Candidates)
+			case messaging.MatchUnique:
 				return nil, nil, errBrokerPeerNoEvents
 			}
 			return nil, nil, fmt.Errorf("run not found in registry")
