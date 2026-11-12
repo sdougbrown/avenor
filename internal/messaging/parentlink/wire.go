@@ -3,6 +3,7 @@ package parentlink
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -99,6 +100,44 @@ func statusFailure(status int, body envelope) error {
 		return fmt.Errorf("%w: the peer broker refused the request%s", messaging.ErrInvalidRequest, detail)
 	}
 	return fmt.Errorf("%w: the peer broker answered %d%s", ErrParentUnavailable, status, detail)
+}
+
+// remoteReadFailure classifies a read that could not reach the broker holding
+// the run, or that broker's own failure, as messaging.ErrRemoteReadFailed. Every
+// other error is a verdict about the run and passes through.
+func remoteReadFailure(err error) error {
+	if errors.Is(err, ErrParentUnavailable) {
+		return fmt.Errorf("%w: %v", messaging.ErrRemoteReadFailed, err)
+	}
+	return err
+}
+
+// decodePeerLast reads one /last_message response, whichever broker answered it.
+func decodePeerLast(status int, raw []byte) (messaging.PeerLast, error) {
+	if _, err := decode(status, raw); err != nil {
+		return messaging.PeerLast{}, err
+	}
+	var body struct {
+		RunID       string `json:"run_id"`
+		Label       string `json:"label"`
+		HasRecord   bool   `json:"has_record"`
+		FinalOutput string `json:"final_output"`
+		StopReason  string `json:"stop_reason"`
+		Truncated   bool   `json:"final_output_truncated"`
+		At          int64  `json:"at"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return messaging.PeerLast{}, fmt.Errorf("%w: %v", ErrUnsupportedParentProtocol, err)
+	}
+	return messaging.PeerLast{
+		RunID:      body.RunID,
+		Label:      body.Label,
+		HasRecord:  body.HasRecord,
+		Text:       body.FinalOutput,
+		StopReason: body.StopReason,
+		Truncated:  body.Truncated,
+		At:         body.At,
+	}, nil
 }
 
 // outcomeOf reports the outcome a response carries, for a caller that received

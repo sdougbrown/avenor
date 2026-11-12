@@ -2085,7 +2085,7 @@ func (b *Broker) handleLastMessage(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		// The reason names no parent address or dial error: a client's tool result
 		// carries it to a model.
-		writeJSONBody(w, http.StatusBadGateway, map[string]any{"error": messaging.ErrParentReadFailed.Error()})
+		writeJSONBody(w, http.StatusBadGateway, map[string]any{"error": messaging.ErrRemoteReadFailed.Error()})
 		return
 	}
 	writeJSONBody(w, http.StatusOK, map[string]any{

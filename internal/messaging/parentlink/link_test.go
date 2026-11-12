@@ -723,7 +723,7 @@ func TestLinkLastReportsAFailedParentApartFromAMissingRun(t *testing.T) {
 	link := newTestLink(t, stub, "gen-a")
 
 	err := func() error { _, err := link.Last(testContext(t), "run-b"); return err }()
-	if !errors.Is(err, messaging.ErrParentReadFailed) || errors.Is(err, messaging.ErrTargetUnavailable) {
-		t.Fatalf("Last error = %v, want ErrParentReadFailed and not target-unavailable", err)
+	if !errors.Is(err, messaging.ErrRemoteReadFailed) || errors.Is(err, messaging.ErrTargetUnavailable) {
+		t.Fatalf("Last error = %v, want ErrRemoteReadFailed and not target-unavailable", err)
 	}
 }

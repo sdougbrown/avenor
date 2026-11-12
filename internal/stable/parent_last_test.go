@@ -118,9 +118,8 @@ func TestSupervisorLastReportsAParentRunWithNoTurnAsHavingNone(t *testing.T) {
 }
 
 // TestSupervisorLastRefusesARunAnotherBranchOwns pins the limit of the parent
-// read: the hub holds a sibling branch's run only as an adopted record, whose
-// turn lives on the owning branch. Answering from that record would report "no
-// turn recorded" for a run that has one, so the read refuses it as unknown.
+// read: a sibling branch's run is not visible to a branch, so the hub refuses
+// the read it forwards for this branch's run as an unknown target.
 func TestSupervisorLastRefusesARunAnotherBranchOwns(t *testing.T) {
 	t.Parallel()
 	parentBroker, _ := startTestParentBroker(t)
@@ -170,8 +169,8 @@ func TestSupervisorLastReportsAnUnreachableParentApartFromAMissingRun(t *testing
 		t.Fatal("SessionLast with the parent gone succeeded")
 	}
 	var toolErr *router.ToolError
-	if !errors.As(err, &toolErr) || toolErr.Code != "refused" || toolErr.Message != messaging.ErrParentReadFailed.Error() {
-		t.Fatalf("SessionLast with the parent gone = %v, want a refused failed read carrying %q", err, messaging.ErrParentReadFailed)
+	if !errors.As(err, &toolErr) || toolErr.Code != "refused" || toolErr.Message != messaging.ErrRemoteReadFailed.Error() {
+		t.Fatalf("SessionLast with the parent gone = %v, want a refused failed read carrying %q", err, messaging.ErrRemoteReadFailed)
 	}
 	if strings.Contains(err.Error(), parentURL) {
 		t.Fatalf("the failure %q names the parent's address", err)
