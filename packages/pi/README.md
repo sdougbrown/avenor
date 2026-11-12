@@ -206,9 +206,9 @@ Available tools for LLM sub-agent management:
 | `avenor_workflow` | One workflow tool with an explicit `action`: `status`, `inspect`, `events`, `wait`, `ready`, `controller_status`, `gate`, `complete` or `cancel`. Read-only actions need no permission; `gate`, `complete` and `cancel` keep their authority checks. |
 | `avenor_shutdown` | Shut down the avenor supervisor |
 
-### Direct and roster spawns
+### Direct and roster modes
 
-Direct mode permits `agent`, `model`, and `backend` to be omitted independently, including a backend-only request; omitted values use runtime defaults. Pi supplies `backend: "pi"` for direct tool calls when no backend is given. Roster mode uses both `roster_file` and `roster_entry`, and leaves backend selection to the roster entry instead of applying Pi's direct default:
+Direct mode permits `agent`, `model`, and `backend` to be omitted independently, including a backend-only request; omitted values use runtime defaults. Pi supplies `backend: "pi"` in direct mode when no backend is given. Roster mode uses both `roster_file` and `roster_entry`, and leaves backend selection to the roster entry instead of applying Pi's direct default:
 
 ```json
 {

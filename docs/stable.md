@@ -103,8 +103,8 @@ Spawn parameters (all optional except one prompt source):
 | `--model` | string | Backend-specific model ID (e.g. `claude-sonnet-4-5`) |
 | `--thinking` | string | Run-level backend-native reasoning level; validated against the effective backend |
 | `--backend` | string | Runtime backend (opencode-acp, opencode-http, codex-app-server, agy, gemini-acp, cursor-acp, pi). Defaults to opencode-acp in direct mode |
-| `--roster-file` | string | Roster map for direct selection, or root workflow fallback |
-| `--roster-entry` | string | Entry key for direct selection; invalid with `--loop-file` or `--team-file` |
+| `--roster-file` | string | Roster map for roster mode, or root workflow fallback |
+| `--roster-entry` | string | Entry key for roster mode; invalid with `--loop-file` or `--team-file` |
 | `--server-url` | string | External ACP server endpoint for opencode-http backend |
 | `--on-event` | string | Path to write NDJSON events. Auto-created under `$TMPDIR/avenor-stable-<euid>/run_<supervisor_run_id>/<runtime_id>/events.ndjson` if not set |
 | `--sentinel-file` | string | Path to write completion sentinel (exit code, session ID, stop reason). Auto-created under `$TMPDIR/avenor-stable-<euid>/run_<supervisor_run_id>/<runtime_id>/sentinel.env` if not set |
@@ -144,7 +144,7 @@ avenor control --socket /tmp/avenor-stable.sock spawn \
   --roster-entry planner
 ```
 
-Direct selection requires the `roster_file`/`roster_entry` pair and excludes direct `agent`, `model`, and `backend` overrides. Without roster selection, direct `agent`, `model`, and `backend` are independently optional: omitting agent and model uses the selected backend's defaults, and `--backend opencode-acp` alone is valid. In roster mode the entry's backend wins; stable does not apply its direct default backend over the entry.
+Roster mode requires the `roster_file`/`roster_entry` pair and excludes direct `agent`, `model`, and `backend` overrides. In direct mode, `agent`, `model`, and `backend` are independently optional: omitting agent and model uses the selected backend's defaults, and `--backend opencode-acp` alone is valid. In roster mode the entry's backend wins; stable does not apply its direct default backend over the entry.
 
 A roster phase in a loop or team config is a per-phase override of the run-level backend, agent, and model. Phases without `roster_entry` retain the existing run-level selection. The command-level `--roster-file` is only a root workflow fallback; `--roster-entry` is never a workflow selector. A declared workflow `roster_file` is resolved relative to that loop/team config, while a relative command fallback is resolved relative to the selected `--dir`. Nested stable workflow behavior is unchanged: the CLI-only roster inheritance rule does not apply to stable nesting. Use a roster declaration in the nested config where stable's existing workflow contract requires one.
 

@@ -123,7 +123,7 @@ Use both `roster_file` and `roster_entry` for roster mode. Every entry inside th
 }
 ```
 
-The roster map is strict and currently supports only `backend`, `agent`, and `model` in each entry. `system` and `thinking` are not roster fields. The `thinking` argument remains run-level and is validated against the effective backend chosen by the direct request or roster entry. A resumed session cannot switch to a different backend.
+The roster map is strict: `system` and unknown entry fields are rejected. An entry's `thinking` is a default, so a run-level `thinking` still wins. Whichever value applies is validated against the effective backend chosen by direct mode or by the roster entry. A resumed session cannot switch to a different backend.
 
 ### `status`
 

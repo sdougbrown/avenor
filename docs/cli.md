@@ -29,8 +29,8 @@ avenor run [flags]
 | `--prompt-file` | (none) | Path to prompt file; mutually exclusive with `--prompt` |
 | `--loop-file` | (none) | Path to multi-phase loop config (JSON, YAML, or TOML); enables looping mode (incompatible with `--resume`) |
 | `--team-file` | (none) | Path to a parallel-team config; enables team mode. See [team.md](team.md#team-config-file) |
-| `--roster-file` | (none) | Path to a roster map (JSON, YAML, or TOML) for direct selection, or the root workflow fallback |
-| `--roster-entry` | (none) | Entry key within `--roster-file` for a direct spawn; invalid with a workflow file |
+| `--roster-file` | (none) | Path to a roster map (JSON, YAML, or TOML) for roster mode, or the root workflow fallback |
+| `--roster-entry` | (none) | Entry key within `--roster-file` for roster mode; invalid with a workflow file |
 | `--label` | (none) | Free-form label for log correlation; appears in events and sentinel |
 | `--dir` | `.` | Working directory for the agent |
 | `--resume` | (none) | Resume an existing session by ID; incompatible with `--loop-file`. Messaging is off for this path, so a poo session created with messaging on may fail to resume if its recorded tools are unavailable |
@@ -167,7 +167,7 @@ result too, so inspect the outcome before treating it as success.
 
 See [loop.md](loop.md) for multi-phase loop config.
 
-### Roster selection
+### Roster mode
 
 A roster is a map from a name to a complete backend/agent/model loadout. `roster_file` names the map; `roster_entry` names one key inside it. Every entry must contain `backend` and at least one of `agent` or `model`. An entry may also carry `thinking`. Roster files can be authored in JSON, YAML, or TOML — the format is detected from the file extension:
 
@@ -191,14 +191,14 @@ A roster is a map from a name to a complete backend/agent/model loadout. `roster
 
 `thinking` is a **default, not part of the identity**: an explicit `--thinking` wins over the entry's value, so a roster only supplies the level when the caller did not. An unknown level is rejected when the roster loads, with the offending entry named. Whether a level is usable at all still depends on the backend, and that check happens when the run starts. In loop and team configs, a per-phase roster entry supplies the same default for that phase: the run-level `--thinking` still wins when set, and the merged level is validated against the phase's resolved backend before the phase starts.
 
-Direct mode selects an entry with both flags and does not accept direct identity overrides:
+Roster mode selects an entry with both flags and does not accept direct identity overrides:
 
 ```sh
 avenor run --prompt "Analyze the repository" \
   --roster-file /repo/roster.json --roster-entry planner
 ```
 
-The direct selector is intentionally permissive when no roster is selected: `--agent`, `--model`, and `--backend` are independently optional. Any combination of the three may be supplied — including none at all — and omitted identity values use the selected runtime's defaults, and the last command uses the explicit backend with no agent or model:
+Direct mode is intentionally permissive: `--agent`, `--model`, and `--backend` are independently optional. Any combination of the three may be supplied, including none at all. Omitted identity values use the selected runtime's defaults. The last command uses the explicit backend with no agent or model:
 
 ```sh
 avenor run --prompt "Use the runtime defaults"
@@ -207,7 +207,7 @@ avenor run --prompt "Use this model" --model provider/model
 avenor run --prompt "Use backend defaults" --backend opencode-acp
 ```
 
-`--roster-file` and `--roster-entry` must be supplied together for a direct request. A roster request cannot also supply `--agent`, `--model`, or `--backend`; the roster entry supplies all three identity fields. A roster file is strict: `system` and unknown entry fields are rejected in all formats. An entry's `thinking` is only a default, so a run-level `--thinking` still wins and is checked against the effective backend selected by the direct entry or by each workflow phase.
+`--roster-file` and `--roster-entry` must be supplied together for roster mode. Roster mode cannot also supply `--agent`, `--model`, or `--backend`; the roster entry supplies all three identity fields. A roster file is strict: `system` and unknown entry fields are rejected in all formats. An entry's `thinking` is only a default, and a run-level `--thinking` still wins. Either way the level is checked against the effective backend, selected by direct mode or by the workflow phase.
 
 For a workflow, `--roster-file` is only a root fallback and `--roster-entry` is invalid. The workflow config selects entries per direct phase:
 
@@ -240,9 +240,9 @@ avenor run --dir /tmp/avenor-roster-demo --loop-file /tmp/avenor-roster-demo/loo
 
 A phase roster entry overrides the run-level backend, agent, and model for that phase. Phases without an entry retain the existing run-level selection rules. `roster_entry` is valid only for a direct prompt or prompt-file phase, not for a phase dispatching `loop_file` or `team_file`.
 
-For CLI workflows, a declared `roster_file` is resolved relative to its loop/team config. If the root config has no declaration, the command-level `--roster-file` fallback is resolved relative to `--dir`; nested CLI loads do not reuse that fallback. A child with no declaration inherits the already loaded parent entries, recursively; a child declaration replaces them. Stable-mode nesting keeps its existing behavior and does not gain this CLI-only inheritance rule. For direct selection, pass a path that is valid from the invoking process (an absolute path avoids ambiguity).
+For CLI workflows, a declared `roster_file` is resolved relative to its loop/team config. If the root config has no declaration, the command-level `--roster-file` fallback is resolved relative to `--dir`; nested CLI loads do not reuse that fallback. A child with no declaration inherits the already loaded parent entries, recursively; a child declaration replaces them. Stable-mode nesting keeps its existing behavior and does not gain this CLI-only inheritance rule. For a roster-mode request, pass a path that is valid from the invoking process (an absolute path avoids ambiguity).
 
-A phase with `resume_from_previous: true` must match four values stored for the session: effective backend, agent, model, and agent profile. If its roster selection changes any value, Avenor fails the phase before creating a provider. Matching only the backend is insufficient.
+A phase with `resume_from_previous: true` must match four values stored for the session: effective backend, agent, model, and agent profile. If its roster entry changes any value, Avenor fails the phase before creating a provider. Matching only the backend is insufficient.
 
 ## avenor verify
 
