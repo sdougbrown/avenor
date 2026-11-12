@@ -34,6 +34,10 @@ const subscriberBuffer = 256
 // subscriber already had queued, so a stuck reader cannot hold up shutdown.
 const subscriberFlushTimeout = 250 * time.Millisecond
 
+// cancelAckTimeout bounds how long a cancel waits for its acknowledgement to be
+// written before the run is cancelled anyway.
+const cancelAckTimeout = time.Second
+
 const maxSendToParentMessageBytes = 64 * 1024
 
 var dialControlSocket = net.DialTimeout
@@ -1201,8 +1205,8 @@ func (s *ControlServer) handleConn(c *connState) {
 		}
 		res := s.dispatch(c, req)
 		if res == asyncResponse {
-			// The response is written by the background goroutine once the
-			// long-running handler completes or is cancelled.
+			// The handler wrote the response itself, inline or from a background
+			// goroutine once a long-running handler completes or is cancelled.
 			continue
 		}
 		if req.ID != nil {
@@ -1240,10 +1244,26 @@ const codeWaitTurnTimeout = -32020
 // requested timeout elapsed before the runtime's turn settled.
 var ErrWaitTurnTimeout = errors.New("wait_turn: timeout before the runtime's turn settled")
 
-// asyncResponse marks a request dispatched to a background goroutine; the
-// response is written when the goroutine completes, so handleConn must not
-// write it a second time.
+// asyncResponse marks a request whose handler writes the response itself, from
+// a background goroutine or inline, so handleConn must not write it a second
+// time.
 var asyncResponse = Response{JSONRPC: "2.0"}
+
+// answerThenRun calls answer, then run. When answer has not returned within
+// wait, because its connection stopped draining, run starts anyway, so a client
+// that never reads its socket cannot keep the action from happening. A nil run
+// only answers. Otherwise run is called exactly once.
+func answerThenRun(answer, run func(), wait time.Duration) {
+	if run == nil {
+		answer()
+		return
+	}
+	timer := time.AfterFunc(wait, run)
+	answer()
+	if timer.Stop() {
+		run()
+	}
+}
 
 // messageTransport resolves the shared transport for one message_* request and
 // maps a lookup failure onto the wire error the verb returns.
@@ -1465,10 +1485,15 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if !s.ensureOwner(c) {
 			return failure(req.ID, -32010, "permission_denied", nil)
 		}
-		if s.cancelFn != nil {
-			s.cancelFn()
-		}
-		return success(req.ID, map[string]any{"ok": true})
+		// The acknowledgement is written before the run is cancelled. Cancelling
+		// starts the run's teardown, which stops this server and closes the
+		// connection, so a response written after the cancel can lose that race.
+		answerThenRun(func() {
+			if req.ID != nil {
+				_ = c.writeJSON(success(req.ID, map[string]any{"ok": true}))
+			}
+		}, s.cancelFn, cancelAckTimeout)
+		return asyncResponse
 	case "answer_permission":
 		if rtID := runtimeIDFromParams(req.Params); rtID != "" {
 			if s.stableHandler == nil {
