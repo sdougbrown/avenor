@@ -16,6 +16,29 @@ import (
 	"github.com/sdougbrown/avenor/internal/token"
 )
 
+// newSupervisorOnReservedAddr builds a supervisor whose broker binds a reserved
+// loopback address. The reservation is released before the bind, so another
+// process can take the port in between: NewSupervisor then has no broker and no
+// parent link, and the bind error survives only in brokerStartErr, so a test that
+// waits on the broker times out without saying why. It retries on a fresh
+// address until the bind holds.
+func newSupervisorOnReservedAddr(t *testing.T, config func(addr string) Config) (*Supervisor, string) {
+	t.Helper()
+	const attempts = 5
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		addr := reserveStableLoopbackAddr(t)
+		sup := newTestSupervisor(t, config(addr))
+		if sup.brokerStartErr == nil {
+			return sup, addr
+		}
+		lastErr = sup.brokerStartErr
+		_ = sup.Shutdown("kill")
+	}
+	t.Fatalf("the broker could not bind a reserved loopback address in %d attempts: %v", attempts, lastErr)
+	return nil, ""
+}
+
 // reserveStableLoopbackAddr reserves a loopback port and releases it so a test
 // can bind the same fixed address.
 func reserveStableLoopbackAddr(t *testing.T) string {
@@ -140,15 +163,16 @@ func TestAdvertiseURLWithoutListenerPublishesNoURL(t *testing.T) {
 // still serves this host's children.
 func TestAdvertisedBrokerURLIsPublishedBesideControlSocket(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	addr := reserveStableLoopbackAddr(t)
 	socketPath := newStableSocketPath(t, "brokerurl-advertise")
-	sup := newTestSupervisor(t, Config{
-		ControlSocket:      socketPath,
-		BrokerAddr:         addr,
-		BrokerAdvertiseURL: "https://hub.example.com:8443/",
-		MaxRuntimes:        1,
-		Stderr:             io.Discard,
-		ShutdownTimeout:    time.Second,
+	sup, addr := newSupervisorOnReservedAddr(t, func(addr string) Config {
+		return Config{
+			ControlSocket:      socketPath,
+			BrokerAddr:         addr,
+			BrokerAdvertiseURL: "https://hub.example.com:8443/",
+			MaxRuntimes:        1,
+			Stderr:             io.Discard,
+			ShutdownTimeout:    time.Second,
+		}
 	})
 	done := startStableRun(t, sup, socketPath)
 
@@ -185,13 +209,15 @@ func TestAdvertisedBrokerURLIsPublishedBesideControlSocket(t *testing.T) {
 // stays the bound address it can actually dial.
 func TestSpawnResultKeepsTheBoundBrokerURL(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	addr := reserveStableLoopbackAddr(t)
-	sup := newTestSupervisor(t, Config{
-		ControlSocket:      newStableSocketPath(t, "brokerurl-advertise-spawn"),
-		BrokerAddr:         addr,
-		BrokerAdvertiseURL: "https://hub.example.com",
-		MaxRuntimes:        1,
-		Stderr:             io.Discard,
+	socketPath := newStableSocketPath(t, "brokerurl-advertise-spawn")
+	sup, addr := newSupervisorOnReservedAddr(t, func(addr string) Config {
+		return Config{
+			ControlSocket:      socketPath,
+			BrokerAddr:         addr,
+			BrokerAdvertiseURL: "https://hub.example.com",
+			MaxRuntimes:        1,
+			Stderr:             io.Discard,
+		}
 	})
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		return &stableFakeProvider{events: make(chan events.Event, 1)}, nil
@@ -447,12 +473,14 @@ func TestBrokerURLRecordRemovedWhenStartupFailsAfterPublication(t *testing.T) {
 // the broker listener, so a fixed hub port is what gets published.
 func TestSupervisorBindsConfiguredBrokerAddr(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	addr := reserveStableLoopbackAddr(t)
-	sup := newTestSupervisor(t, Config{
-		ControlSocket: newStableSocketPath(t, "brokeraddr"),
-		BrokerAddr:    addr,
-		MaxRuntimes:   1,
-		Stderr:        io.Discard,
+	socketPath := newStableSocketPath(t, "brokeraddr")
+	sup, addr := newSupervisorOnReservedAddr(t, func(addr string) Config {
+		return Config{
+			ControlSocket: socketPath,
+			BrokerAddr:    addr,
+			MaxRuntimes:   1,
+			Stderr:        io.Discard,
+		}
 	})
 	t.Cleanup(func() { _ = sup.broker.Stop() })
 
