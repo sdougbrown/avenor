@@ -462,6 +462,14 @@ These are the same methods as above but applied to a specific child runtime inst
 - `interrupt_and_prompt {"runtime_id":"rt_1","text":"Stop and do this","keep_queue":false}` — interrupt and re-prompt. Requires ownership.
 - `answer_permission {"runtime_id":"rt_1","request_id":"req_1","option_id":"allow","message":"optional write-in"}` — answer a permission for one runtime. `message` is optional unless the selected option requires it. Requires ownership.
 
+A `status` for a runtime this supervisor does not run answers `-32000` with the sentence it has always sent, plus the code and id that name the same absence:
+
+```json
+{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"runtime \"rt_ghost\" not found","data":{"code":"runtime_not_found","runtime_id":"rt_ghost"}}}
+```
+
+A client reads `data.code` and falls back to the message, which a supervisor released before this code sends alone. A failure that is not an absence carries no `data`.
+
 ### Workflow methods
 
 The `workflow.*` methods drive a [durable workflow](workflow.md). They are dispatched to an optional workflow handler; when the supervisor has no workflow support (no `--workflow-root` manager), they return `-32601` (`method not found`). They do not use the run-scoped ownership model.

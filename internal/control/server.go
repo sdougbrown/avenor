@@ -1394,12 +1394,15 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			if s.stableHandler == nil {
 				snap := s.oneShotSnapshot()
 				if rtID != snap.RunID {
-					return failure(req.ID, -32000, fmt.Sprintf("runtime %q not found", rtID), nil)
+					return runtimeNotFound(req.ID, rtID)
 				}
 				return success(req.ID, s.oneShotEntry(snap))
 			}
 			result, err := s.stableHandler.RuntimeStatus(rtID)
 			if err != nil {
+				if errors.Is(err, ErrRuntimeNotFound) {
+					return runtimeNotFound(req.ID, rtID)
+				}
 				return failure(req.ID, -32000, err.Error(), nil)
 			}
 			return success(req.ID, result)

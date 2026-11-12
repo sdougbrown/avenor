@@ -2186,6 +2186,7 @@ type mockStableHandler struct {
 	spawnMCPCalls        int
 	spawnCalls           int
 	listResult           any
+	statusErr            error
 	waitErr              error
 	waitGate             chan struct{} // non-nil: RuntimeWaitTurn blocks until the gate is closed
 	waitStarted          chan struct{} // non-nil: one send per RuntimeWaitTurn entry
@@ -2236,6 +2237,9 @@ func (m *mockStableHandler) List() any {
 func (m *mockStableHandler) Shutdown(mode string) error { return nil }
 
 func (m *mockStableHandler) RuntimeStatus(runtimeID string) (any, error) {
+	if m.statusErr != nil {
+		return nil, m.statusErr
+	}
 	return map[string]any{"runtime_id": runtimeID, "status": "running"}, nil
 }
 

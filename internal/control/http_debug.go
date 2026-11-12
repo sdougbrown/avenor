@@ -16,8 +16,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/token"
 )
 
-var ErrRuntimeNotFound = errors.New("runtime not found")
-
 // StableAdapter is the minimal interface that HTTPDebugServer needs to serve
 // per-runtime endpoints in stable mode.  The supervisor implements this; CLI
 // mode passes nil (no adapter wired).

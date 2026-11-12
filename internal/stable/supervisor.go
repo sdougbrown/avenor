@@ -5768,7 +5768,7 @@ func (s *Supervisor) RuntimeStatus(rtID string) (any, error) {
 	rt := s.runtimes[rtID]
 	s.controlMu.Unlock()
 	if rt == nil {
-		return nil, fmt.Errorf("runtime %q not found", rtID)
+		return nil, &control.RuntimeNotFoundError{RuntimeID: rtID}
 	}
 	rt.mu.Lock()
 	status := rt.lc.runtimeStatus()
