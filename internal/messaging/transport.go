@@ -129,3 +129,9 @@ var (
 // an outage as a run nobody holds. Its text names no broker address and is the
 // reason every layer reports.
 var ErrRemoteReadFailed = errors.New("the broker holding the run could not answer the read")
+
+// LastReadTimeout bounds one read of a run's last turn at the surface that
+// serves it. The read is local and instant unless the run lives on another
+// broker, so a broker that never answers must fail the read quickly instead of
+// holding the caller open for every hop's own request timeout.
+const LastReadTimeout = 5 * time.Second
