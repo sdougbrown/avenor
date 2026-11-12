@@ -127,7 +127,7 @@ func TestMCPToolSpawnRefusesCallerChosenLaunch(t *testing.T) {
 	defer session.Close()
 
 	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "spawn", Arguments: map[string]any{
-		"repo_dir":     dir,
+		"dir":          dir,
 		"prompt":       "hi",
 		"roster_file":  rosterPath,
 		"roster_entry": "tool",

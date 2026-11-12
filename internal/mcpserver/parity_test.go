@@ -85,11 +85,11 @@ func TestToolNameParity(t *testing.T) {
 // the property names and the required fields match the expected contracts.
 func TestSchemaFieldParity(t *testing.T) {
 	t.Run("spawn", func(t *testing.T) {
-		// spawnArgs — repo_dir is required.
+		// spawnArgs — dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
 		// All remaining fields are optional.
-		allowed := []string{"agent", "repo_dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "launch_wrapper", "auto_approve", "persist_sessions", "messaging"}
-		required := []string{"repo_dir"}
+		allowed := []string{"agent", "dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "launch_wrapper", "auto_approve", "persist_sessions", "messaging"}
+		required := []string{"dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})
 
@@ -208,11 +208,24 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 		})
 	}
 
+	// The old name is not silently accepted: a client written against the
+	// pre-0.47.0 contract sends repo_dir, and the strict decoder refuses it
+	// instead of spawning a run with no directory.
+	t.Run("renamed dir field", func(t *testing.T) {
+		var args spawnArgs
+		if err := json.Unmarshal([]byte(`{"repo_dir":"/tmp/r"}`), &args); err == nil {
+			t.Error("spawnArgs accepted repo_dir, which 0.47.0 renamed to dir")
+		}
+		if err := json.Unmarshal([]byte(`{"dir":"/tmp/r"}`), &args); err != nil {
+			t.Errorf("spawnArgs rejected dir: %v", err)
+		}
+	})
+
 	// Mixed input: a known provider option coexisting with an unknown key must
 	// still be rejected — the strict boundary does not relax for familiar keys.
 	t.Run("known plus unknown key", func(t *testing.T) {
 		var args spawnArgs
-		data := `{"repo_dir":"/tmp/r","thinking":"high","system":"deferred"}`
+		data := `{"dir":"/tmp/r","thinking":"high","system":"deferred"}`
 		if err := json.Unmarshal([]byte(data), &args); err == nil {
 			t.Errorf("spawnArgs accepted unknown key alongside known field: %s", data)
 		}
@@ -224,23 +237,23 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 		name string
 		data string
 	}{
-		{"repo_dir only", `{"repo_dir":"/tmp/r"}`},
-		{"agent", `{"repo_dir":"/tmp/r","agent":"reviewer"}`},
-		{"model", `{"repo_dir":"/tmp/r","model":"provider/model"}`},
-		{"backend", `{"repo_dir":"/tmp/r","backend":"opencode-acp"}`},
-		{"roster_file", `{"repo_dir":"/tmp/r","roster_file":"/repo/r.json"}`},
-		{"roster_entry", `{"repo_dir":"/tmp/r","roster_entry":"planner"}`},
-		{"prompt", `{"repo_dir":"/tmp/r","prompt":"hi"}`},
-		{"prompt_file", `{"repo_dir":"/tmp/r","prompt_file":"/tmp/p"}`},
-		{"label", `{"repo_dir":"/tmp/r","label":"l"}`},
-		{"timeout", `{"repo_dir":"/tmp/r","timeout":"5m"}`},
-		{"thinking", `{"repo_dir":"/tmp/r","thinking":"high"}`},
-		{"server_url", `{"repo_dir":"/tmp/r","server_url":"http://x"}`},
-		{"supervisor_id", `{"repo_dir":"/tmp/r","supervisor_id":"s"}`},
-		{"auto_approve", `{"repo_dir":"/tmp/r","auto_approve":true}`},
+		{"dir only", `{"dir":"/tmp/r"}`},
+		{"agent", `{"dir":"/tmp/r","agent":"reviewer"}`},
+		{"model", `{"dir":"/tmp/r","model":"provider/model"}`},
+		{"backend", `{"dir":"/tmp/r","backend":"opencode-acp"}`},
+		{"roster_file", `{"dir":"/tmp/r","roster_file":"/repo/r.json"}`},
+		{"roster_entry", `{"dir":"/tmp/r","roster_entry":"planner"}`},
+		{"prompt", `{"dir":"/tmp/r","prompt":"hi"}`},
+		{"prompt_file", `{"dir":"/tmp/r","prompt_file":"/tmp/p"}`},
+		{"label", `{"dir":"/tmp/r","label":"l"}`},
+		{"timeout", `{"dir":"/tmp/r","timeout":"5m"}`},
+		{"thinking", `{"dir":"/tmp/r","thinking":"high"}`},
+		{"server_url", `{"dir":"/tmp/r","server_url":"http://x"}`},
+		{"supervisor_id", `{"dir":"/tmp/r","supervisor_id":"s"}`},
+		{"auto_approve", `{"dir":"/tmp/r","auto_approve":true}`},
 		// Combined: all provider options together to verify no interactions
 		// cause unexpected rejection.
-		{"all provider options", `{"repo_dir":"/tmp/r","agent":"reviewer","model":"provider/model","backend":"opencode-acp","prompt":"hi","prompt_file":"/tmp/p","label":"l","timeout":"5m","thinking":"high","server_url":"http://x","supervisor_id":"s","auto_approve":true}`},
+		{"all provider options", `{"dir":"/tmp/r","agent":"reviewer","model":"provider/model","backend":"opencode-acp","prompt":"hi","prompt_file":"/tmp/p","label":"l","timeout":"5m","thinking":"high","server_url":"http://x","supervisor_id":"s","auto_approve":true}`},
 	}
 	for _, tt := range acceptedIndividual {
 		t.Run("accepts/"+tt.name, func(t *testing.T) {
@@ -307,8 +320,8 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		if a.RosterFile != "test" || a.RosterEntry != "test" {
 			t.Errorf("%s: roster selector fields not populated", structName)
 		}
-		if a.RepoDir != "test" {
-			t.Errorf("%s: repo_dir not populated", structName)
+		if a.Dir != "test" {
+			t.Errorf("%s: dir not populated", structName)
 		}
 		if !a.AutoApprove {
 			t.Errorf("%s: auto_approve not populated", structName)
@@ -525,7 +538,7 @@ func TestMergedSchemaPublished(t *testing.T) {
 		"message": {"action", "idempotency_key", "label", "message", "message_id", "payload", "reply_to", "target", "timeout_ms"},
 		"peers":   {"action", "name", "session_id", "target"},
 		"spawn": {"agent", "auto_approve", "backend", "idempotency_key", "label", "launch_wrapper",
-			"messaging", "model", "persist_sessions", "prompt", "prompt_file", "repo_dir",
+			"messaging", "model", "persist_sessions", "prompt", "prompt_file", "dir",
 			"roster_entry", "roster_file", "server_url", "supervisor_id", "thinking", "timeout"},
 		"workflow": {"action", "activation_id", "actor", "after_seq", "artifacts", "attempt_id", "controller_id", "evidence_ids", "gate_id", "lease_id", "limit", "node_id", "observed_at", "operation", "outcome", "outputs", "owner_token", "poll_id", "reason", "response_hash", "result", "source", "subject", "supervisor_id", "timeout", "workflow_id"},
 	} {

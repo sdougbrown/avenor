@@ -61,7 +61,7 @@ func TestAvenorSpawnFailClosedOnUnsupportedVerb(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-				RepoDir:       "/tmp/test-repo",
+				Dir:           "/tmp/test-repo",
 				LaunchWrapper: tc.launchWrapper,
 			})
 			if err == nil {
@@ -114,9 +114,9 @@ func TestAvenorSpawnAlwaysUsesGatedVerb(t *testing.T) {
 		name string
 		args spawnArgs
 	}{
-		{"unwrapped", spawnArgs{RepoDir: "/tmp/test-repo"}},
-		{"roster selectors", spawnArgs{RepoDir: "/tmp/test-repo", RosterFile: "/tmp/caller-written-roster.json", RosterEntry: "tool"}},
-		{"wrapped", spawnArgs{RepoDir: "/tmp/test-repo", LaunchWrapper: []string{"nice", "-n", "5"}}},
+		{"unwrapped", spawnArgs{Dir: "/tmp/test-repo"}},
+		{"roster selectors", spawnArgs{Dir: "/tmp/test-repo", RosterFile: "/tmp/caller-written-roster.json", RosterEntry: "tool"}},
+		{"wrapped", spawnArgs{Dir: "/tmp/test-repo", LaunchWrapper: []string{"nice", "-n", "5"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cl := &routingSpyClient{}

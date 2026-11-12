@@ -259,7 +259,7 @@ func TestIdempotencySpawnRetryReturnsOriginalRun(t *testing.T) {
 	// First server: original spawn.
 	s1 := newIdempotencyServer(t, sup)
 	_, r1, err := s1.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		IdempotencyKey: "k1",
 	})
 	if err != nil {
@@ -278,7 +278,7 @@ func TestIdempotencySpawnRetryReturnsOriginalRun(t *testing.T) {
 	// Second server (fresh registry): retry the same key + params.
 	s2 := newIdempotencyServer(t, sup)
 	_, r2, err := s2.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		IdempotencyKey: "k1",
 	})
 	if err != nil {
@@ -311,7 +311,7 @@ func TestIdempotencySpawnRetryReturnsOriginalRun(t *testing.T) {
 	// A same-server retry (third attempt on s2) is also a stored hit that
 	// reaches the supervisor.
 	_, r3, err := s2.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		IdempotencyKey: "k1",
 	})
 	if err != nil {
@@ -359,7 +359,7 @@ func TestIdempotencySpawnRetryExplicitLabelKept(t *testing.T) {
 	// preserved on a retry (not replaced by the original run's ID).
 	s1 := newIdempotencyServer(t, sup)
 	_, r1, err := s1.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		Label:          "my-label",
 		IdempotencyKey: "k1",
 	})
@@ -373,7 +373,7 @@ func TestIdempotencySpawnRetryExplicitLabelKept(t *testing.T) {
 
 	s2 := newIdempotencyServer(t, sup)
 	_, r2, err := s2.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		Label:          "my-label",
 		IdempotencyKey: "k1",
 	})
@@ -400,7 +400,7 @@ func TestIdempotencySpawnRetryHashMismatchFails(t *testing.T) {
 
 	s1 := newIdempotencyServer(t, sup)
 	if _, _, err := s1.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		Prompt:         "original prompt",
 		IdempotencyKey: "k1",
 	}); err != nil {
@@ -410,7 +410,7 @@ func TestIdempotencySpawnRetryHashMismatchFails(t *testing.T) {
 	// Same key, different prompt: the supervisor rejects the retry.
 	s2 := newIdempotencyServer(t, sup)
 	_, _, err := s2.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		Prompt:         "different prompt",
 		IdempotencyKey: "k1",
 	})
@@ -438,7 +438,7 @@ func TestIdempotencyKeyLengthValidation(t *testing.T) {
 	s := newIdempotencyServer(t, sup)
 	longKey := strings.Repeat("k", 257)
 	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		IdempotencyKey: longKey,
 	}); err == nil {
 		t.Fatal("expected a key-length error for a 257-byte key")
@@ -454,7 +454,7 @@ func TestIdempotencyKeyLengthValidation(t *testing.T) {
 	s2 := newIdempotencyServer(t, sup2)
 	maxKey := strings.Repeat("k", 256)
 	if _, _, err := s2.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		IdempotencyKey: maxKey,
 	}); err != nil {
 		t.Fatalf("a 256-byte key should be accepted: %v", err)
@@ -473,7 +473,7 @@ func TestSpawnKeySpaceIsolatedFromResume(t *testing.T) {
 	sup := newFakeIdempotentSupervisor()
 	s := newIdempotencyServer(t, sup)
 	_, spawnRes, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{
-		RepoDir:        "/tmp/repo",
+		Dir:            "/tmp/repo",
 		Prompt:         "start",
 		IdempotencyKey: "follow_up:k",
 	})
@@ -522,7 +522,7 @@ func TestSpawnArgsMessagingTranslation(t *testing.T) {
 	}{
 		{&on, true, true}, {&off, false, true}, {nil, nil, false},
 	} {
-		if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo", Messaging: tc.choice}); err != nil {
+		if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Dir: "/tmp/repo", Messaging: tc.choice}); err != nil {
 			t.Fatal(err)
 		}
 		got, present := sup.lastSpawnParams["messaging"]
@@ -541,19 +541,19 @@ func TestSpawnArgsPersistSessionsTranslation(t *testing.T) {
 	sup := newFakeIdempotentSupervisor()
 	s := newIdempotencyServer(t, sup)
 
-	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo", PersistSession: &on}); err != nil {
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Dir: "/tmp/repo", PersistSession: &on}); err != nil {
 		t.Fatal(err)
 	}
 	if got := sup.lastSpawnParams["persist_sessions"]; got != true {
 		t.Fatalf("persist_sessions = %v, want true", got)
 	}
-	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo", PersistSession: &off}); err != nil {
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Dir: "/tmp/repo", PersistSession: &off}); err != nil {
 		t.Fatal(err)
 	}
 	if got := sup.lastSpawnParams["persist_sessions"]; got != false {
 		t.Fatalf("persist_sessions = %v, want false", got)
 	}
-	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{RepoDir: "/tmp/repo"}); err != nil {
+	if _, _, err := s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Dir: "/tmp/repo"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, present := sup.lastSpawnParams["persist_sessions"]; present {

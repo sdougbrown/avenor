@@ -12,7 +12,7 @@ These are the MCP server's tool names — `spawn`, `status`, `result`, `answer_p
 ## Start a run
 
 1. Confirm that delegation is explicit in the request. Do not dispatch ordinary tasks merely because they could be delegated.
-2. Resolve `repo_dir` to the absolute path of the repository the user placed in scope.
+2. Resolve `dir` to the absolute path of the repository the user placed in scope.
 3. Select the backend using the workflow below.
 4. Preserve any requested agent, model, label, and timeout. Omit optional overrides rather than guessing them.
 5. Call `spawn` with a complete, self-contained prompt and the selected `backend`. Retain the returned `run_id`, `label`, and `supervisor_id`.

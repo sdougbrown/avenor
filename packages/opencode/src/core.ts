@@ -1853,7 +1853,7 @@ export function createAvenorCore(host: PluginHost, options: AvenorCoreOptions = 
     agent: tool.schema.string().optional().describe(spawnFieldDescription('agent')),
     prompt: tool.schema.string().optional().describe(spawnFieldDescription('prompt')),
     prompt_file: tool.schema.string().optional().describe(spawnFieldDescription('prompt_file')),
-    dir: tool.schema.string().optional().describe(spawnFieldDescription('dir')),
+    dir: tool.schema.string().min(1).optional().describe(spawnFieldDescription('dir')),
     label: tool.schema.string().optional().describe(spawnFieldDescription('label')),
     timeout: tool.schema.string().optional().describe(spawnFieldDescription('timeout')),
     model: tool.schema.string().optional().describe(spawnFieldDescription('model')),

@@ -194,18 +194,18 @@ describe('avenor MCP server', () => {
   it('keeps direct and roster selectors as optional flat fields', () => {
     const schema = z.object(spawnInputShape)
 
-    expect(schema.safeParse({ repo_dir: '/tmp/repo' }).success).toBe(true)
-    expect(schema.safeParse({ repo_dir: '/tmp/repo', agent: 'codex' }).success).toBe(true)
-    expect(schema.safeParse({ repo_dir: '/tmp/repo', model: 'sonnet' }).success).toBe(true)
-    expect(schema.safeParse({ repo_dir: '/tmp/repo', backend: 'agy' }).success).toBe(true)
-    expect(schema.safeParse({ repo_dir: '/tmp/repo', agent: 'codex', model: 'sonnet' }).success).toBe(true)
+    expect(schema.safeParse({ dir: '/tmp/repo' }).success).toBe(true)
+    expect(schema.safeParse({ dir: '/tmp/repo', agent: 'codex' }).success).toBe(true)
+    expect(schema.safeParse({ dir: '/tmp/repo', model: 'sonnet' }).success).toBe(true)
+    expect(schema.safeParse({ dir: '/tmp/repo', backend: 'agy' }).success).toBe(true)
+    expect(schema.safeParse({ dir: '/tmp/repo', agent: 'codex', model: 'sonnet' }).success).toBe(true)
     expect(schema.safeParse({
-      repo_dir: '/tmp/repo',
+      dir: '/tmp/repo',
       roster_file: '/repo/roster.json',
       roster_entry: 'planner',
     }).success).toBe(true)
-    expect(schema.safeParse({ repo_dir: '/tmp/repo', thinking: 'xhigh' }).success).toBe(true)
-    expect(schema.safeParse({ repo_dir: '/tmp/repo', thinking: 'HIGH' }).success).toBe(false)
+    expect(schema.safeParse({ dir: '/tmp/repo', thinking: 'xhigh' }).success).toBe(true)
+    expect(schema.safeParse({ dir: '/tmp/repo', thinking: 'HIGH' }).success).toBe(false)
     expect(schema.safeParse({ agent: 'codex' }).success).toBe(false)
   })
 
@@ -216,7 +216,7 @@ describe('avenor MCP server', () => {
       backend: 'agy',
     }
 
-    expect(z.object(spawnInputShape).safeParse({ repo_dir: '/tmp/repo', ...input }).success).toBe(true)
+    expect(z.object(spawnInputShape).safeParse({ dir: '/tmp/repo', ...input }).success).toBe(true)
     expect(() => validateSpawnSelection(input)).toThrow(
       'invalid spawn selector: backend is a direct identity field, disabled in roster mode (roster_entry is set); drop backend to use the roster entry, or drop roster_file and roster_entry to use direct identity',
     )

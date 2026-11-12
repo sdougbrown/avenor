@@ -85,8 +85,8 @@ func TestSpawnToolPublishesSharedSchema(t *testing.T) {
 	}
 
 	required, ok := published["required"].([]any)
-	if !ok || len(required) != 1 || required[0] != "repo_dir" {
-		t.Errorf("spawn schema required = %v, want [repo_dir]", published["required"])
+	if !ok || len(required) != 1 || required[0] != "dir" {
+		t.Errorf("spawn schema required = %v, want [dir]", published["required"])
 	}
 
 	properties, ok := published["properties"].(map[string]any)
@@ -94,7 +94,7 @@ func TestSpawnToolPublishesSharedSchema(t *testing.T) {
 		t.Fatal("spawn schema has no properties object")
 	}
 	for name := range properties {
-		if name == "dir" || name == "wait" {
+		if name == "wait" {
 			t.Errorf("spawn schema publishes %q, which this server does not accept", name)
 		}
 	}
@@ -229,8 +229,10 @@ func TestSpawnSchemaMatchesStruct(t *testing.T) {
 }
 
 // TestPublishedSpawnSchemaIsTheGoFieldSet pins the published schema to what this
-// server actually decodes: a JS-only property (dir, wait) must not reach the
-// schema, because the decoder would refuse it after the schema admitted it.
+// server actually decodes. A field only the JS surfaces publish must not reach
+// the schema, because the decoder would refuse it after the schema admitted it;
+// wait is the only such field today, and a field that becomes a Go field fails
+// here until the filter and this test agree.
 func TestPublishedSpawnSchemaIsTheGoFieldSet(t *testing.T) {
 	var published struct {
 		Properties map[string]json.RawMessage `json:"properties"`
@@ -275,8 +277,8 @@ func TestSpawnSchemaRequiresOnlyWhatTheDecoderRequires(t *testing.T) {
 	if !reflect.DeepEqual(published.Required, want) {
 		t.Fatalf("published required = %v, want %v", published.Required, want)
 	}
-	if !reflect.DeepEqual(want, []string{"repo_dir"}) {
-		t.Fatalf("requiredSpawnFields = %v, want [repo_dir]; a new non-omitempty field changes the published contract", want)
+	if !reflect.DeepEqual(want, []string{"dir"}) {
+		t.Fatalf("requiredSpawnFields = %v, want [dir]; a new non-omitempty field changes the published contract", want)
 	}
 }
 

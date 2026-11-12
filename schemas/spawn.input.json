@@ -19,22 +19,16 @@
       ],
       "description": "Optional agent persona; the backend resolves this name to a prompt, tool set, and permission policy. Independent of model and backend: supply any of the three, or none."
     },
-    "repo_dir": {
-      "type": "string",
-      "x-avenor-surfaces": [
-        "go",
-        "mcp"
-      ],
-      "description": "Required. Working directory for the run.",
-      "minLength": 1
-    },
     "dir": {
       "type": "string",
       "x-avenor-surfaces": [
+        "go",
+        "mcp",
         "pi",
         "opencode"
       ],
-      "description": "Working directory for the run, under the name the pi and OpenCode surfaces use for repo_dir. Defaults to the session directory."
+      "minLength": 1,
+      "description": "Working directory for the run: the spawned agent starts here. Required by the MCP surfaces; the pi and OpenCode surfaces default it to the session directory."
     },
     "prompt": {
       "type": "string",

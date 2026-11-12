@@ -81,7 +81,7 @@ server.registerTool('spawn', {
   description: 'Spawn a new agent run. Identity comes from one of two modes. In direct mode pass any of agent, model, and backend, and omitted values use runtime defaults. In roster mode pass roster_file with roster_entry, which names all three and rejects them as arguments. Optional thinking accepts a canonical thinking level; unsupported backends reject explicit values',
   inputSchema: spawnInputShape,
 }, async ({
-  repo_dir,
+  dir,
   agent,
   prompt,
   prompt_file,
@@ -105,7 +105,7 @@ server.registerTool('spawn', {
 
   return passthroughResult(spawnTool({
     agent,
-    dir: repo_dir,
+    dir,
     prompt,
     promptFile: prompt_file,
     label,
