@@ -98,7 +98,7 @@ Spawn parameters (all optional except one prompt source):
 | `--prompt` | string | Inline prompt text. Mutually exclusive with `--prompt-file` |
 | `--prompt-file` | string | Path to a file containing the prompt. Mutually exclusive with `--prompt` |
 | `--dir` | string | Working directory for the runtime. Defaults to `.` |
-| `--agent` | string | Agent name (e.g. `jockey`, `butler`). Backend-specific |
+| `--agent` | string | Agent persona (e.g. `jockey`, `butler`). Backend-specific |
 | `--label` | string | Free-form label for log correlation and list output |
 | `--model` | string | Backend-specific model ID (e.g. `claude-sonnet-4-5`) |
 | `--thinking` | string | Run-level backend-native reasoning level; validated against the effective backend |

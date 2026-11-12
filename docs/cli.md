@@ -24,7 +24,7 @@ avenor run [flags]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--agent` | (none) | Agent name; used to resolve configured model from opencode config if `--model` is not set |
+| `--agent` | (none) | Agent persona; used to resolve configured model from opencode config if `--model` is not set |
 | `--prompt` | (none) | Inline prompt text; mutually exclusive with `--prompt-file` |
 | `--prompt-file` | (none) | Path to prompt file; mutually exclusive with `--prompt` |
 | `--loop-file` | (none) | Path to multi-phase loop config (JSON, YAML, or TOML); enables looping mode (incompatible with `--resume`) |
@@ -470,7 +470,7 @@ Spawn flags (all optional):
 | `--prompt` | Inline prompt text (mutually exclusive with `--prompt-file`) |
 | `--prompt-file` | Path to prompt file (mutually exclusive with `--prompt`) |
 | `--dir` | Working directory |
-| `--agent` | Agent name |
+| `--agent` | Agent persona |
 | `--label` | Free-form label for log correlation |
 | `--model` | Backend-specific model ID |
 | `--backend` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `codex-app-server`, `opencode-http`, `pi`, `claude` |
