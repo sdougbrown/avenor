@@ -437,26 +437,27 @@ func parentLinkedPost(t *testing.T, addr, path, runID, token string, body map[st
 func TestAdvertisedBrokerURLIsTheParentRelayEndpoint(t *testing.T) {
 	t.Parallel()
 	parentBroker, parentLink := startTestParentBroker(t)
-	bindAddr := reserveStableLoopbackAddr(t)
 
 	var relays atomic.Int64
-	terminator := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: bindAddr})
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/relay" {
-			relays.Add(1)
-		}
-		terminator.ServeHTTP(w, r)
-	}))
-	t.Cleanup(proxy.Close)
-
+	var proxy *httptest.Server
 	socketPath := newStableSocketPath(t, "advertised-relay")
-	sup := newTestSupervisor(t, Config{
-		ControlSocket:      socketPath,
-		MaxRuntimes:        2,
-		BrokerAddr:         bindAddr,
-		BrokerAdvertiseURL: proxy.URL,
-		BrokerParentURL:    "http://" + parentBroker.Addr(),
-		BrokerParentToken:  testLinkToken,
+	sup, _ := newSupervisorOnReservedAddr(t, func(bindAddr string) Config {
+		terminator := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: bindAddr})
+		proxy = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/relay" {
+				relays.Add(1)
+			}
+			terminator.ServeHTTP(w, r)
+		}))
+		t.Cleanup(proxy.Close)
+		return Config{
+			ControlSocket:      socketPath,
+			MaxRuntimes:        2,
+			BrokerAddr:         bindAddr,
+			BrokerAdvertiseURL: proxy.URL,
+			BrokerParentURL:    "http://" + parentBroker.Addr(),
+			BrokerParentToken:  testLinkToken,
+		}
 	})
 	t.Cleanup(func() { _ = sup.Shutdown("kill") })
 
