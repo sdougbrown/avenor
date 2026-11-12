@@ -49,6 +49,23 @@ describe('spawn input schema', () => {
     ])
   })
 
+  it('states each rule once across the file', () => {
+    // The mutual-exclusion rule belongs to roster_entry and the tool
+    // description; repeating it on every identity field is how the schema
+    // grew to 459 words while saying six things. A sentence shared by two
+    // fields means one of them is re-explaining another field's contract.
+    const owners = new Map<string, string>()
+    for (const name of spawnFieldNames) {
+      for (const raw of spawnFieldDescription(name).split(/(?<=\.)\s+/)) {
+        const sentence = raw.trim().toLowerCase()
+        if (sentence.split(/\s+/).length < 5) continue
+        const owner = owners.get(sentence)
+        if (owner) throw new Error(`fields "${owner}" and "${name}" both state: ${raw.trim()}`)
+        owners.set(sentence, name)
+      }
+    }
+  })
+
   it('refuses a field it does not declare', () => {
     expect(() => spawnFieldDescription('system')).toThrow('has no description')
   })
