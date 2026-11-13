@@ -125,24 +125,36 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | pony | poo |
-|---|---|---|---|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ✗ | ✓ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
-| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
-| Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | pony | poo | mini-swe-agent |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ✗ | ✓ | ✗ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
+| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ | ✗ |
+| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ | ✗ |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental. `agy` permission relay requires the explicit RPC transport.
 
 Thinking control is native for Codex and Pi. Claude supports five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
 
 Session resume for `claude` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by this backend.
+
+## mini-swe-agent
+
+The experimental `mini-swe-agent` backend runs the `mini` executable from mini-swe-agent v2. Install it separately and configure a model and credentials as described by mini-swe-agent. Avenor skips its interactive first-run setup, so configure it before running:
+
+```sh
+avenor run --backend mini-swe-agent --model openai/gpt-4.1 --prompt "Fix the failing test" --dir /path/to/project
+```
+
+Each run starts a new `mini` process in the working directory. Avenor passes `--yolo` and `--exit-immediately`: shell commands run without approval. Use this backend only in a trusted or isolated environment. Mini's own model and environment configuration still applies.
+
+This backend supports one prompt per session. It does not support follow-up prompts, resume, messaging, permission relay, or live agent events. A progress timeout can therefore expire while mini is working. Avenor reports the final submission from mini's trajectory, which can be empty. A mini limit or error is an Avenor failure. Cancellation stops the mini process, but a shell command that mini started in a separate process group may continue; use an external sandbox with process cleanup when that matters.
 
 ## poo
 
