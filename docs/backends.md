@@ -213,7 +213,7 @@ Teardown sends `session/close`, closes stdin, and gives the process 30 s to exit
 
 ## claude
 
-Channel-less provider for Claude Code. Starts Claude in a terminal session (PTY by default), injects prompts via PTY paste, and reads progress from the JSONL transcript file that Claude writes to `~/.claude/projects/`. No broker, no sidecar, no `.mcp.json` injection.
+Channel-less provider for Claude Code. Starts Claude in a terminal session (PTY by default), injects prompts via PTY paste, and reads progress from the JSONL transcript file that Claude writes under `$CLAUDE_CONFIG_DIR/projects/` when that variable names an absolute path, or `~/.claude/projects/` otherwise. No broker, no sidecar, no `.mcp.json` injection.
 
 ### Launcher
 

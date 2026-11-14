@@ -97,7 +97,7 @@ func PreAcceptTrust(ctx context.Context, dir string) error {
 	if strings.TrimSpace(dir) == "" {
 		return errors.New("empty run directory")
 	}
-	home, err := resolveHomeDir()
+	home, err := ResolveHomeDir()
 	if err != nil {
 		return err
 	}
@@ -135,11 +135,12 @@ func preAcceptTrust(ctx context.Context, configPath, home, dir string) error {
 	return editTrustConfig(ctx, configPath, key, nil)
 }
 
-// resolveHomeDir is the home directory the refusals compare against.
+// ResolveHomeDir is the home directory the refusals compare against, and the one
+// the transcript tree is rooted at when CLAUDE_CONFIG_DIR is unset.
 // os.UserHomeDir reads $HOME, which a bare service environment may not set, so
 // the passwd entry is the fallback. No home at all is an error rather than a
 // skip: without it the home and home-parent refusals cannot be applied.
-func resolveHomeDir() (string, error) {
+func ResolveHomeDir() (string, error) {
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		return home, nil
 	}
@@ -203,16 +204,31 @@ func checkTrustTarget(key, home string) error {
 	return nil
 }
 
+// claudeConfigDirOverride reports CLAUDE_CONFIG_DIR when it names an absolute
+// path. Unset and empty both mean no override: Claude Code treats an empty
+// value differently from an unset one, but avenor resolves neither to a
+// directory. A relative value is an error rather than a guess — Claude Code
+// works it out against its own working directory, so avenor has no single path
+// to read from or write to.
+func claudeConfigDirOverride() (string, error) {
+	configDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if configDir == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(configDir) {
+		return "", fmt.Errorf("CLAUDE_CONFIG_DIR %q is not an absolute path", configDir)
+	}
+	return configDir, nil
+}
+
 // claudeConfigHome is the directory Claude Code keeps its global config in:
-// CLAUDE_CONFIG_DIR when set, otherwise the home directory. Claude Code treats
-// an empty or relative CLAUDE_CONFIG_DIR differently from an unset one, so a
-// relative value is refused rather than resolved against avenor's cwd.
+// CLAUDE_CONFIG_DIR when set, otherwise the home directory. It is not the
+// directory projects/ lives in — transcripts sit under the config *directory*,
+// <CLAUDE_CONFIG_DIR or home/.claude>/projects (see TranscriptRoot).
 func claudeConfigHome(home string) (string, error) {
-	if configDir := os.Getenv("CLAUDE_CONFIG_DIR"); configDir != "" {
-		if !filepath.IsAbs(configDir) {
-			return "", fmt.Errorf("CLAUDE_CONFIG_DIR %q is not an absolute path", configDir)
-		}
-		return configDir, nil
+	configDir, err := claudeConfigDirOverride()
+	if err != nil || configDir != "" {
+		return configDir, err
 	}
 	return home, nil
 }
