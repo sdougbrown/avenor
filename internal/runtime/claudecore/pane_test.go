@@ -55,6 +55,16 @@ var paneCaptureCreateFileWrapped = strings.Replace(
 	1,
 )
 
+// paneCaptureEditFileWrappedAfterTo wraps the edit dialog's question right
+// after "Do you want to": the head row has no trailing word, so only the
+// question mark on the tail row identifies the question.
+var paneCaptureEditFileWrappedAfterTo = strings.Replace(
+	paneCaptureEditFile,
+	" Do you want to make this edit to hello.txt?",
+	" Do you want to\n make this edit to hello.txt?",
+	1,
+)
+
 func TestClassifyPanePermissionDialogs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -63,6 +73,7 @@ func TestClassifyPanePermissionDialogs(t *testing.T) {
 		{name: "create file", pane: paneCaptureCreateFile},
 		{name: "create file, wrapped question", pane: paneCaptureCreateFileWrapped},
 		{name: "edit file", pane: paneCaptureEditFile},
+		{name: "edit file, question wrapped after to", pane: paneCaptureEditFileWrappedAfterTo},
 		{name: "bash command", pane: permissionPane},
 	}
 	for _, tt := range tests {
