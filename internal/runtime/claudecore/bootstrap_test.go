@@ -196,6 +196,26 @@ func TestTrustDialogStateHoldsEnterUntilTheTrustOptionStaysSelected(t *testing.T
 	}
 }
 
+func TestTrustDialogStatePassesOverAnIdenticalFrameOnce(t *testing.T) {
+	// The frame after a Down can be the screen from before the Down landed, and
+	// a second Down on it moves the selection back to "No, exit". The identical
+	// frame is passed over once, then earns another Down.
+	var d trustDialogState
+	base := time.Unix(1700000000, 0)
+	var got []string
+	for i := 0; i < 3; i++ {
+		if k, ok := d.next(trustFirstPaint, base.Add(time.Duration(i)*PromptInjectCheckInterval)); ok {
+			got = append(got, string(k))
+		} else {
+			got = append(got, "-")
+		}
+	}
+	want := []string{string(terminal.KeyDown), "-", string(terminal.KeyDown)}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("keys per identical frame = %v, want %v", got, want)
+	}
+}
+
 func TestTrustDialogStateStopsSendingKeysWhenAPressDoesNotConverge(t *testing.T) {
 	var d trustDialogState
 	base := time.Unix(1700000000, 0)

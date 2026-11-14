@@ -150,7 +150,9 @@ const (
 	// trustDialogConfirmHold is how long the trust option has to stay the live
 	// selection before Enter confirms it. The redraw that follows a Down at
 	// first paint restores "No, exit" about 130ms later, and Enter on that
-	// frame exits Claude.
+	// frame exits Claude. WaitForPaneReady feeds one capture per
+	// PromptInjectCheckInterval, so while that interval is longer than this
+	// hold, the interval is how long the selection stays before Enter.
 	trustDialogConfirmHold = 200 * time.Millisecond
 )
 
