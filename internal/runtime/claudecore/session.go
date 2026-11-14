@@ -38,6 +38,10 @@ type Session struct {
 	Active              bool
 	Finished            bool
 	PendingTerminalPerm *TerminalPermission
+	// answeredOptions is the option list of the last answered dialog. While a
+	// capture shows the same list the answered dialog is still on screen, so
+	// nothing is brokered from it. Only set with OSC 7501 active.
+	answeredOptions string
 
 	// pastesInFlight counts prompt pastes between BeginPaste and EndPaste.
 	// unreadyLaunch is set once FailUnreadyLaunch has taken the session, and
@@ -159,6 +163,36 @@ func (s *Session) SendCancelKeys(ctx context.Context) error {
 	return s.Term.SendKeys(ctx, terminal.KeyEsc, terminal.KeyEsc)
 }
 
+// TakePendingPermission claims the pending permission request requestID for an
+// answer and returns it. It returns nil when that request is not pending.
+//
+// The dialog stays on screen until Claude repaints, so a capture that still
+// shows its options brokers nothing. Only an OSC 7501 report can say when the
+// screen changed, so nothing is suppressed without one: dialogs whose option
+// lists repeat must still be brokered, and the pane and transcript rules alone
+// drive the session as before. A caller whose answer never reached the terminal
+// calls ReleaseAnsweredPermission.
+func (s *Session) TakePendingPermission(requestID string) *TerminalPermission {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	perm := s.PendingTerminalPerm
+	if perm == nil || perm.RequestID != requestID {
+		return nil
+	}
+	s.PendingTerminalPerm = nil
+	if s.osc.active {
+		s.answeredOptions = permissionOptionsKey(perm)
+	}
+	return perm
+}
+
+// ReleaseAnsweredPermission lifts the suppression TakePendingPermission set,
+// for an answer that never reached the terminal: its dialog is still waiting
+// and must be brokered again.
+func (s *Session) ReleaseAnsweredPermission() {
+	s.clearAnsweredOptions()
+}
+
 func (s *Session) ScanTerminalTick() {
 	s.drainProgStatus()
 	state, err := ScanTerminal(s.Ctx, s.Term)
@@ -205,12 +239,14 @@ func (s *Session) ScanTerminalTick() {
 		s.brokerTerminalPermission(out)
 
 	case PaneStateActive:
+		s.clearAnsweredOptions()
 		// Mark the session as active but don't emit a working event from the
 		// pane: scanTranscriptTick is the authoritative working signal (it
 		// fires only when Claude actually writes new JSONL records, where
 		// pane-scrape "active" is a 500ms heartbeat that floods consumers).
 		s.MarkActive()
 	case PaneStateIdle:
+		s.clearAnsweredOptions()
 		// Idle means Claude is at the prompt, waiting for next input.
 		// Don't end the session — Claude supports multi-turn.
 		// Clear any stale permission, unless Claude still reports itself
@@ -229,13 +265,23 @@ func (s *Session) ScanTerminalTick() {
 	}
 }
 
+// clearAnsweredOptions forgets the answered dialog once a capture shows its
+// option list gone.
+func (s *Session) clearAnsweredOptions() {
+	s.Mu.Lock()
+	s.answeredOptions = ""
+	s.Mu.Unlock()
+}
+
 // brokerTerminalPermission parses a permission dialog from out and emits a
-// permission.request for it, unless one is already pending or Claude still
-// reports the blocked state whose dialog was already brokered. It reports
+// permission.request for it, unless one is already pending, Claude still
+// reports the blocked state whose dialog was already brokered, or out still
+// shows the dialog that was answered. It reports
 // whether a request is pending afterwards.
 func (s *Session) brokerTerminalPermission(out string) bool {
 	tmuxPerm := ParseTerminalPermission(out)
 	if tmuxPerm == nil {
+		s.clearAnsweredOptions()
 		return false
 	}
 	tmuxPerm.CreatedAt = time.Now()
@@ -246,7 +292,7 @@ func (s *Session) brokerTerminalPermission(out string) bool {
 		s.Mu.Unlock()
 		return true
 	}
-	if s.permissionBrokeredLocked() {
+	if s.permissionBrokeredLocked() || permissionOptionsKey(tmuxPerm) == s.answeredOptions {
 		s.Mu.Unlock()
 		return false
 	}

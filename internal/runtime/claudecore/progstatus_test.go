@@ -297,9 +297,7 @@ func TestProgStatusAnsweredPermissionIsNotBrokeredAgain(t *testing.T) {
 
 	// AnswerPermission clears the request; Claude stays blocked and the
 	// answered dialog stays on screen until it repaints.
-	s.Mu.Lock()
-	s.PendingTerminalPerm = nil
-	s.Mu.Unlock()
+	answerPending(t, s)
 	if d := s.ProgStatusTick(); d != 0 {
 		t.Fatalf("chase still pending (%v) after the dialog was brokered", d)
 	}
@@ -316,6 +314,149 @@ func TestProgStatusAnsweredPermissionIsNotBrokeredAgain(t *testing.T) {
 	s.ProgStatusTick()
 	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
 		t.Fatalf("new dialog while blocked: permission.request count = %d, want 1", n)
+	}
+}
+
+// answerPending answers the session's pending request the way a sent answer
+// does, and returns its id.
+func answerPending(t *testing.T, s *Session) string {
+	t.Helper()
+	s.Mu.Lock()
+	perm := s.PendingTerminalPerm
+	s.Mu.Unlock()
+	if perm == nil {
+		t.Fatal("no pending permission to answer")
+	}
+	if s.TakePendingPermission(perm.RequestID) == nil {
+		t.Fatalf("pending permission %s was not taken", perm.RequestID)
+	}
+	return perm.RequestID
+}
+
+// tickPaneScan runs one pane scan tick with exactly the captures that tick
+// reads: one to classify the pane, plus the broker's parse capture when the
+// pane shows a dialog and none is pending.
+func tickPaneScan(t *testing.T, s *Session, pane string) {
+	t.Helper()
+	s.Mu.Lock()
+	parse := s.PendingTerminalPerm == nil
+	s.Mu.Unlock()
+	captures := 1
+	if parse && ClassifyPane(pane) == PaneStatePermission {
+		captures = 2
+	}
+	term := s.Term.(*terminal.FakeSession)
+	for i := 0; i < captures; i++ {
+		term.QueueCapture(pane)
+	}
+	s.ScanTerminalTick()
+}
+
+// scanRequests runs one pane scan tick and returns how many requests it
+// brokered.
+func scanRequests(t *testing.T, s *Session, pane string) int {
+	t.Helper()
+	tickPaneScan(t, s, pane)
+	return countEvents(drainSessionEvents(s.Events), "permission.request")
+}
+
+// staleDialogPane is the answered dialog's option list still on screen under
+// a header the running tool has repainted.
+var staleDialogPane = strings.Replace(permissionPane, "Bash command\n  echo hi\n", "Bash command\n  echo hi\n  Running… (1s)\n", 1)
+
+func TestProgStatusAnsweredDialogStaysSuppressedUntilANewBlockedReport(t *testing.T) {
+	s, term, _ := newProgStatusSession(t, permissionPane)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	blocked := rootReport(terminal.ProgBlocked, terminal.ProgKindPermission)
+	blocked.Msg = "approve Bash: echo hi"
+	term.ReportProgStatus(blocked)
+	s.ProgStatusTick()
+	s.ProgStatusTick()
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
+	}
+	answerPending(t, s)
+
+	// Claude reports working while the pane still shows the old option list.
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	for i := 0; i < 3; i++ {
+		s.ProgStatusTick()
+		tickPaneScan(t, s, staleDialogPane)
+	}
+	if got := drainSessionEvents(s.Events); countEvents(got, "permission.request") != 0 {
+		t.Fatalf("answered dialog brokered again after working: %v", eventNames(got))
+	}
+
+	// The next dialog shows the same options, with nothing between to repaint.
+	next := blocked
+	next.Msg = "approve Bash: echo again"
+	term.ReportProgStatus(next)
+	for i := 0; i < 3; i++ {
+		term.QueueCapture(staleDialogPane)
+		s.ProgStatusTick()
+	}
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("new blocked report: permission.request count = %d, want 1", n)
+	}
+}
+
+func TestPaneScanWithoutOSCBrokersAnAnsweredDialogAgain(t *testing.T) {
+	s := newTestSession(t, permissionPane)
+	s.Prompted = true
+	if n := scanRequests(t, s, permissionPane); n != 1 {
+		t.Fatalf("first dialog: permission.request count = %d, want 1", n)
+	}
+	answerPending(t, s)
+	// Without OSC 7501 nothing can say when the answered dialog left the
+	// screen, so the visible one is brokered as it always was: dialogs whose
+	// option lists repeat would otherwise never be answered.
+	for _, pane := range []string{permissionPane, staleDialogPane} {
+		if n := scanRequests(t, s, pane); n != 1 {
+			t.Fatalf("answered dialog from %q: permission.request count = %d, want 1", pane, n)
+		}
+		answerPending(t, s)
+	}
+}
+
+func TestPaneScanBrokersAgainOnceTheAnsweredOptionsLeave(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		repaint string
+	}{
+		{name: "idle", repaint: readyPane},
+		{name: "active", repaint: workingPane},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, term, _ := newProgStatusSession(t, permissionPane)
+			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			blocked := rootReport(terminal.ProgBlocked, terminal.ProgKindPermission)
+			blocked.Msg = "approve Bash: echo hi"
+			term.ReportProgStatus(blocked)
+			s.ProgStatusTick()
+			s.ProgStatusTick()
+			if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+				t.Fatalf("permission.request count = %d, want 1", n)
+			}
+			answerPending(t, s)
+
+			// The answered dialog's option list is still on screen.
+			for i := 0; i < 2; i++ {
+				tickPaneScan(t, s, staleDialogPane)
+			}
+			if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 0 {
+				t.Fatalf("answered dialog brokered again: permission.request count = %d", n)
+			}
+
+			// Claude repainted; a later dialog repeats the same options.
+			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			tickPaneScan(t, s, tt.repaint)
+			for i := 0; i < 2; i++ {
+				tickPaneScan(t, s, permissionPane)
+			}
+			if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+				t.Fatalf("dialog after the repaint: permission.request count = %d, want 1", n)
+			}
+		})
 	}
 }
 

@@ -502,17 +502,15 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	s.Mu.Lock()
-	pendingPerm := s.PendingTerminalPerm
-	s.Mu.Unlock()
-
-	if pendingPerm == nil || pendingPerm.RequestID != requestID {
+	if s.TakePendingPermission(requestID) == nil {
 		return fmt.Errorf("no pending permission request %s", requestID)
 	}
-
-	s.Mu.Lock()
-	s.PendingTerminalPerm = nil
-	s.Mu.Unlock()
+	sent := false
+	defer func() {
+		if !sent {
+			s.ReleaseAnsweredPermission()
+		}
+	}()
 
 	key := "Esc"
 	if resp.Allow {
@@ -529,7 +527,11 @@ func (p *Provider) AnswerPermission(ctx context.Context, sessionID string, reque
 		keys = []terminal.Key{terminal.KeyEsc}
 	}
 	keys = append(keys, terminal.KeyEnter)
-	return s.Term.SendKeys(ctx, keys...)
+	if err := s.Term.SendKeys(ctx, keys...); err != nil {
+		return err
+	}
+	sent = true
+	return nil
 }
 
 func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, error) {
