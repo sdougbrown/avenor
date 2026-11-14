@@ -15,11 +15,13 @@ import (
 // asked it to run and returns a fake session.
 type captureLauncher struct {
 	command string
+	opts    terminal.StartOptions
 	term    *terminal.FakeSession
 }
 
 func (l *captureLauncher) Start(_ context.Context, opts terminal.StartOptions) (terminal.Session, error) {
 	l.command = opts.Command
+	l.opts = opts
 	return l.term, nil
 }
 
@@ -63,4 +65,47 @@ func TestProviderStartWrapperPrefixesCommand(t *testing.T) {
 		s.CancelFn()
 	}
 	p.mu.Unlock()
+}
+
+// TestProviderCloseKillsTerminal proves Close ends the hosted terminal. The
+// supervisor closes a runtime's provider when a parked runtime times out, and
+// Claude Code sessions live only as long as their terminal process.
+func TestProviderCloseKillsTerminal(t *testing.T) {
+	fakeClaudeOnPath(t)
+	term := terminal.NewFakeSession("avenor-test", 4242, "ready")
+	p := New().(*Provider)
+	p.launcher = &captureLauncher{term: term}
+
+	if _, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir()}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := term.KillCalls(); got < 1 {
+		t.Fatalf("Kill calls after Close = %d, want at least 1", got)
+	}
+}
+
+// Claude's terminal is the one that gets graceful teardown. Forgetting the
+// option puts a wrapped runtime back on leader-only kills, which leaves the
+// wrapper's VM or container behind.
+func TestProviderStartRequestsHangupGrace(t *testing.T) {
+	fakeClaudeOnPath(t)
+	l := &captureLauncher{term: terminal.NewFakeSession("avenor-test", 4242, "ready")}
+	p := New().(*Provider)
+	p.launcher = l
+
+	sess, err := p.Start(context.Background(), runtime.StartOptions{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	p.mu.Lock()
+	if s := p.sessions[sess.SessionID]; s != nil {
+		s.CancelFn()
+	}
+	p.mu.Unlock()
+	if l.opts.HangupGrace <= 0 {
+		t.Fatalf("terminal HangupGrace = %s, want a graceful teardown", l.opts.HangupGrace)
+	}
 }
