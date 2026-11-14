@@ -94,6 +94,8 @@ type StartOptions struct {
 	// Kill or a cancelled ctx hangs the hosted process group up once, and the
 	// group is killed if it outlives the grace. Zero kills only the hosted
 	// process, which is the default a session gets.
+	// Only the PTY launcher honors it: the tmux launcher ends its session with
+	// tmux kill-session and ignores the field.
 	HangupGrace time.Duration
 }
 
