@@ -33,6 +33,8 @@ The wrapper applies to the backend process only. Version probes (`claude --versi
 
 The recorded PID for a wrapped backend is the wrapper's PID: the wrapper is the direct child of the launcher and owns the backend process tree.
 
+When a `claude` run on the default PTY terminal ends or is reaped (a parked runtime's `--parked-timeout`, a cancel, a shutdown), the terminal hosting the wrapper sends `SIGHUP` to its whole process group once. If any member of that group is still alive 5 s later — including a helper left behind by a wrapper that already exited — the terminal sends `SIGKILL` to the group. A wrapper that owns a VM or container should stop it on `SIGHUP`.
+
 Ownership is recorded per session: resuming with a different wrapper is rejected exactly like a backend, agent, or model mismatch. An omitted wrapper on resume inherits the session's authoritative wrapper.
 
 The launch wrapper does not change the control socket's trust boundary: a caller that can present the owner capability could already choose backend commands. The wrapper is an additional capability for trusted callers, not a security feature.
