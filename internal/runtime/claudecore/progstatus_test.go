@@ -317,6 +317,35 @@ func TestProgStatusAnsweredPermissionIsNotBrokeredAgain(t *testing.T) {
 	}
 }
 
+func TestTakePendingPermissionIgnoresAStaleRequestID(t *testing.T) {
+	s, term, _ := newProgStatusSession(t, permissionPane)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	blocked := rootReport(terminal.ProgBlocked, terminal.ProgKindPermission)
+	blocked.Msg = "approve Bash: echo hi"
+	term.ReportProgStatus(blocked)
+	s.ProgStatusTick()
+	s.ProgStatusTick()
+	s.Mu.Lock()
+	pending := s.PendingTerminalPerm
+	s.Mu.Unlock()
+	if pending == nil {
+		t.Fatal("no permission was brokered")
+	}
+
+	if got := s.TakePendingPermission("an-earlier-request"); got != nil {
+		t.Fatalf("a stale request id claimed %s", got.RequestID)
+	}
+	s.Mu.Lock()
+	kept, answered := s.PendingTerminalPerm, s.answeredOptions
+	s.Mu.Unlock()
+	if kept != pending {
+		t.Fatal("a stale request id cleared the pending permission")
+	}
+	if answered != "" {
+		t.Fatalf("a stale request id suppressed the live dialog's options: %q", answered)
+	}
+}
+
 // answerPending answers the session's pending request the way a sent answer
 // does, and returns its id.
 func answerPending(t *testing.T, s *Session) string {
