@@ -25,6 +25,9 @@ const (
 	paneScanInterval       = 500 * time.Millisecond
 	transcriptScanInterval = 2 * time.Second
 	defaultCancelGrace     = 3 * time.Second
+	// hangupGrace is how long a launch wrapper gets after SIGHUP to stop what
+	// it owns, such as a VM or container, before the terminal kills the group.
+	hangupGrace = 5 * time.Second
 )
 
 type Provider struct {
@@ -144,13 +147,14 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	})
 
 	term, err := p.launcher.Start(s.Ctx, terminal.StartOptions{
-		Name:       "avenor-" + sessionID[:8],
-		Dir:        merged.Dir,
-		Cols:       220,
-		Rows:       50,
-		Command:    shellCmd,
-		Provenance: merged.Provenance,
-		Env:        peer.AttachEnv(),
+		Name:        "avenor-" + sessionID[:8],
+		Dir:         merged.Dir,
+		Cols:        220,
+		Rows:        50,
+		Command:     shellCmd,
+		Provenance:  merged.Provenance,
+		Env:         peer.AttachEnv(),
+		HangupGrace: hangupGrace,
 	})
 	if err != nil {
 		s.CancelFn()
@@ -267,6 +271,26 @@ func (p *Provider) runSession(ctx context.Context, s *claudecore.Session) {
 			scheduleFollowUp(s.ProgStatusTick())
 		}
 	}
+}
+
+// Close ends every live session. Cancelling a session's context makes its
+// supervision goroutine kill the hosted terminal, so the Claude Code process
+// and any launch-wrapper tree around it do not outlive the provider. It
+// returns once each terminal has been signalled.
+func (p *Provider) Close() error {
+	p.mu.Lock()
+	live := make([]*claudecore.Session, 0, len(p.sessions))
+	for _, s := range p.sessions {
+		live = append(live, s)
+	}
+	p.mu.Unlock()
+	for _, s := range live {
+		s.CancelFn()
+	}
+	for _, s := range live {
+		<-s.Done
+	}
+	return nil
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {

@@ -600,3 +600,55 @@ func TestRuntimePromptRejectedBeforeTeardownPublication(t *testing.T) {
 	finishSyntheticChildLifecycle(sup, c)
 	assertNoLifecycleErrors(t, sup)
 }
+
+// A turn that ends cancelled does not park: the runtime ends and closes its
+// provider right away instead of holding its backend process for the parked
+// timeout.
+func TestCancelledTurnEndsInsteadOfParking(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:        newStableSocketPath(t, "cancel-nopark"),
+		MaxRuntimes:          2,
+		ParkedRuntimeTimeout: time.Hour,
+		ShutdownTimeout:      0,
+	})
+	t.Cleanup(func() {
+		_ = sup.Shutdown("graceful")
+		_ = sup.broker.Stop()
+	})
+	scripted := newParkedScriptedProvider("ses_cancelled", 1)
+	scripted.scripts[0].events[0].event.Fields["stop_reason"] = "cancelled"
+	provider := &countingCloseProvider{stableScriptedProvider: scripted}
+	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return provider, nil
+	}
+
+	result, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: t.TempDir(), SentinelFile: filepath.Join(t.TempDir(), "sentinel.env")})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	child := fetchChild(t, sup, result.RuntimeID)
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled runtime was still held after its turn ended")
+	}
+	if !waitProviderClosed(t, provider, 5*time.Second) {
+		t.Fatal("cancelled runtime did not close its provider")
+	}
+}
+
+// waitProviderClosed waits for a runtime's Close. The provider can be closed on
+// a goroutine the runtime only starts after its lifecycle completes, so a
+// single read right after that completion races the close.
+func waitProviderClosed(t *testing.T, provider *countingCloseProvider, within time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for provider.closeCount() == 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return true
+}

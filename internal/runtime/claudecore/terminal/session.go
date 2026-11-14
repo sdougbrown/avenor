@@ -90,6 +90,11 @@ type StartOptions struct {
 	// the child's environment, and the tmux launcher writes them to a mode-0600
 	// file the pane sources, because a new-session command is argv.
 	Env []string
+	// HangupGrace opts the session into graceful teardown. When positive, a
+	// Kill or a cancelled ctx hangs the hosted process group up once, and the
+	// group is killed if it outlives the grace. Zero kills only the hosted
+	// process, which is the default a session gets.
+	HangupGrace time.Duration
 }
 
 // Launcher creates and manages terminal sessions.
