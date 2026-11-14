@@ -17,10 +17,10 @@ const (
 // Trust-safety dialog Claude shows on first launch in an unfamiliar directory.
 // We require both the header and the trust option to be present, so a stray
 // match on either string in unrelated TUI content doesn't trigger the
-// auto-dismiss. Claude Code 2.1.303 highlights "No, exit" by default, so one
-// Down moves the selection to "Yes, I trust this folder" before Enter
-// confirms it; older releases highlight the trust option and take Enter
-// alone. avenor is invoked against a directory the user chose.
+// auto-dismiss. Claude Code 2.1.x highlights "No, exit" by default, so the
+// handler presses Down until a capture shows the trust option selected; older
+// releases highlight the trust option and take Enter alone. avenor is invoked
+// against a directory the user chose.
 const (
 	trustDialogHeader = "Quick safety check"
 	trustDialogOption = "Yes, I trust this folder"
@@ -99,9 +99,9 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session, timeout time.D
 	ticker := time.NewTicker(PromptInjectCheckInterval)
 	defer ticker.Stop()
 
-	// downBase is the capture a Down was sent on, for the dialog currently on
-	// screen; empty when no Down has been sent for it.
-	var downBase string
+	// trustDialog holds the key-sending state of the trust dialog on screen. It
+	// is reset whenever no trust dialog is on the pane.
+	var trustDialog trustDialogState
 	for {
 		select {
 		case <-ctx.Done():
@@ -126,60 +126,115 @@ func WaitForPaneReady(ctx context.Context, term terminal.Session, timeout time.D
 		}
 		norm := normalizePane(out)
 		if !strings.Contains(norm, trustDialogHeader) || !strings.Contains(norm, trustDialogOption) {
-			downBase = ""
+			trustDialog = trustDialogState{}
 			if paneIsReady(out) {
 				return nil
 			}
 			continue
 		}
-		if key, ok := trustDialogKey(norm, downBase); ok {
+		if key, ok := trustDialog.next(norm, time.Now()); ok {
 			if err := term.SendKeys(ctx, key); err != nil {
 				return err
 			}
-			if key == terminal.KeyDown {
-				downBase = norm
-			}
 		}
 	}
 }
 
-// trustDialogKey picks the key for a trust dialog capture, or ok=false to send
-// nothing. downBase is the capture the dialog's one Down was sent on, or empty.
+const (
+	// trustDialogPressBudget bounds the Downs sent for one dialog. Claude Code
+	// 2.1.x redraws the selection it moved shortly after the dialog first
+	// draws, so a Down that lands at first paint is undone; each retry costs a
+	// check interval. A dialog that consumes the budget without converging is
+	// left alone and readiness fails at its deadline.
+	trustDialogPressBudget = 5
+	// trustDialogConfirmHold is how long the trust option has to stay the live
+	// selection before Enter confirms it. The redraw that follows a Down at
+	// first paint restores "No, exit" about 130ms later, and Enter on that
+	// frame exits Claude.
+	trustDialogConfirmHold = 200 * time.Millisecond
+)
+
+// trustDialogState is the key-sending state for one trust dialog.
+// WaitForPaneReady feeds it one capture per check interval and sends the key it
+// returns, if any.
+type trustDialogState struct {
+	// downBase is the capture the last Down was sent on.
+	downBase string
+	// downBaseRepeated records that a capture identical to downBase has been
+	// passed over once already.
+	downBaseRepeated bool
+	// presses counts the Downs sent for this dialog.
+	presses int
+	// markedAt is when the trust option was first seen as the live selection,
+	// zero until then.
+	markedAt time.Time
+}
+
+// next returns the key to send for one capture, or ok=false to send nothing.
+// now is when norm was captured; at most one key is sent per capture.
 //
-// A dialog gets at most one Down: with two options a second one wraps the
-// selection back to "No, exit". After the Down nothing is sent until the
-// screen changes, since the capture it was based on can still be on screen;
-// then Enter once a `❯` line shows the trust option. The repainted frame may
-// keep the old marker, so any marked line counts there. Before a Down, Enter
-// only when the trust option is marked and "No, exit" is not.
-func trustDialogKey(norm, downBase string) (key terminal.Key, ok bool) {
-	if downBase != "" {
-		if norm == downBase || !trustOptionHighlighted(norm) {
-			return "", false
-		}
-		return terminal.KeyEnter, true
+// While the selection is not on the trust option — the frame's live marker is
+// on "No, exit", or no option is marked yet — the answer is a Down. An
+// identical capture is passed over once before it earns another Down: with two
+// options a Down moves the selection between them, so that frame may be the
+// screen from before the last Down landed. Enter is sent only once the trust
+// option has stayed the live selection for at least trustDialogConfirmHold,
+// since the frame that first shows the marker can be repainted back over it.
+func (d *trustDialogState) next(norm string, now time.Time) (key terminal.Key, ok bool) {
+	if !trustDialogTrustSelected(norm) {
+		d.markedAt = time.Time{}
+		return d.down(norm)
 	}
-	if trustOptionHighlighted(norm) && !markedLineContains(norm, trustDialogExit) {
-		return terminal.KeyEnter, true
+	if d.markedAt.IsZero() {
+		d.markedAt = now
+		return "", false
 	}
+	if now.Sub(d.markedAt) < trustDialogConfirmHold {
+		return "", false
+	}
+	return terminal.KeyEnter, true
+}
+
+// down returns a Down for a capture whose selection is not the trust option, or
+// ok=false once the press budget is spent.
+func (d *trustDialogState) down(norm string) (terminal.Key, bool) {
+	if d.presses >= trustDialogPressBudget {
+		return "", false
+	}
+	if norm != d.downBase {
+		d.downBase = norm
+		d.downBaseRepeated = false
+	} else if !d.downBaseRepeated {
+		d.downBaseRepeated = true
+		return "", false
+	}
+	d.presses++
 	return terminal.KeyDown, true
 }
 
-// trustOptionHighlighted reports whether a `❯`-marked line of the trust dialog
-// is the trust option. The text must already be normalised. Any marked line
-// counts, not just the first: the PTY screen emulator can keep the previous
-// frame's marker on screen after Claude repaints the dialog with the selection
-// moved, and the repainted marker can follow a stray rule character.
-func trustOptionHighlighted(out string) bool {
-	return markedLineContains(out, trustDialogOption)
-}
-
-// markedLineContains reports whether text follows a `❯` on any line of out.
-func markedLineContains(out, text string) bool {
+// trustDialogTrustSelected reports whether the dialog's live selection is the
+// trust option, which is the option its topmost `❯`-marked line names. The text
+// must already be normalised.
+//
+// The topmost marked line is load-bearing. When the selection moves, Claude
+// redraws the option pair at the top of the screen and leaves the pair from the
+// first paint in place, marker included, so a frame sitting on the trust option
+// also marks "No, exit" further down. Only the top pair tracks the selection:
+// the redraw that follows a Down moves the top marker and never touches the
+// leftover pair. A marker can also follow a stray rule character left over from
+// the row it landed on, so the match starts at the chevron rather than at the
+// line start.
+func trustDialogTrustSelected(out string) bool {
 	for _, line := range strings.Split(out, "\n") {
 		_, after, found := strings.Cut(line, "❯")
-		if found && strings.Contains(after, text) {
+		if !found {
+			continue
+		}
+		if strings.Contains(after, trustDialogOption) {
 			return true
+		}
+		if strings.Contains(after, trustDialogExit) {
+			return false
 		}
 	}
 	return false
