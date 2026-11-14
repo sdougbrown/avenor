@@ -31,9 +31,13 @@ func ScanTerminal(ctx context.Context, term terminal.Session) (PaneState, error)
 // AND a spinner line below it; the input box `❯` reappears at the bottom. An
 // activity line therefore must beat any `❯` line, otherwise we'd report idle
 // while a turn is still running.
+//
+// A permission dialog is recognised by its structure (see isPermissionDialog),
+// because Claude words the question per tool. The dialog wordings that identify
+// themselves still classify on their own, before the option list has painted.
 func ClassifyPane(text string) PaneState {
 	text = normalizePane(text)
-	if strings.Contains(text, "Do you want to proceed?") || strings.Contains(text, "Do you want to make this edit") || strings.Contains(text, "Yes, allow all edits") {
+	if isPermissionDialog(text) || hasPermissionWording(text) {
 		return PaneStatePermission
 	}
 	sawInputPrompt := false
@@ -53,6 +57,14 @@ func ClassifyPane(text string) PaneState {
 		return PaneStateIdle
 	}
 	return PaneStateUnknown
+}
+
+// hasPermissionWording matches the dialog question and option wordings that
+// identify a permission prompt without its option list.
+func hasPermissionWording(text string) bool {
+	return strings.Contains(text, "Do you want to proceed?") ||
+		strings.Contains(text, "Do you want to make this edit") ||
+		strings.Contains(text, "Yes, allow all edits")
 }
 
 // looksLikeClaudeActivityLine matches Claude's spinner line. The TUI cycles
