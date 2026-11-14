@@ -754,9 +754,22 @@ func TestAnswerPermissionFailedAnswerLeavesTheDialogBrokerable(t *testing.T) {
 				t.Fatal("failed answer left the request pending")
 			}
 
-			// The dialog is still on screen and waiting, so a later capture
-			// must broker it again.
+			// The dialog is still on screen and waiting, but pane text alone no
+			// longer brokers it: while Claude reports working, a pane that looks
+			// like the dialog is left alone.
 			term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgWorking, Progress: -1, App: "claude-code"})
+			for i := 0; i < 2; i++ {
+				term.QueueCapture(permPaneStale)
+				term.QueueCapture(permPaneStale)
+				s.ScanTerminalTick()
+			}
+			if n := drainPermissionRequests(s); n != 0 {
+				t.Fatalf("permission.request count with no blocked report = %d, want 0", n)
+			}
+
+			// Claude reports blocked on the permission again, so the dialog the
+			// screen still shows is brokered again.
+			term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgBlocked, Kind: terminal.ProgKindPermission, Progress: -1, App: "claude-code"})
 			for i := 0; i < 2; i++ {
 				term.QueueCapture(permPaneStale)
 				term.QueueCapture(permPaneStale)

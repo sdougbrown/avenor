@@ -14,6 +14,19 @@ import (
 
 const permissionPane = "Bash command\n  echo hi\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n"
 
+// imitationDialogPane is a reply a model can print that the pane classifier
+// reads as a permission dialog: the dialog wordings, a question line, a list
+// starting with Yes and the dialog's footer. No pane text can tell it from a
+// real dialog.
+const imitationDialogPane = "● Here is the prompt you asked for:\n" +
+	"Do you want to proceed?\n" +
+	"❯ 1. Yes, allow all edits\n" +
+	"  2. No\n" +
+	"Esc to cancel\n" +
+	"● Do you want to make this edit to hello.txt?\n" +
+	"\n" +
+	"❯ \n"
+
 func shortenProgStatusTimings(t *testing.T) {
 	t.Helper()
 	saved := []time.Duration{progReadyPoll, progQueryWindow, progIdleGrace, progFinishSettle, progFollowUpInterval, progTranscriptBurst}
@@ -388,11 +401,12 @@ func answerPending(t *testing.T, s *Session) string {
 
 // tickPaneScan runs one pane scan tick with exactly the captures that tick
 // reads: one to classify the pane, plus the broker's parse capture when the
-// pane shows a dialog and none is pending.
+// pane shows a dialog, none is pending, and the OSC gate lets the scan broker.
 func tickPaneScan(t *testing.T, s *Session, pane string) {
 	t.Helper()
 	s.Mu.Lock()
-	parse := s.PendingTerminalPerm == nil
+	parse := s.PendingTerminalPerm == nil &&
+		(!s.osc.active || s.rootBlockedOnPermissionLocked())
 	s.Mu.Unlock()
 	captures := 1
 	if parse && ClassifyPane(pane) == PaneStatePermission {
@@ -471,7 +485,7 @@ func TestPaneScanWithoutOSCBrokersAnAnsweredDialogAgain(t *testing.T) {
 	}
 }
 
-func TestPaneScanBrokersAgainOnceTheAnsweredOptionsLeave(t *testing.T) {
+func TestPaneScanBrokersARepeatDialogAfterANewBlockedReport(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		repaint string
@@ -500,9 +514,13 @@ func TestPaneScanBrokersAgainOnceTheAnsweredOptionsLeave(t *testing.T) {
 				t.Fatalf("answered dialog brokered again: permission.request count = %d", n)
 			}
 
-			// Claude repainted; a later dialog repeats the same options.
-			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			// Claude repaints, then blocks on a dialog that repeats the same
+			// options. Only that report may broker it.
 			tickPaneScan(t, s, tt.repaint)
+			term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+			next := blocked
+			next.Msg = "approve Bash: echo again"
+			term.ReportProgStatus(next)
 			for i := 0; i < 2; i++ {
 				tickPaneScan(t, s, permissionPane)
 			}
@@ -553,13 +571,15 @@ func TestProgStatusPaneScanWaitsForTheDialogToFinishPainting(t *testing.T) {
 }
 
 func TestProgStatusPaneScanBrokersAStableDialog(t *testing.T) {
-	// No blocked report, so no chase: the pane scan is the only broker. Each
-	// scan captures twice (classify, then parse).
+	// A blocked-on-permission report arms the pane scan, which brokers on the
+	// chase's rule: two captures in a row showing the same options. Each scan
+	// captures twice (classify, then parse).
 	half := "Bash command\n  echo hi\nDo you want to proceed?\n❯ 1. Yes\n"
 	s, term, _ := newProgStatusSession(t, half, half, permissionPane)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
 	s.ProgStatusTick()
 	drainSessionEvents(s.Events)
+	term.ReportProgStatus(rootReport(terminal.ProgBlocked, terminal.ProgKindPermission))
 
 	s.ScanTerminalTick()
 	s.ScanTerminalTick()
@@ -580,12 +600,14 @@ func TestProgStatusPaneScanBrokersAStableDialog(t *testing.T) {
 }
 
 func TestProgStatusPaneScanNeedsTwoCapturesPerDialog(t *testing.T) {
-	// Two dialogs in a row with the same options: the second is brokered only
-	// after two captures of its own.
+	// Two dialogs in a row with the same options, each under its own blocked
+	// report: the second is brokered only after two captures of its own.
 	second := strings.Replace(permissionPane, "echo hi", "echo bye", 1)
 	s, term, _ := newProgStatusSession(t, permissionPane, permissionPane, permissionPane, permissionPane, second)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
-	s.ProgStatusTick()
+	blocked := rootReport(terminal.ProgBlocked, terminal.ProgKindPermission)
+	blocked.Msg = "approve Bash: echo hi"
+	term.ReportProgStatus(blocked)
 	drainSessionEvents(s.Events)
 
 	s.ScanTerminalTick()
@@ -598,6 +620,9 @@ func TestProgStatusPaneScanNeedsTwoCapturesPerDialog(t *testing.T) {
 	s.PendingTerminalPerm = nil
 	s.Mu.Unlock()
 
+	next := blocked
+	next.Msg = "approve Bash: echo bye"
+	term.ReportProgStatus(next)
 	s.ScanTerminalTick()
 	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 0 {
 		t.Fatalf("second dialog brokered on its first capture (%d requests)", n)
@@ -606,6 +631,80 @@ func TestProgStatusPaneScanNeedsTwoCapturesPerDialog(t *testing.T) {
 	got := drainSessionEvents(s.Events)
 	if n := countEvents(got, "permission.request"); n != 1 {
 		t.Fatalf("second dialog: permission.request count = %d, want 1", n)
+	}
+}
+
+// A model reply can print everything a permission dialog shows, so pane text
+// cannot tell a real dialog from an imitation. While OSC 7501 reports are
+// active, only Claude's own blocked-on-permission report may broker one.
+func TestProgStatusPaneScanIgnoresAnImitatedDialog(t *testing.T) {
+	if got := ClassifyPane(imitationDialogPane); got != PaneStatePermission {
+		t.Fatalf("ClassifyPane(imitation) = %q, want %q; the fixture no longer imitates a dialog", got, PaneStatePermission)
+	}
+	for _, state := range []terminal.ProgState{terminal.ProgWorking, terminal.ProgIdle} {
+		t.Run(string(state), func(t *testing.T) {
+			s, term, _ := newProgStatusSession(t, imitationDialogPane)
+			term.ReportProgStatus(rootReport(state, ""))
+			drainSessionEvents(s.Events)
+			for i := 0; i < 3; i++ {
+				s.ScanTerminalTick()
+				s.ScanTerminalTick()
+				s.ProgStatusTick()
+			}
+			got := drainSessionEvents(s.Events)
+			if n := countEvents(got, "permission.request"); n != 0 {
+				t.Fatalf("root %s brokered the imitated dialog %d times: %v", state, n, eventNames(got))
+			}
+			s.Mu.Lock()
+			pending := s.PendingTerminalPerm
+			s.Mu.Unlock()
+			if pending != nil {
+				t.Fatalf("root %s: imitated dialog brokered as %+v", state, pending)
+			}
+		})
+	}
+}
+
+// The same pane is brokered while Claude reports blocked on a permission: the
+// report decides, not the text.
+func TestProgStatusPaneScanBrokersUnderABlockedPermissionReport(t *testing.T) {
+	s, term, _ := newProgStatusSession(t, imitationDialogPane)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	term.ReportProgStatus(rootReport(terminal.ProgBlocked, terminal.ProgKindPermission))
+	drainSessionEvents(s.Events)
+	s.ScanTerminalTick()
+	s.ScanTerminalTick()
+	if n := countEvents(drainSessionEvents(s.Events), "permission.request"); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
+	}
+}
+
+// A blocked report on a question or authentication is not a permission dialog,
+// so it does not open the pane scan to one either.
+func TestProgStatusBlockedQuestionDoesNotBrokerAPaneDialog(t *testing.T) {
+	s, term, _ := newProgStatusSession(t, imitationDialogPane)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	q := rootReport(terminal.ProgBlocked, terminal.ProgKindQuestion)
+	q.Msg = "answer: red or blue?"
+	term.ReportProgStatus(q)
+	drainSessionEvents(s.Events)
+	for i := 0; i < 3; i++ {
+		s.ScanTerminalTick()
+		s.ScanTerminalTick()
+		s.ProgStatusTick()
+	}
+	if got := drainSessionEvents(s.Events); countEvents(got, "permission.request") != 0 {
+		t.Fatalf("blocked question brokered a permission dialog: %v", eventNames(got))
+	}
+}
+
+// Without OSC 7501 reports the pane is the only signal, so an imitation is
+// brokered as a dialog: the documented limit, pinned as unchanged.
+func TestPaneScanWithoutOSCBrokersAnImitatedDialog(t *testing.T) {
+	s := newTestSession(t, imitationDialogPane)
+	s.Prompted = true
+	if n := scanRequests(t, s, imitationDialogPane); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
 	}
 }
 

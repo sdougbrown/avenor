@@ -206,6 +206,7 @@ func (s *Session) ScanTerminalTick() {
 	currentPerm := s.PendingTerminalPerm
 	oscActive := s.osc.active
 	rootBlocked := s.osc.root.State == terminal.ProgBlocked
+	blockedPerm := s.rootBlockedOnPermissionLocked()
 	s.Mu.Unlock()
 
 	if finished || !prompted {
@@ -218,6 +219,16 @@ func (s *Session) ScanTerminalTick() {
 
 		// If we already brokered this permission, wait for resolution.
 		if currentPerm != nil {
+			return
+		}
+
+		// With OSC 7501 active this scan is a second path to the dialog the
+		// blocked-report chase brokers. Pane text cannot separate a real
+		// dialog from one a model reply printed: the question, the option list
+		// and the footer are all printable. Only the blocked report may broker
+		// it. Without OSC the pane is the only signal and is brokered as
+		// before.
+		if oscActive && !blockedPerm {
 			return
 		}
 

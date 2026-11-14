@@ -224,12 +224,18 @@ func (s *Session) ProgStatusTick() time.Duration {
 	return 0
 }
 
+// rootBlockedOnPermissionLocked reports whether Claude's root report is blocked
+// on a permission. It is the report that separates a real permission dialog
+// from one a model reply can print: pane text cannot. Mu is held.
+func (s *Session) rootBlockedOnPermissionLocked() bool {
+	return s.osc.root.State == terminal.ProgBlocked && s.osc.root.Kind == terminal.ProgKindPermission
+}
+
 // permissionChaseDue reports whether a blocked permission report is still
 // waiting for its dialog to be brokered. Mu is held.
 func (s *Session) permissionChaseDue(now time.Time) bool {
 	return s.Prompted && !s.Finished && s.PendingTerminalPerm == nil && !s.osc.permBrokered &&
-		s.osc.root.State == terminal.ProgBlocked && s.osc.root.Kind == terminal.ProgKindPermission &&
-		now.Before(s.osc.chaseUntil)
+		s.rootBlockedOnPermissionLocked() && now.Before(s.osc.chaseUntil)
 }
 
 // permissionCaptureStableLocked records the options of the permission dialog
