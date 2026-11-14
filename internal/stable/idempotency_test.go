@@ -1039,6 +1039,7 @@ func TestIdempotencyHashExclusionSet(t *testing.T) {
 		"RosterEntry":       func(p *SpawnParams) { p.RosterEntry = "other-entry" },
 		"ParentRunID":       func(p *SpawnParams) { p.ParentRunID = "run_other" },
 		"LaunchWrapper":     func(p *SpawnParams) { p.LaunchWrapper = []string{"other-wrapper"} },
+		"Park":              func(p *SpawnParams) { p.Park = boolPtr(false) },
 	}
 	var got string
 	for field, mutate := range intent {

@@ -112,6 +112,7 @@ Spawn parameters (all optional except one prompt source):
 | `--auto-approve` | bool | Automatically approve ordinary permission requests without file-based handlers. Questions that require user input still wait for an answer |
 | `--timeout` | int | Overall session timeout in seconds. Bounds direct, loop, and team spawns alike: every attempt, retry, and nudge stops at the shared wall-clock deadline and the runtime records `timeout` |
 | `--max-retries` | int | Maximum retry attempts on transient failure |
+| `--no-park` | bool | End the run when its turn succeeds instead of parking it for a follow-up prompt. The backend is released immediately rather than held for `--parked-timeout`, and the run cannot be prompted again once it has ended: a prompt queued earlier in the turn still runs first, and a later follow-up has to resume it in a new runtime, which keeps the opt-out and works only when the backend persisted the session. Loop, team, workflow, and permission-decider runs already end after their work and ignore it |
 
 Spawn returns immediately with the runtime ID and paths to the event log and sentinel file:
 
@@ -318,7 +319,7 @@ max runtimes (16) reached
 
 The limit prevents resource exhaustion and gives you a predictable constraint for scheduling.
 
-A runtime that finishes its turn successfully does not keep its slot: it parks (holding its backend process open for a potential follow-up prompt) and stops counting against the limit. A parked runtime is reaped after `--parked-timeout` (default 30m). Whether a reaped runtime's session can still be continued depends on the backend: codex persists threads and the message tool's `resume` action continues them by ID; pi runs persist their session only when `AVENOR_PI_SESSIONS=1` is set (see [backends.md](backends.md#persisted-sessions-and-resume)), and then resume across processes the same way; claude sessions live only in their host process. Without a persisted session, a resume after the reap fails with an explicit error instead of silently resuming a fresh session.
+A runtime that finishes its turn successfully does not keep its slot: it parks (holding its backend process open for a potential follow-up prompt) and stops counting against the limit. A parked runtime is reaped after `--parked-timeout` (default 30m). Spawn with `--no-park` (`park: false` on the control `spawn` and `spawn_mcp` request) to skip the grace window: the run ends as soon as its turn succeeds, releases its backend right away, and cannot be prompted again — a follow-up then has to resume it in a new runtime, and that resume keeps the opt-out so the follow-up also ends after its turn instead of parking. A prompt queued before a `park: false` run ended still runs: the run ends only once its queue is empty. Whether a reaped or ended runtime's session can still be continued depends on the backend: codex persists threads and the message tool's `resume` action continues them by ID; pi runs persist their session only when `AVENOR_PI_SESSIONS=1` is set (see [backends.md](backends.md#persisted-sessions-and-resume)), and then resume across processes the same way; claude sessions live only in their host process. Without a persisted session, a resume after the reap fails with an explicit error instead of silently resuming a fresh session.
 
 ### Tree descendant budget
 

@@ -2268,6 +2268,38 @@ func TestAvenorSpawnAutoApproveTrue(t *testing.T) {
 	}
 }
 
+// The MCP spawn tool's parking opt-out reaches the supervisor request as
+// park:false, and an omitted choice sends no key so the supervisor's default
+// (park) applies.
+func TestAvenorSpawnParkOptOut(t *testing.T) {
+	parkOptOut := false
+	for _, tc := range []struct {
+		name    string
+		park    *bool
+		want    any
+		present bool
+	}{
+		{"omitted", nil, nil, false},
+		{"opt out", &parkOptOut, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeClient{}
+			s, err := NewServer(Options{Transport: "stdio", NoAutostart: true, ControlClient: fake})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = s.handleAvenorSpawn(context.Background(), nil, spawnArgs{Dir: "/tmp/test-repo", Park: tc.park})
+			if err != nil {
+				t.Fatalf("spawn: %v", err)
+			}
+			got, present := fake.spawnCapturedParams["park"]
+			if present != tc.present || got != tc.want {
+				t.Fatalf("park=%v present=%v, want %v present=%v", got, present, tc.want, tc.present)
+			}
+		})
+	}
+}
+
 func TestAvenorSpawnTimeoutDurationString(t *testing.T) {
 	fake := &fakeClient{}
 	s, err := NewServer(Options{

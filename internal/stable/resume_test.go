@@ -1022,3 +1022,109 @@ func TestSpawnRosterPersistSessionsMerge(t *testing.T) {
 		t.Fatalf("persist_sessions = %v, want the spawn's explicit false", params.PersistSessions)
 	}
 }
+
+// newResumeTurnSupervisor builds a supervisor that hands every spawn the same
+// scripted provider, so a prior run and its cold resume each open one attempt.
+func newResumeTurnSupervisor(t *testing.T, socket string, provider runtime.Provider) *Supervisor {
+	t.Helper()
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:        newStableSocketPath(t, socket),
+		MaxRuntimes:          2,
+		ParkedRuntimeTimeout: time.Hour,
+		ShutdownTimeout:      0,
+	})
+	t.Cleanup(func() {
+		_ = sup.Shutdown("graceful")
+		_ = sup.broker.Stop()
+	})
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		return provider, nil
+	}
+	return sup
+}
+
+// A resume carries the prior run's parking choice: a follow-up to a park:false
+// run ends after its turn instead of parking and holding a backend the prior
+// run released, while a default run's follow-up still parks.
+func TestResumeCarriesParkChoice(t *testing.T) {
+	t.Parallel()
+	owner := messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}
+
+	t.Run("park:false prior ends after its turn", func(t *testing.T) {
+		t.Parallel()
+		provider := &countingCloseProvider{stableScriptedProvider: newParkedScriptedProvider("ses_resume_no_park", 2)}
+		dir := t.TempDir()
+		sup := newResumeTurnSupervisor(t, "resume-no-park", provider)
+		park := false
+		prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: dir, Label: "prior", Park: &park, SentinelFile: filepath.Join(dir, "prior.env")})
+		if err != nil {
+			t.Fatalf("spawn prior: %v", err)
+		}
+		priorChild := fetchChild(t, sup, prior.RuntimeID)
+		select {
+		case <-priorChild.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("park:false prior did not end after its turn")
+		}
+
+		resumed, err := sup.Resume(owner, messaging.ResumeRequest{
+			RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+			SentinelFile: filepath.Join(dir, "next.env"),
+		})
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		if resumed.RuntimeID == prior.RuntimeID {
+			t.Fatal("a park:false prior must resume cold; it has no parked runtime to continue")
+		}
+		resumedChild := fetchChild(t, sup, resumed.RuntimeID)
+		select {
+		case <-resumedChild.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("resumed park:false run did not end after its turn")
+		}
+		if childParked(resumedChild) {
+			t.Fatal("resumed park:false run parked instead of ending")
+		}
+	})
+
+	t.Run("default prior still parks", func(t *testing.T) {
+		t.Parallel()
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		openTurn := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(openTurn)
+		provider := &countingCloseProvider{stableScriptedProvider: newHeldFirstTurnProvider("ses_resume_park_default", 2, release)}
+		dir := t.TempDir()
+		sup := newResumeTurnSupervisor(t, "resume-park-default", provider)
+		sentinel := filepath.Join(dir, "prior.env")
+		prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: dir, Label: "prior", SentinelFile: sentinel})
+		if err != nil {
+			t.Fatalf("spawn prior: %v", err)
+		}
+		// Cancel the held first turn so the prior run ends without parking, and
+		// leave a resumable sentinel naming the live session behind: the resume
+		// then takes the cold arm, the arm that reads the prior run's parking
+		// choice.
+		finishResumeFixture(t, sup, prior, sentinel, true)
+
+		resumed, err := sup.Resume(owner, messaging.ResumeRequest{
+			RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+			SentinelFile: filepath.Join(dir, "next.env"),
+		})
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		resumedChild := fetchChild(t, sup, resumed.RuntimeID)
+		deadline := time.Now().Add(5 * time.Second)
+		for !childParked(resumedChild) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if childCompleted(resumedChild) {
+			t.Fatal("default run's resume ended instead of parking after its turn")
+		}
+		if !childParked(resumedChild) {
+			t.Fatal("default run's resume should park after its turn")
+		}
+	})
+}

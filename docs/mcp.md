@@ -239,6 +239,8 @@ Starts a new run.
 
 The supervisor `resume` operation preserves the run's messaging choice. A raw `spawn` with `session_id` uses the caller's `messaging` choice or its default instead. `avenor run --resume` has no supervisor choice and treats messaging as off; a poo session created with messaging on may fail to resume when its recorded tools are unavailable.
 
+The supervisor `resume` operation also preserves the run's parking choice: the follow-up of a `park: false` run ends when its turn succeeds instead of parking and holding a backend the prior run released, while a run that parked keeps parking its follow-ups.
+
 **Required:**
 - `dir` — working directory for the run
 
@@ -251,6 +253,7 @@ The supervisor `resume` operation preserves the run's messaging choice. A raw `s
 - `model` — model override; independent of `agent` and `backend`, so a model can be named alone
 - `backend` — runtime backend (e.g., `"opencode-acp"`, `"codex-app-server"`, `"agy"`, `"pi"`, `"claude"`). Naming one avoids relying on a runtime default
 - `messaging` — request poo messaging on or off. Omitted defaults on for delegation spawns and off for workflow nodes, loop or team phases, and permission-decider runs. True is refused for loop and team spawns. The switch is carried per run; poo messaging is not wired at launch yet.
+- `park` — whether a successful turn parks the run for a follow-up prompt. Omitted (or true) parks: the backend process stays alive until a prompt arrives or the supervisor's `--parked-timeout` reaps it. `false` ends the run when its turn succeeds and releases the backend immediately, so `prompt` and `interrupt_and_prompt` then report that the run has ended; a follow-up has to resume it in a new runtime (`message` with `action: "resume"`, which continues the session only when the backend persisted it). Loop, team, workflow, and permission-decider runs already end after their work and ignore the field. Only the Go MCP server publishes it; the pi and OpenCode spawn tools do not list the field. A resume carries the choice: the follow-up of a `park: false` run ends after its turn too.
 - `roster_file` — path to a roster map; pair it with `roster_entry` to select a whole loadout by key. Setting `roster_entry` turns on roster mode, which rejects `agent`, `model`, and `backend`
 - `roster_entry` — roster entry key; the selected entry supplies backend, agent, and model as one identity, and its optional `thinking` is only a default. Requires `roster_file`
 - `server_url` — server URL for opencode-http backend

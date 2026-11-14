@@ -176,6 +176,13 @@
       ],
       "description": "Optional auto-approve all permission requests so the run executes unattended (no answer_permission needed)."
     },
+    "park": {
+      "type": "boolean",
+      "x-avenor-surfaces": [
+        "go"
+      ],
+      "description": "false = end the run after its turn instead of parking it for follow-ups; omitted parks"
+    },
     "persist_sessions": {
       "type": "boolean",
       "x-avenor-surfaces": [

@@ -159,6 +159,7 @@ type spawnArgs struct {
 	AutoApprove    bool     `json:"auto_approve,omitempty"`
 	PersistSession *bool    `json:"persist_sessions,omitempty"`
 	Messaging      *bool    `json:"messaging,omitempty"`
+	Park           *bool    `json:"park,omitempty"`
 }
 
 // UnmarshalJSON makes the Go MCP spawn tool a strict raw boundary: unknown
@@ -1186,6 +1187,9 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	if args.Messaging != nil {
 		params["messaging"] = *args.Messaging
+	}
+	if args.Park != nil {
+		params["park"] = *args.Park
 	}
 	if args.ServerURL != "" {
 		params["server_url"] = args.ServerURL
