@@ -283,6 +283,30 @@ func TestProgStatusBlockedPermissionBrokersAndSurvivesPaneIdle(t *testing.T) {
 	}
 }
 
+// A file-creation dialog brokers like a Bash dialog, so an asking run does not
+// wait out its timeout on the first new file.
+func TestProgStatusBlockedCreateFileDialogBrokers(t *testing.T) {
+	s, term, _ := newProgStatusSession(t, workingPane, paneCaptureCreateFile)
+	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))
+	term.ReportProgStatus(rootReport(terminal.ProgBlocked, terminal.ProgKindPermission))
+	s.ProgStatusTick()
+	s.ProgStatusTick()
+	s.ProgStatusTick()
+
+	var req events.Event
+	for _, ev := range drainSessionEvents(s.Events) {
+		if ev.Event == "permission.request" {
+			req = ev
+		}
+	}
+	if req.Event == "" {
+		t.Fatal("no permission.request emitted for the create dialog")
+	}
+	if desc, _ := req.Fields["description"].(string); !strings.Contains(desc, "Do you want to create hello.txt?") {
+		t.Fatalf("description = %q, want the create question with its path", desc)
+	}
+}
+
 func TestProgStatusAnsweredPermissionIsNotBrokeredAgain(t *testing.T) {
 	s, term, _ := newProgStatusSession(t, permissionPane)
 	term.ReportProgStatus(rootReport(terminal.ProgWorking, ""))

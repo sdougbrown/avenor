@@ -2,6 +2,7 @@ package claudecore
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +64,39 @@ func TestParseTerminalPermissionTakesDialogOptions(t *testing.T) {
 			}
 			if perm.Prompt != tt.wantPrompt {
 				t.Fatalf("prompt = %q, want %q", perm.Prompt, tt.wantPrompt)
+			}
+		})
+	}
+}
+
+// The tool dialogs carry their question and the file path in the pane text
+// above the option list, which is what the brokered description shows.
+func TestParseTerminalPermissionFileDialogs(t *testing.T) {
+	fileOptions := []PermissionOption{
+		{ID: "1", Label: "Yes", Kind: "allow"},
+		{ID: "2", Label: "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session", Kind: "allow"},
+		{ID: "3", Label: "No", Kind: "reject"},
+	}
+	tests := []struct {
+		name     string
+		pane     string
+		wantPath string
+		wantAsk  string
+	}{
+		{name: "create file", pane: paneCaptureCreateFile, wantPath: "Create file hello.txt", wantAsk: "Do you want to create hello.txt?"},
+		{name: "edit file", pane: paneCaptureEditFile, wantPath: "Edit file hello.txt", wantAsk: "Do you want to make this edit to hello.txt?"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			perm := ParseTerminalPermission(tt.pane)
+			if perm == nil {
+				t.Fatal("no permission parsed")
+			}
+			if !reflect.DeepEqual(perm.Options, fileOptions) {
+				t.Fatalf("options = %+v, want %+v", perm.Options, fileOptions)
+			}
+			if !strings.Contains(perm.Prompt, tt.wantPath) || !strings.Contains(perm.Prompt, tt.wantAsk) {
+				t.Fatalf("prompt = %q, want it to carry %q and %q", perm.Prompt, tt.wantPath, tt.wantAsk)
 			}
 		})
 	}
