@@ -683,6 +683,92 @@ func TestBrokeredPermissionAnswersThroughFileHandler(t *testing.T) {
 	}
 }
 
+// permPaneStale is an answered dialog's option list still on screen under a
+// header the running tool has repainted.
+const permPaneStale = "Bash command\n  echo hi\n  Running… (1s)\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n"
+
+// drainPermissionRequests empties the session's event buffer and returns how
+// many permission requests it held.
+func drainPermissionRequests(s *claudecore.Session) int {
+	n := 0
+	for len(s.Events) > 0 {
+		if ev := <-s.Events; ev.Event == "permission.request" {
+			n++
+		}
+	}
+	return n
+}
+
+// newBrokeredOSCPermissionSession returns a prompted session whose permission
+// dialog the pane scan brokered while OSC 7501 reports it blocked.
+func newBrokeredOSCPermissionSession(t *testing.T) (*Provider, *claudecore.Session, *terminal.FakeSession) {
+	t.Helper()
+	const pane = "Bash command\n  echo hi\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n"
+	term := terminal.NewFakeSession("perm-osc", 1, pane)
+	term.SetKind("pty")
+	term.SetProgStatusAnswering(true)
+	term.AnswerProgStatusQuery()
+	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{SessionID: "ses-perm-send", Term: term, EventsBuf: 32})
+	t.Cleanup(s.CancelFn)
+	s.AttachProgStatus(term)
+	s.Prompted = true
+	term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgBlocked, Kind: terminal.ProgKindPermission, Progress: -1, App: "claude-code"})
+	// With OSC active the dialog is brokered once two captures agree.
+	for i := 0; i < 2; i++ {
+		term.QueueCapture(pane)
+		term.QueueCapture(pane)
+		s.ScanTerminalTick()
+	}
+	if n := drainPermissionRequests(s); n != 1 {
+		t.Fatalf("permission.request count = %d, want 1", n)
+	}
+	p := &Provider{sessions: map[string]*claudecore.Session{s.SessionID: s}}
+	return p, s, term
+}
+
+func TestAnswerPermissionFailedAnswerLeavesTheDialogBrokerable(t *testing.T) {
+	tests := []struct {
+		name    string
+		resp    runtime.PermissionResponse
+		sendErr error
+	}{
+		{name: "send fails", resp: runtime.PermissionResponse{Allow: true, OptionID: "1"}, sendErr: errors.New("pty closed")},
+		{name: "invalid option", resp: runtime.PermissionResponse{Allow: true, OptionID: "9!"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, s, term := newBrokeredOSCPermissionSession(t)
+			s.Mu.Lock()
+			requestID := s.PendingTerminalPerm.RequestID
+			s.Mu.Unlock()
+			if tt.sendErr != nil {
+				term.SetSendErr(tt.sendErr)
+			}
+			if err := p.AnswerPermission(context.Background(), s.SessionID, requestID, tt.resp); err == nil {
+				t.Fatal("AnswerPermission succeeded, want an error")
+			}
+			s.Mu.Lock()
+			pending := s.PendingTerminalPerm
+			s.Mu.Unlock()
+			if pending != nil {
+				t.Fatal("failed answer left the request pending")
+			}
+
+			// The dialog is still on screen and waiting, so a later capture
+			// must broker it again.
+			term.ReportProgStatus(terminal.ProgStatus{State: terminal.ProgWorking, Progress: -1, App: "claude-code"})
+			for i := 0; i < 2; i++ {
+				term.QueueCapture(permPaneStale)
+				term.QueueCapture(permPaneStale)
+				s.ScanTerminalTick()
+			}
+			if n := drainPermissionRequests(s); n != 1 {
+				t.Fatalf("permission.request count after the failed answer = %d, want 1", n)
+			}
+		})
+	}
+}
+
 func TestAnswerPermissionRejectsUnknownRequest(t *testing.T) {
 	p := &Provider{sessions: make(map[string]*claudecore.Session)}
 

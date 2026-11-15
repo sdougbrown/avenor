@@ -188,12 +188,16 @@ func (s *Session) ProgStatusTick() time.Duration {
 	s.Mu.Unlock()
 
 	if chase {
-		if out, err := s.Term.Capture(s.Ctx); err == nil && ClassifyPane(out) == PaneStatePermission {
-			s.Mu.Lock()
-			stable := s.permissionCaptureStableLocked(out)
-			s.Mu.Unlock()
-			if stable {
-				s.brokerTerminalPermission(out)
+		if out, err := s.Term.Capture(s.Ctx); err == nil {
+			if ClassifyPane(out) != PaneStatePermission {
+				s.clearAnsweredOptions()
+			} else {
+				s.Mu.Lock()
+				stable := s.permissionCaptureStableLocked(out)
+				s.Mu.Unlock()
+				if stable {
+					s.brokerTerminalPermission(out)
+				}
 			}
 		}
 	}
@@ -234,15 +238,23 @@ func (s *Session) permissionChaseDue(now time.Time) bool {
 // options are compared, so live output elsewhere on screen cannot stop the
 // dialog from settling. Mu is held.
 func (s *Session) permissionCaptureStableLocked(out string) bool {
-	var key strings.Builder
-	if perm := ParseTerminalPermission(out); perm != nil {
-		for _, o := range perm.Options {
-			key.WriteString(o.ID + ". " + o.Label + "\n")
-		}
-	}
-	stable := key.Len() > 0 && key.String() == s.osc.chaseLast
-	s.osc.chaseLast = key.String()
+	key := permissionOptionsKey(ParseTerminalPermission(out))
+	stable := key != "" && key == s.osc.chaseLast
+	s.osc.chaseLast = key
 	return stable
+}
+
+// permissionOptionsKey identifies a dialog by its option list alone, or is ""
+// for no dialog.
+func permissionOptionsKey(perm *TerminalPermission) string {
+	if perm == nil {
+		return ""
+	}
+	var key strings.Builder
+	for _, o := range perm.Options {
+		key.WriteString(o.ID + ". " + o.Label + "\n")
+	}
+	return key.String()
 }
 
 // permissionBrokeredLocked reports whether the dialog of the current blocked
@@ -414,6 +426,9 @@ func (s *Session) applyProgReport(r terminal.ProgReport) {
 		}
 	case terminal.ProgBlocked:
 		if st.Kind == terminal.ProgKindPermission {
+			// A blocked report starts a dialog of its own, whatever options
+			// the screen still shows from an answered one.
+			s.answeredOptions = ""
 			if turn {
 				o.chaseUntil = now.Add(progPermissionChase)
 				o.chaseLast = ""
