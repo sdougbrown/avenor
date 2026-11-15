@@ -88,7 +88,7 @@ func TestSchemaFieldParity(t *testing.T) {
 		// spawnArgs — dir is required.
 		// agent and model are independently optional; omitting both uses runtime defaults.
 		// All remaining fields are optional.
-		allowed := []string{"agent", "dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "launch_wrapper", "auto_approve", "persist_sessions", "messaging"}
+		allowed := []string{"agent", "dir", "prompt", "prompt_file", "label", "timeout", "model", "thinking", "backend", "roster_file", "roster_entry", "server_url", "supervisor_id", "idempotency_key", "launch_wrapper", "auto_approve", "persist_sessions", "messaging", "park"}
 		required := []string{"dir"}
 		assertFields(t, "spawnArgs", allowed, required)
 	})
@@ -251,6 +251,7 @@ func TestSpawnArgsRejectsUnknownKeys(t *testing.T) {
 		{"server_url", `{"dir":"/tmp/r","server_url":"http://x"}`},
 		{"supervisor_id", `{"dir":"/tmp/r","supervisor_id":"s"}`},
 		{"auto_approve", `{"dir":"/tmp/r","auto_approve":true}`},
+		{"park opt-out", `{"dir":"/tmp/r","park":false}`},
 		// Combined: all provider options together to verify no interactions
 		// cause unexpected rejection.
 		{"all provider options", `{"dir":"/tmp/r","agent":"reviewer","model":"provider/model","backend":"opencode-acp","prompt":"hi","prompt_file":"/tmp/p","label":"l","timeout":"5m","thinking":"high","server_url":"http://x","supervisor_id":"s","auto_approve":true}`},
@@ -292,7 +293,7 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 	// without error into the struct.
 	obj := make(map[string]any)
 	for _, f := range allowed {
-		if f == "auto_approve" || f == "wait" || f == "persist_sessions" || f == "messaging" {
+		if f == "auto_approve" || f == "wait" || f == "persist_sessions" || f == "messaging" || f == "park" {
 			obj[f] = true
 			continue
 		}
@@ -328,6 +329,9 @@ func assertFields(t *testing.T, structName string, allowed, required []string) {
 		}
 		if a.PersistSession == nil || !*a.PersistSession {
 			t.Errorf("%s: persist_sessions not populated", structName)
+		}
+		if a.Park == nil || !*a.Park {
+			t.Errorf("%s: park not populated", structName)
 		}
 		if !reflect.DeepEqual(a.LaunchWrapper, []string{"test"}) {
 			t.Errorf("%s: launch_wrapper not populated: %v", structName, a.LaunchWrapper)
@@ -538,7 +542,7 @@ func TestMergedSchemaPublished(t *testing.T) {
 		"message": {"action", "idempotency_key", "label", "message", "message_id", "payload", "reply_to", "target", "timeout_ms"},
 		"peers":   {"action", "name", "session_id", "target"},
 		"spawn": {"agent", "auto_approve", "backend", "idempotency_key", "label", "launch_wrapper",
-			"messaging", "model", "persist_sessions", "prompt", "prompt_file", "dir",
+			"messaging", "model", "park", "persist_sessions", "prompt", "prompt_file", "dir",
 			"roster_entry", "roster_file", "server_url", "supervisor_id", "thinking", "timeout"},
 		"workflow": {"action", "activation_id", "actor", "after_seq", "artifacts", "attempt_id", "controller_id", "evidence_ids", "gate_id", "lease_id", "limit", "node_id", "observed_at", "operation", "outcome", "outputs", "owner_token", "poll_id", "reason", "response_hash", "result", "source", "subject", "supervisor_id", "timeout", "workflow_id"},
 	} {

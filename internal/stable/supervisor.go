@@ -181,6 +181,14 @@ type SpawnParams struct {
 	Messaging       *bool  `json:"messaging,omitempty"`
 	ServerURL       string `json:"server_url,omitempty"`
 	Backend         string `json:"backend,omitempty"`
+	// Park decides whether a successful turn parks the runtime for a
+	// follow-up prompt, holding its backend process until a prompt arrives
+	// or the supervisor's parked timeout reaps it. Nil parks (the default);
+	// false ends the run when its turn succeeds, releasing the backend
+	// immediately. A prompt accepted before the run ended still runs as its
+	// next turn; once it has ended, only a resume, which starts a new
+	// runtime, continues its session.
+	Park *bool `json:"park,omitempty"`
 	// LaunchWrapper is an opaque argv prefix placed in front of the backend
 	// process command at launch. Avenor does not interpret it; empty or
 	// absent means the backend is launched unwrapped. Probes and helper
@@ -291,6 +299,11 @@ type resumeSpawn struct {
 	messagingOn *bool
 }
 
+// parkAfterTurn reports whether a successful turn parks this run for a
+// follow-up prompt. An omitted Park parks; an explicit false ends the run when
+// its turn succeeds.
+func (p SpawnParams) parkAfterTurn() bool { return p.Park == nil || *p.Park }
+
 type SpawnResult struct {
 	RuntimeID string `json:"runtime_id"`
 	// RunID is the public run id the surface supplied, internal to the resume
@@ -382,9 +395,14 @@ type childRuntime struct {
 	// re-deriving from the resolved record, which is pinned to the run's
 	// backend and would force a phase-selected pi attempt under a non-pi
 	// run.
-	persistChoice      *bool
-	messagingChoice    *bool
-	messagingOn        bool
+	persistChoice   *bool
+	messagingChoice *bool
+	messagingOn     bool
+	// noPark records a spawn's opt-out of parking (park:false): a successful
+	// turn ends the run instead of holding its backend for a follow-up
+	// prompt. The zero value parks, so a run parks unless its spawn asked
+	// otherwise. Immutable after construction.
+	noPark             bool
 	roster             *rosterconfig.Config
 	parentID           string   // runtime ID of the parent agent, empty for top-level
 	children           []string // runtime IDs spawned by this runtime
@@ -1893,6 +1911,7 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		persistChoice:            params.PersistSessions,
 		messagingChoice:          params.Messaging,
 		messagingOn:              resolvedMessaging,
+		noPark:                   !params.parkAfterTurn(),
 		effectiveAgent:           params.Agent,
 		effectiveModel:           params.Model,
 		rosterFile:               params.RosterFile,
@@ -2602,6 +2621,8 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 			runKind = runKindDecider
 		} else if child.workflowID != "" {
 			runKind = runKindWorkflowDirect
+		} else if child.noPark {
+			runKind = runKindNoParkDirect
 		}
 		conflict := result.stopReason == runtime.SessionIDConflictStopReason
 		stopReason := result.stopReason
@@ -2665,7 +2686,31 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 					s.reportLifecycleError(child, sucErr)
 				}
 			}
-			return
+			if runKind != runKindNoParkDirect || result.exitCode != 0 {
+				return
+			}
+			// A no-park run ends after this turn, but a prompt accepted before
+			// it ended must still run. Drain the queue or close admission in
+			// one critical section, the step the park wait takes at its
+			// deadline: a queued prompt becomes the next turn, and an empty
+			// queue ends the run.
+			nextPrompt, drained := s.endNoParkTurn(child, runKind, result, stopReason)
+			if !drained {
+				return
+			}
+			if err := s.acquireLocalRuntimeSlot(ctx, child); err != nil {
+				if !errors.Is(err, errLifecycleFaultRecovery) && ctx.Err() != nil {
+					s.writeIdleContextEnd(child, ctx.Err())
+				}
+				return
+			}
+			promptText = nextPrompt
+			resumeID = result.sessionID
+			if resumeID == "" {
+				resumeID = child.sessionID()
+			}
+			attempt = 0
+			continue
 		case contPark:
 			// Ordinary direct success: sentinel, success presentation, park.
 			s.executeDeferredLifecycleEffects(child, eff)
@@ -3546,30 +3591,83 @@ func (c *childRuntime) waitForNextPrompt(s *Supervisor, ctx context.Context, par
 			// RuntimePrompt calls see the runtime ended instead of queueing
 			// onto a runtime about to reap.
 			c.mu.Lock()
-			if len(c.promptQueue) > 0 {
-				prompt := c.promptQueue[0]
-				c.promptQueue = c.promptQueue[1:]
-				c.promptClaimed = true
-				_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalPromptDequeued, class: c.lc.class})
-				c.mu.Unlock()
-				if err != nil {
-					s.reportLifecycleError(c, err)
-				}
-				return prompt, true
-			}
-			// parkTimedOut commits completion -> admission-closed under the
-			// same mu as the queue check. No waiter settle, no done close.
-			_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalParkTimedOut, class: c.lc.class})
-			if err != nil {
+			prompt, ok, err := c.drainQueuedPromptOrCloseAdmission(s)
+			if err != nil && !ok {
 				s.parkTimeoutFailSafe(c)
 			}
 			c.mu.Unlock()
 			if err != nil {
 				s.reportLifecycleError(c, err)
 			}
-			return "", false
+			return prompt, ok
 		}
 	}
+}
+
+// drainQueuedPromptOrCloseAdmission takes the queued prompt that a parked
+// runtime is about to run, or closes admission when the queue is empty so no
+// later prompt is accepted onto a runtime that is ending. The caller must hold
+// c.mu: the queue check and the admission close are one atomic decision.
+func (c *childRuntime) drainQueuedPromptOrCloseAdmission(s *Supervisor) (string, bool, error) {
+	if len(c.promptQueue) > 0 {
+		prompt := c.promptQueue[0]
+		c.promptQueue = c.promptQueue[1:]
+		c.promptClaimed = true
+		_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalPromptDequeued, class: c.lc.class})
+		return prompt, true, err
+	}
+	// parkTimedOut commits completion -> admission-closed under the same mu
+	// as the queue check. No waiter settle, no done close.
+	_, _, err := s.applyLifecycle(c, lifecycleSignal{kind: signalParkTimedOut, class: c.lc.class})
+	return "", false, err
+}
+
+// endNoParkTurn ends a successful turn of a run that opted out of parking,
+// unless a prompt was queued before the turn ended: that prompt runs as the
+// next turn exactly as the park wait would run one. The run parks just long
+// enough for the drain-or-close step, which keeps the decision in one child.mu
+// section instead of a second queue-drain mechanism. It reports whether a
+// prompt was taken; when it reports false the run ends through teardown.
+func (s *Supervisor) endNoParkTurn(child *childRuntime, runKind runKind, result childAttemptResult, stopReason string) (string, bool) {
+	child.mu.Lock()
+	_, parkEff, parkErr := s.applyLifecycle(child, lifecycleSignal{
+		kind: signalParkRequested, class: child.lc.class, runKind: runKind,
+	})
+	if parkErr == nil {
+		child.warmResumePending = false
+		child.promptClaimed = false
+	}
+	var prompt string
+	var drained bool
+	var drainErr error
+	if parkErr == nil {
+		prompt, drained, drainErr = child.drainQueuedPromptOrCloseAdmission(s)
+		if drainErr != nil && !drained {
+			s.parkTimeoutFailSafe(child)
+		}
+		if drainErr == nil && !drained {
+			// The empty-queue end is the park wait's not-ok path: leave the
+			// parked form here so teardown does not run on a run that still
+			// reads as parked.
+			_, _, drainErr = s.applyLifecycle(child, lifecycleSignal{kind: signalParkWaitEnded, class: child.lc.class})
+		}
+	}
+	child.mu.Unlock()
+	s.executeDeferredLifecycleEffects(child, parkEff)
+	if parkErr != nil {
+		// The outcome sentinel already ran; the fail-safe only ends the run and
+		// signals the capacity the park would have freed.
+		s.reportLifecycleError(child, parkErr)
+		fault := resultFault(result, stopReason)
+		fault.sentinelWritten = true
+		fault.parkPath = true
+		s.failSafeRunChildTransition(child, fault)
+		return "", false
+	}
+	if drainErr != nil {
+		s.reportLifecycleError(child, drainErr)
+	}
+	return prompt, drained
 }
 
 func (c *childRuntime) signalPrompt() {

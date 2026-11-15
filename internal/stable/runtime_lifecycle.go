@@ -95,16 +95,23 @@ const (
 func (a attemptClass) valid() bool { return a >= directAttemptClass && a <= workflowAttemptClass }
 
 // runKind is the result-policy classification of a direct run: decider first,
-// then workflow-direct when workflowID is nonempty, otherwise ordinary direct.
+// then workflow-direct when workflowID is nonempty, then a direct spawn that
+// opted out of parking, otherwise ordinary direct. A successful ordinary direct
+// turn parks the runtime for a follow-up prompt; every other kind ends the run
+// through teardown.
 type runKind int
 
 const (
 	runKindOrdinaryDirect runKind = iota
 	runKindWorkflowDirect
 	runKindDecider
+	// runKindNoParkDirect is an ordinary direct spawn that asked not to be
+	// parked (park:false): its successful turn ends the run instead of
+	// holding the backend for a follow-up prompt.
+	runKindNoParkDirect
 )
 
-func (k runKind) valid() bool { return k >= runKindOrdinaryDirect && k <= runKindDecider }
+func (k runKind) valid() bool { return k >= runKindOrdinaryDirect && k <= runKindNoParkDirect }
 
 // probeKind selects which branch protocol the promptContinuation signal
 // reports on in the two-step continuation protocol.
@@ -500,7 +507,7 @@ func validateLifecycleSignal(sig lifecycleSignal) error {
 			return fmt.Errorf("lifecycle: successPresented with exit code %d", sig.exitCode)
 		}
 	case signalParkRequested:
-		if !sig.runKind.valid() || sig.runKind != runKindOrdinaryDirect {
+		if sig.runKind != runKindOrdinaryDirect && sig.runKind != runKindNoParkDirect {
 			return fmt.Errorf("lifecycle: parkRequested with run kind %d", sig.runKind)
 		}
 	case signalWriterCloseFinished:
@@ -709,8 +716,10 @@ func next(st lifecycleState, sig lifecycleSignal) (lifecycleState, continuation,
 		eff = append(eff, lifecycleEffect{kind: effectSetSuccessPresentation})
 
 	case signalParkRequested:
-		// Source S/I, C0, ordinary direct success; duplicate rejected. Only
-		// runChild parks (its contPark continuation); loop/team children never park,
+		// Source S/I, C0, ordinary direct or no-park direct success; duplicate
+		// rejected. Only runChild parks: its contPark continuation for an
+		// ordinary direct run, and the no-park end for one turn while it
+		// decides whether a queued prompt runs. Loop/team children never park,
 		// so a workflow-class park signal is rejected.
 		if sig.class != directAttemptClass {
 			return st, cont, nil, fmt.Errorf("lifecycle: park requested with class %d", sig.class)
@@ -1034,7 +1043,8 @@ func nextAttemptOutcome(st lifecycleState, sig lifecycleSignal) (lifecycleState,
 		if sig.exitCode == 0 {
 			// Success: record exit, sentinel; the separate successPresented
 			// signal fires at the old post-sentinel site. Ordinary direct
-			// parks; workflow-direct and decider end. No prompt probe.
+			// parks; workflow-direct, no-park direct and decider end. No
+			// prompt probe.
 			eff = append(eff, record, sentinel)
 			if sig.runKind == runKindOrdinaryDirect {
 				cont = continuation{contPark}

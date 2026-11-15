@@ -262,6 +262,48 @@ func TestRuntimeLifecycleMatrixRows(t *testing.T) {
 			},
 		},
 		{
+			name:  "outcome success no-park direct ends",
+			start: idleDirect(),
+			signal: lifecycleSignal{
+				kind: signalAttemptOutcome, class: directAttemptClass,
+				runKind: runKindNoParkDirect, exitCode: 0,
+				sentinelReason: "end_turn", resultSessionID: "s1",
+			},
+			want: idleDirect(),
+			cont: contEnd,
+			effects: []lifecycleEffect{
+				{kind: effectRecordOutcomeExit, exitCode: 0},
+				successSentinel,
+			},
+		},
+		{
+			name:  "outcome no-park terminal failure probes the terminal prompt",
+			start: idleDirect(),
+			signal: lifecycleSignal{
+				kind: signalAttemptOutcome, class: directAttemptClass,
+				runKind: runKindNoParkDirect, exitCode: 1,
+				stopReason: "error", sentinelReason: "error", resultSessionID: "s1",
+				retryable: false, retriesRemaining: false,
+			},
+			want: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeTerminalPrompt},
+			cont: contProbeTerminalPrompt,
+			effects: []lifecycleEffect{
+				{kind: effectRecordOutcomeExit, exitCode: 1},
+			},
+		},
+		{
+			name:  "outcome no-park retryable with retries selects the retry probe",
+			start: idleDirect(),
+			signal: lifecycleSignal{
+				kind: signalAttemptOutcome, class: directAttemptClass,
+				runKind: runKindNoParkDirect, exitCode: 1,
+				stopReason: "error", sentinelReason: "error",
+				retryable: true, retriesRemaining: true,
+			},
+			want: lifecycleState{exec: execIdle, class: directAttemptClass, pendingProbe: probeRetryPrompt},
+			cont: contProbeRetryPrompt,
+		},
+		{
 			name:  "outcome terminal failure selects terminal probe, defers sentinel",
 			start: idleDirect(),
 			signal: lifecycleSignal{

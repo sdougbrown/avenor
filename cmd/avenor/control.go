@@ -226,6 +226,9 @@ func spawnParamsFromInvocation(inv clicontract.Invocation) (map[string]any, erro
 	if inv.Bools["auto-approve"] {
 		params["auto_approve"] = true
 	}
+	if inv.Bools["no-park"] {
+		params["park"] = false
+	}
 	if inv.Supplied["persist-sessions"] {
 		params["persist_sessions"] = inv.Bools["persist-sessions"]
 	}

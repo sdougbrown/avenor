@@ -88,6 +88,7 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 	agentProfile := prior.agentProfile
 	persistedSessions := prior.persistedSessions
 	messagingChoice, messagingOn := prior.messagingChoice, prior.messagingOn
+	noPark := prior.noPark
 	dir := prior.dir
 	autoApprove := prior.autoApprove
 	rosterFile := prior.rosterFile
@@ -136,6 +137,10 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 		RosterEntry:    rosterEntry,
 		IdempotencyKey: idempotencyKey,
 		Messaging:      messagingChoice,
+		// A resume continues the prior run's parking choice: a park:false run
+		// ended after its turn, so its follow-up ends after its turn too
+		// instead of parking and holding a backend the prior run released.
+		Park: parkChoice(noPark),
 		// The surface mints the public run id; carrying it through the spawn
 		// result is what lets a keyed replay report the first run's id instead
 		// of the retry's.
@@ -177,6 +182,17 @@ func (s *Supervisor) performResume(prior *childRuntime, runID string, req messag
 		spawned.OnEvent = req.EventLog
 	}
 	return spawned, nil
+}
+
+// parkChoice renders the prior run's parking opt-out for a resumed spawn:
+// nil (the parking default) when the prior run parked, an explicit false when
+// it ended after its turn.
+func parkChoice(noPark bool) *bool {
+	if !noPark {
+		return nil
+	}
+	park := false
+	return &park
 }
 
 func resumeResult(result SpawnResult) messaging.ResumeResult {

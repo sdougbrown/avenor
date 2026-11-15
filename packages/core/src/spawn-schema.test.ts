@@ -30,7 +30,7 @@ describe('spawn input schema', () => {
   it('gives each surface the field set its annotations name', () => {
     expect(spawnSurfaceFields('go')).toEqual([
       'agent', 'auto_approve', 'backend', 'dir', 'idempotency_key', 'label',
-      'launch_wrapper', 'messaging', 'model', 'persist_sessions', 'prompt',
+      'launch_wrapper', 'messaging', 'model', 'park', 'persist_sessions', 'prompt',
       'prompt_file', 'roster_entry', 'roster_file', 'server_url', 'supervisor_id',
       'thinking', 'timeout',
     ])

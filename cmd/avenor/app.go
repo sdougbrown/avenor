@@ -388,6 +388,7 @@ func app() *clicontract.App {
 							{Name: "sentinel-file", Kind: clicontract.String, Usage: "path to write a completion sentinel"},
 							{Name: "permission-handler", Kind: clicontract.String, Usage: "permission handler, supports file:<path>"},
 							{Name: "auto-approve", Kind: clicontract.Bool, Usage: "automatically approve all permission requests"},
+							{Name: "no-park", Kind: clicontract.Bool, Usage: "end the run after its turn succeeds instead of parking it for follow-up prompts"},
 							{Name: "persist-sessions", Kind: clicontract.Bool, Usage: "persist the backend session (pi: a session directory instead of --no-session, enabling cross-process resume; omitted inherits AVENOR_PI_SESSIONS, true and false force the choice)"},
 							{Name: "messaging", Kind: clicontract.Bool, Usage: "enable poo messaging (defaults on for delegation spawns, off for workflow nodes, loop or team phases, and permission-decider runs)"},
 							{Name: "timeout", Kind: clicontract.Int, Usage: "overall session timeout in seconds"},

@@ -22,6 +22,9 @@ type countingCloseProvider struct {
 	mu      sync.Mutex
 	closes  int
 	closeCh chan struct{}
+	// closeGate, when set, holds Close open until it is closed, so a test can
+	// observe the runtime while its teardown is still running.
+	closeGate chan struct{}
 }
 
 func (p *countingCloseProvider) Close() error {
@@ -33,6 +36,9 @@ func (p *countingCloseProvider) Close() error {
 		case p.closeCh <- struct{}{}:
 		default:
 		}
+	}
+	if p.closeGate != nil {
+		<-p.closeGate
 	}
 	return nil
 }
@@ -635,6 +641,227 @@ func TestCancelledTurnEndsInsteadOfParking(t *testing.T) {
 	}
 	if !waitProviderClosed(t, provider, 5*time.Second) {
 		t.Fatal("cancelled runtime did not close its provider")
+	}
+}
+
+// A spawn that opts out of parking (park:false) ends after its successful
+// turn: it completes and tears down its backend right away instead of holding
+// it for the parked timeout. The backend is therefore unavailable for a
+// follow-up prompt, which is the point of the opt-out.
+func TestNoParkSpawnEndsAfterItsTurn(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{
+		ControlSocket: newStableSocketPath(t, "no-park-turn"),
+		MaxRuntimes:   2,
+		// A parked run would sit here for an hour; the opt-out must not wait
+		// for that timer to free the backend.
+		ParkedRuntimeTimeout: time.Hour,
+		ShutdownTimeout:      0,
+	})
+	t.Cleanup(func() {
+		_ = sup.Shutdown("graceful")
+		_ = sup.broker.Stop()
+	})
+	provider := &countingCloseProvider{stableScriptedProvider: newParkedScriptedProvider("ses_no_park", 1)}
+	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return provider, nil
+	}
+
+	park := false
+	result, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: t.TempDir(), Park: &park})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	child := fetchChild(t, sup, result.RuntimeID)
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("park:false runtime was still held after its turn ended")
+	}
+	if !childCompleted(child) {
+		t.Fatal("park:false runtime should be completed after its turn")
+	}
+	if childParked(child) {
+		t.Fatal("park:false runtime should not park")
+	}
+	if !waitProviderClosed(t, provider, 5*time.Second) {
+		t.Fatal("park:false runtime did not close its provider")
+	}
+	if err := sup.RuntimePrompt(result.RuntimeID, "too late", ""); err == nil || !strings.Contains(err.Error(), "has ended") {
+		t.Fatalf("RuntimePrompt after a park:false run err = %v, want runtime-has-ended", err)
+	}
+}
+
+// newHeldFirstTurnProvider scripts successful end_turn turns, holding the first
+// open until release closes so a test can queue a prompt while that turn runs.
+func newHeldFirstTurnProvider(sessionID string, attempts int, release <-chan struct{}) *stableScriptedProvider {
+	scripts := make([]stableScriptedAttempt, 0, attempts)
+	for i := 0; i < attempts; i++ {
+		step := stableScriptedEvent{event: events.Event{
+			Event:     "session.end",
+			SessionID: sessionID,
+			Fields:    map[string]any{"stop_reason": "end_turn"},
+		}}
+		if i == 0 {
+			step.release = release
+		}
+		scripts = append(scripts, stableScriptedAttempt{sessionID: sessionID, events: []stableScriptedEvent{step}})
+	}
+	return &stableScriptedProvider{attempt: -1, scripts: scripts, emitted: make(chan int, 2*attempts+1)}
+}
+
+// A prompt accepted mid-turn on a park:false run is never dropped: the run
+// ends only once its queue is empty, so the queued prompt runs as the next
+// turn before the run tears down and releases its backend.
+func TestNoParkRunRunsPromptQueuedMidTurn(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:        newStableSocketPath(t, "no-park-midturn"),
+		MaxRuntimes:          2,
+		ParkedRuntimeTimeout: time.Hour,
+		ShutdownTimeout:      0,
+	})
+	t.Cleanup(func() {
+		_ = sup.Shutdown("graceful")
+		_ = sup.broker.Stop()
+	})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	openTurn := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(openTurn)
+	provider := &countingCloseProvider{stableScriptedProvider: newHeldFirstTurnProvider("ses_no_park_queue", 2, release)}
+	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return provider, nil
+	}
+
+	park := false
+	result, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: t.TempDir(), Park: &park})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	child := fetchChild(t, sup, result.RuntimeID)
+
+	// The first turn is held open, so the follow-up is queued while the run is
+	// still running and admission is open.
+	waitForStableChild(t, child, func(active, _ bool, _ string, _ string) bool { return active })
+	if err := sup.RuntimePrompt(result.RuntimeID, "follow up", ""); err != nil {
+		t.Fatalf("RuntimePrompt mid-turn: %v", err)
+	}
+	openTurn()
+
+	// The queued prompt runs as the second turn instead of being dropped.
+	deadline := time.Now().Add(5 * time.Second)
+	secondTurn := false
+	for !secondTurn && time.Now().Before(deadline) {
+		select {
+		case index := <-provider.emitted:
+			secondTurn = index == 1
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if !secondTurn {
+		t.Fatal("prompt queued mid-turn on a park:false run did not run")
+	}
+
+	// With the queue empty the run ends and releases its backend.
+	select {
+	case <-child.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("park:false runtime was still held after its queued prompt ran")
+	}
+	if !childCompleted(child) {
+		t.Fatal("park:false runtime should complete once its queue is empty")
+	}
+	if childParked(child) {
+		t.Fatal("park:false runtime should not park")
+	}
+	if !waitProviderClosed(t, provider, 5*time.Second) {
+		t.Fatal("park:false runtime did not close its provider")
+	}
+	if err := sup.RuntimePrompt(result.RuntimeID, "too late", ""); err == nil || !strings.Contains(err.Error(), "has ended") {
+		t.Fatalf("RuntimePrompt after the run ended err = %v, want runtime-has-ended", err)
+	}
+}
+
+// A park:false run that ends with an empty queue leaves the parked form before
+// teardown runs: while its provider is still closing, it reads as ended and not
+// as parked.
+func TestNoParkRunIsNotParkedWhileItTearsDown(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{
+		ControlSocket:        newStableSocketPath(t, "no-park-teardown"),
+		MaxRuntimes:          2,
+		ParkedRuntimeTimeout: time.Hour,
+		ShutdownTimeout:      0,
+	})
+	provider := &countingCloseProvider{
+		stableScriptedProvider: newParkedScriptedProvider("ses_no_park_teardown", 1),
+		closeCh:                make(chan struct{}, 1),
+		closeGate:              make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		select {
+		case <-provider.closeGate:
+		default:
+			close(provider.closeGate)
+		}
+		_ = sup.Shutdown("graceful")
+		_ = sup.broker.Stop()
+	})
+	sup.newProviderFunc = func(_ runtime.StartOptions, _ string) (runtime.Provider, error) {
+		return provider, nil
+	}
+
+	park := false
+	result, err := sup.spawn(SpawnParams{Prompt: "hello", Dir: t.TempDir(), Park: &park})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	child := fetchChild(t, sup, result.RuntimeID)
+	select {
+	case <-provider.closeCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("park:false runtime never began closing its provider")
+	}
+	if !childCompleted(child) {
+		t.Fatal("park:false runtime is not completed while its provider closes")
+	}
+	if childParked(child) {
+		t.Fatal("park:false runtime still reads as parked while its provider closes")
+	}
+	close(provider.closeGate)
+}
+
+// The control spawn request carries the parking opt-out on the wire, and its
+// absence keeps the default: an omitted park parks the run after its turn,
+// while an explicit false ends it.
+func TestSpawnParamsDecodeParkChoice(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		raw      string
+		wantVal  *bool
+		wantPark bool
+	}{
+		{name: "omitted parks", raw: `{"dir":"/tmp"}`, wantVal: nil, wantPark: true},
+		{name: "explicit true parks", raw: `{"dir":"/tmp","park":true}`, wantVal: boolPtr(true), wantPark: true},
+		{name: "explicit false ends", raw: `{"dir":"/tmp","park":false}`, wantVal: boolPtr(false), wantPark: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params, err := parseStableSpawn([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("parseStableSpawn: %v", err)
+			}
+			if (params.Park == nil) != (tc.wantVal == nil) {
+				t.Fatalf("Park = %v, want %v", params.Park, tc.wantVal)
+			}
+			if params.Park != nil && *params.Park != *tc.wantVal {
+				t.Fatalf("Park = %v, want %v", *params.Park, *tc.wantVal)
+			}
+			if got := params.parkAfterTurn(); got != tc.wantPark {
+				t.Fatalf("parkAfterTurn = %v, want %v", got, tc.wantPark)
+			}
+		})
 	}
 }
 

@@ -78,6 +78,30 @@ func TestSpawnMessagingFlagTriState(t *testing.T) {
 	}
 }
 
+// --no-park is the opt-out of the parking grace window: it must reach the
+// spawn request as park:false, and omitting it must leave the choice to the
+// supervisor's default (park).
+func TestSpawnNoParkFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		want    any
+		present bool
+	}{
+		{"omitted", nil, nil, false},
+		{"no-park", []string{"--no-park"}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			params, code := spawnParamsFromArgs(append([]string{"--prompt", "work"}, tc.args...), &stderr)
+			got, present := params["park"]
+			if code != 0 || present != tc.present || got != tc.want {
+				t.Fatalf("code=%d park=%v present=%v stderr=%s", code, got, present, stderr.String())
+			}
+		})
+	}
+}
+
 func TestSpawnParamsFromArgsAllowsModelWithoutAgent(t *testing.T) {
 	var stderr bytes.Buffer
 	params, code := spawnParamsFromArgs([]string{

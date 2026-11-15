@@ -479,6 +479,7 @@ Spawn flags (all optional):
 | `--sentinel-file` | Path to write completion sentinel |
 | `--permission-handler` | Permission resolver (e.g., `file:<path>`) |
 | `--auto-approve` | Automatically approve all permission requests |
+| `--no-park` | End the run when its turn succeeds instead of parking it for follow-up prompts. Releases the backend immediately; a prompt queued before the run ended still runs as its next turn, and once it has ended it cannot be prompted, so a follow-up has to resume it in a new runtime, which keeps the opt-out (see [stable.md](stable.md#spawning-child-runtimes)) |
 | `--persist-sessions` | Persist the backend session (see [backends.md](backends.md#persisted-sessions-and-resume)) |
 | `--messaging` | Request poo messaging on or off. Omitted defaults on for delegation spawns and off for workflow nodes, loop or team phases, and permission-decider runs. True is refused for loop and team spawns. The switch is carried per run but is not wired to poo launch yet. |
 | `--timeout` | Overall session timeout (Go duration: `30s`, `5m`, etc.) |
