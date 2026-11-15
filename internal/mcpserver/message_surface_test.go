@@ -243,6 +243,10 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 			// The bare row has no session blob, pinning the decoder's empty-session
 			// guard, its run-id fallback and the resolution's label fallback.
 			{RunID: "rt_bare"},
+			// The listing names rt_a twice, the way a broker answering its own view
+			// and its parent's does. The run is one peer, so its label must still
+			// resolve to it instead of answering ambiguous for a name with one owner.
+			{RunID: "rt_a", Session: json.RawMessage(`{"run_id":"rt_a","label":"alpha"}`)},
 		},
 	}
 	p, err := newMCPMessageProvider(context.Background(), s, cl, "supervisor-socket")
@@ -263,8 +267,8 @@ func TestMCPMessageProviderResolveLadder(t *testing.T) {
 		t.Fatalf("public run id = %+v, %v", publicID, err)
 	}
 	label, err := p.Resolve(ctx, "alpha")
-	if err != nil || label.RunID != "rt_a" || label.Label != "alpha" {
-		t.Fatalf("label = %+v, %v", label, err)
+	if err != nil || label.Match != messaging.MatchUnique || label.RunID != "rt_a" || label.Label != "alpha" {
+		t.Fatalf("label of a run the listing repeats = %+v, %v", label, err)
 	}
 	ambiguous, err := p.Resolve(ctx, "mesh")
 	if err != nil || ambiguous.Match != messaging.MatchAmbiguous || len(ambiguous.Candidates) != 2 {

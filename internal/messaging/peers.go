@@ -20,6 +20,13 @@ import (
 func decodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 	records := make([]PeerRecord, 0, len(peers))
 	unreadable := 0
+	// A listing can carry one run more than once: a broker that answers its
+	// own view and its parent's, or a supervisor that reads the same run
+	// through two seams. The run is one peer, so the first row wins and a
+	// repeat is dropped. Keeping the repeat would make the run unaddressable,
+	// because its label then collects two identical candidates and resolution
+	// answers ambiguous for a name that has one owner.
+	seen := make(map[string]struct{}, len(peers))
 	for _, peer := range peers {
 		var record PeerRecord
 		if len(peer.Session) > 0 {
@@ -33,6 +40,12 @@ func decodePeerRecords(peers []Peer) ([]PeerRecord, error) {
 		}
 		if peer.RunID != "" {
 			record.RunID = peer.RunID
+		}
+		if record.RunID != "" {
+			if _, ok := seen[record.RunID]; ok {
+				continue
+			}
+			seen[record.RunID] = struct{}{}
 		}
 		records = append(records, record)
 	}
@@ -66,12 +79,19 @@ func PeerListing(peers []Peer, err error) ([]PeerRecord, error) {
 // this one collection, so duplicate-label handling cannot land twice.
 
 func LabelCandidates(records []PeerRecord, ref string) (candidates []string, label string) {
+	// One run is one candidate however many times the listing names it, so a
+	// record repeated by the listing cannot make a label look shared.
+	seen := make(map[string]struct{}, len(records))
 	for _, record := range records {
 		if record.Label != ref {
 			continue
 		}
-		candidates = append(candidates, record.RunID)
 		label = record.Label
+		if _, ok := seen[record.RunID]; ok {
+			continue
+		}
+		seen[record.RunID] = struct{}{}
+		candidates = append(candidates, record.RunID)
 	}
 	return candidates, label
 }

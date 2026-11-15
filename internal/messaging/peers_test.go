@@ -64,6 +64,45 @@ func TestDecodePeerRecordsKeepsThePeerID(t *testing.T) {
 	}
 }
 
+// TestDecodePeerRecordsKeepsOneRecordPerRun pins the listing's shape: a run
+// the listing names twice is one peer. A broker that answers its own view and
+// its parent's, or a supervisor that reads the same run through two seams,
+// sends the repeat; kept, it would collect two identical candidates for one
+// label and leave the run unaddressable.
+func TestDecodePeerRecordsKeepsOneRecordPerRun(t *testing.T) {
+	records, err := decodePeerRecords([]Peer{
+		{RunID: "rt-dup", Session: []byte(`{"run_id":"rt-dup","label":"poo-skills"}`)},
+		{RunID: "rt-other", Session: []byte(`{"run_id":"rt-other","label":"other"}`)},
+		{RunID: "rt-dup", Session: []byte(`{"run_id":"rt-dup","label":"poo-skills"}`)},
+	})
+	if err != nil {
+		t.Fatalf("decodePeerRecords: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %+v, want one record per run", records)
+	}
+	if records[0].RunID != "rt-dup" || records[1].RunID != "rt-other" {
+		t.Fatalf("records = %+v, want the listing's order with the repeat dropped", records)
+	}
+}
+
+// TestLabelCandidatesCollapsesARepeatedRun pins the candidate count a
+// resolution switches on: the same run listed again is still one candidate,
+// so a label with a single owner stays addressable.
+func TestLabelCandidatesCollapsesARepeatedRun(t *testing.T) {
+	records := []PeerRecord{
+		{RunID: "rt-dup", Label: "poo-skills"},
+		{RunID: "rt-dup", Label: "poo-skills"},
+	}
+	got, label := LabelCandidates(records, "poo-skills")
+	if !reflect.DeepEqual(got, []string{"rt-dup"}) {
+		t.Fatalf("LabelCandidates candidates = %#v, want the one run", got)
+	}
+	if label != "poo-skills" {
+		t.Fatalf("LabelCandidates label = %q, want the matched label", label)
+	}
+}
+
 // TestDecodePeerRecordsDropsASpoofedSelfMarker pins the decode boundary for
 // the Self flag: a session record carrying `self` cannot inject the marker,
 // because the router alone sets it from the caller identity after the listing
