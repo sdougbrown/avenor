@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/chubin/vt10x"
 	"github.com/creack/pty"
@@ -30,10 +32,19 @@ type PTYLauncher struct {
 // ptyCommand builds the hosted command. Every provisioned value travels in
 // cmd.Env, which is the process environment and readable by its own user only;
 // none of it is rendered into argv, which any local process can read. baseEnv
-// defaults to the terminal defaults when the launcher carries none.
-func ptyCommand(ctx context.Context, opts StartOptions, baseEnv []string) *exec.Cmd {
+// defaults to the terminal defaults when the launcher carries none. hup is nil
+// for a session that did not ask for a hangup grace, and exec then kills the
+// hosted process on a cancelled ctx.
+func ptyCommand(ctx context.Context, opts StartOptions, baseEnv []string, hup *groupHangup) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "sh", "-c", opts.Command)
 	cmd.Dir = opts.Dir
+	if hup != nil {
+		// Cancelling ctx hangs the hosted group up instead of killing only its
+		// leader, so a launch wrapper hears it and can tear down what it owns.
+		// Kill owns the grace and the escalation that follow, so exec must not
+		// kill the process ahead of it.
+		cmd.Cancel = func() error { return hup.signal(cmd.Process) }
+	}
 
 	env := baseEnv
 	if len(env) == 0 {
@@ -66,7 +77,14 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 		opts.Rows = 50
 	}
 
-	cmd := ptyCommand(ctx, opts, l.Env)
+	// A hangup grace opts this session into graceful teardown. The signal is
+	// shared by the ctx cancel watch and Kill, so the group is hung up once.
+	var hup *groupHangup
+	if opts.HangupGrace > 0 {
+		hup = &groupHangup{}
+	}
+
+	cmd := ptyCommand(ctx, opts, l.Env, hup)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: uint16(opts.Cols),
@@ -82,17 +100,19 @@ func (l PTYLauncher) Start(ctx context.Context, opts StartOptions) (Session, err
 	}
 
 	ps := &PTYSession{
-		name:       opts.Name,
-		cmd:        cmd,
-		ptmx:       ptmx,
-		terminal:   vt10x.New(vt10x.WithSize(opts.Cols, opts.Rows)),
-		alive:      true,
-		waitDone:   make(chan struct{}),
-		answer:     l.AnswerProgStatus,
-		writes:     make(chan ptyWrite),
-		replies:    make(chan []byte, ptyReplyQueue),
-		closed:     make(chan struct{}),
-		writerDone: make(chan struct{}),
+		name:        opts.Name,
+		cmd:         cmd,
+		ptmx:        ptmx,
+		terminal:    vt10x.New(vt10x.WithSize(opts.Cols, opts.Rows)),
+		alive:       true,
+		waitDone:    make(chan struct{}),
+		answer:      l.AnswerProgStatus,
+		writes:      make(chan ptyWrite),
+		replies:     make(chan []byte, ptyReplyQueue),
+		closed:      make(chan struct{}),
+		writerDone:  make(chan struct{}),
+		hangup:      hup,
+		hangupGrace: opts.HangupGrace,
 	}
 
 	go ps.writeLoop(ptmx)
@@ -116,6 +136,11 @@ type PTYSession struct {
 	waitOnce sync.Once
 	waitDone chan struct{}
 	waitErr  error
+
+	// hangup is set only for a session that asked for a hangup grace; it
+	// carries the single hangup shared by the ctx cancel watch and Kill.
+	hangup      *groupHangup
+	hangupGrace time.Duration
 
 	progStatusLog
 	answer bool
@@ -317,28 +342,115 @@ func (p *PTYSession) Interrupt(_ context.Context) error {
 	}
 }
 
-// Kill rejects further writes and kills the process. The pty master stays
-// open until the reaper sees the exit: a killed process can block in exit
-// until its pending output is read, so the reader must keep draining. A master
-// write still blocked on the program's input fails when the child's side
-// closes or, at the latest, when the reaper closes the master.
-func (p *PTYSession) Kill(_ context.Context) error {
+// signalGroup signals the process group that the hosted process leads. The PTY
+// launch makes that process a session leader, so its group is the whole
+// launch-wrapper tree, and a group signal is what a closing terminal delivers
+// to it. A group with no members left reports ESRCH, which is not an error
+// here.
+func signalGroup(pgid int, sig syscall.Signal) error {
+	if err := syscall.Kill(-pgid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+// groupHangup hangs a session's process group up once and remembers the
+// result. A cancelled ctx and Kill both reach for the same session, and a
+// launch wrapper's hangup handler is not necessarily idempotent: a wrapper that
+// stops a VM or container would run its whole teardown twice.
+//
+// The signal never follows the leader's reap: the ctx cancel watch runs before
+// exec reaps the command, and Kill probes the group first.
+type groupHangup struct {
+	once sync.Once
+	err  error
+}
+
+func (h *groupHangup) signal(proc *os.Process) error {
+	if proc == nil {
+		return nil
+	}
+	h.once.Do(func() { h.err = signalGroup(proc.Pid, syscall.SIGHUP) })
+	return h.err
+}
+
+// groupAlive reports whether the process group has a member left to signal. It
+// separates an empty group (ESRCH) from a probe that failed for another reason.
+func groupAlive(pgid int) (bool, error) {
+	switch err := syscall.Kill(-pgid, 0); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, syscall.ESRCH):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// killHosted kills only the hosted process: the teardown a session without a
+// hangup grace gets.
+func (p *PTYSession) killHosted() error {
+	if p.cmd == nil || p.cmd.Process == nil {
+		return nil
+	}
+	if err := p.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return err
+	}
+	return nil
+}
+
+// Kill rejects further writes and ends the hosted process group: it hangs the
+// group up once, then kills the group if it outlasts the grace or ctx. The pty
+// master stays open until the reaper sees the exit: a dying process can block
+// in exit until its pending output is read, so the reader must keep draining.
+// A master write still blocked on the program's input fails when the child's
+// side closes or, at the latest, when the reaper closes the master.
+func (p *PTYSession) Kill(ctx context.Context) error {
 	p.mu.Lock()
 	p.alive = false
 	p.mu.Unlock()
 
 	p.markClosed()
-	var err error
-	if p.cmd != nil && p.cmd.Process != nil {
-		err = p.cmd.Process.Kill()
-		if errors.Is(err, os.ErrProcessDone) {
-			err = nil
-		}
-	}
-	// Preserve the old Kill-only lifecycle while keeping cmd.Wait ownership in
-	// one place. Wait callers still synchronously observe the same completion.
+	// cmd.Wait stays owned by one reaper. Wait callers still synchronously
+	// observe the same completion.
 	p.startWait()
-	return err
+	if p.hangup == nil || p.cmd == nil || p.cmd.Process == nil {
+		return p.killHosted()
+	}
+	proc := p.cmd.Process
+	// A process group id is its leader's pid, and that pid is not reused while
+	// a member of the group is alive. An empty group leaves -pid free for a new
+	// process, so Kill signals only when a member is there to receive it.
+	if alive, err := groupAlive(proc.Pid); err != nil {
+		return err
+	} else if !alive {
+		return nil
+	}
+	if err := p.hangup.signal(proc); err != nil {
+		return err
+	}
+	grace := time.NewTimer(p.hangupGrace)
+	defer grace.Stop()
+	select {
+	case <-p.waitDone:
+	case <-grace.C:
+	case <-ctx.Done():
+	}
+	// The leader can exit on the hangup while a member that ignored it lives
+	// on: a VM or container helper, or a tool child of a program the wrapper
+	// does not own. That leftover is still this group's to kill even though the
+	// leader was reaped. The probe below is what keeps the kill off a pid that
+	// is already free; the window between probe and signal is accepted rather
+	// than closed with pidfd or waitid bookkeeping, because it only exists once
+	// the group is empty.
+	alive, err := groupAlive(proc.Pid)
+	if err != nil {
+		return err
+	}
+	if !alive {
+		return nil
+	}
+	return signalGroup(proc.Pid, syscall.SIGKILL)
 }
 
 // Wait waits for the command's single reaper. cmd.Wait is invoked exactly once
