@@ -221,11 +221,15 @@ export interface MessagePeersParams {
 export interface MessagePeer {
   run_id: string
   session?: unknown
+  /** The run id the parent broker lists this run under; absent without a parent that lists it. */
+  parent_key?: string
 }
 
 export interface MessagePeersResult {
   peers: MessagePeer[]
   generation?: string
+  /** The generation of the parent broker that answered the listing; absent without a parent. */
+  parent_generation?: string
   /**
    * Set when the listing read only part of the peer set. The peers beside it
    * are the ones that were read, so a partial list is never read as a

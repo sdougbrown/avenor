@@ -342,9 +342,20 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
   const { surface, supervisorId, generation, client, pendingAsks, pollGeneration } = options
   const claims: AskClaims = new Map()
 
-  async function listedPeers(): Promise<{ peers: PeerRecord[]; detail?: string }> {
+  async function listedPeers(): Promise<PeersProviderResult> {
     const result = await client.messagePeers({ generation })
-    return { peers: peerRecords(result), detail: result.peers_error || undefined }
+    const peers = peerRecords(result)
+    const parentKeys: Record<string, string> = {}
+    for (const [i, peer] of (result.peers ?? []).entries()) {
+      if (peer.parent_key) parentKeys[peers[i].run_id] = peer.parent_key
+    }
+    return {
+      peers,
+      detail: result.peers_error || undefined,
+      ...(result.generation ? { generation: result.generation } : {}),
+      ...(Object.keys(parentKeys).length > 0 ? { parentKeys } : {}),
+      ...(result.parent_generation ? { parentGeneration: result.parent_generation } : {}),
+    }
   }
 
   async function publicRunIdFor(runId: string): Promise<string | undefined> {
@@ -403,7 +414,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
   // call once after a re-preflight, and a mismatch swallowed here would report
   // the status failure instead of letting that retry run.
   async function peerRunState(runId: string): Promise<RunFacts | undefined> {
-    let listed: { peers: PeerRecord[]; detail?: string }
+    let listed: PeersProviderResult
     try {
       listed = await listedPeers()
     } catch (error) {
@@ -726,10 +737,7 @@ export function createHostMessageProvider(options: HostProviderOptions): Message
       }
     },
 
-    async peers(): Promise<PeersProviderResult> {
-      const { peers, detail } = await listedPeers()
-      return { peers, detail }
-    },
+    peers: listedPeers,
 
     async recordLastTurn(text: string, stopReason: string, truncated: boolean): Promise<void> {
       await client.sessionLastSet(SUPERVISOR_RUN_ID, text, stopReason, truncated)

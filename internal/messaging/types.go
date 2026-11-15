@@ -131,6 +131,9 @@ type PeersRequest struct {
 type PeersResult struct {
 	Peers      []Peer
 	Generation string
+	// ParentGeneration is the generation of the parent broker that answered the
+	// listing. It is empty when this broker has no parent.
+	ParentGeneration string
 }
 
 // PreflightResult reports the authenticated protocol and generation of a peer.
@@ -155,6 +158,9 @@ type InboundMessage struct {
 type Peer struct {
 	RunID   string
 	Session json.RawMessage
+	// ParentKey is the run ID the parent broker lists this run under. It is
+	// empty when this broker has no parent or the parent does not list the run.
+	ParentKey string
 }
 
 // EndpointDescriptor names a host endpoint and the credentials to present.

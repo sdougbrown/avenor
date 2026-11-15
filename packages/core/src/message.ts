@@ -96,6 +96,12 @@ export interface PeersProviderResult {
   peers: PeerRecord[]
   /** Set when the transport returned peers together with an error. */
   detail?: string
+  /** The generation of the broker that answered the listing. */
+  generation?: string
+  /** Run id to the id this broker's parent lists that run under, for rows that have one. */
+  parentKeys?: Record<string, string>
+  /** The generation of the parent broker the parent keys are from. */
+  parentGeneration?: string
 }
 
 /**

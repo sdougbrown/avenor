@@ -346,6 +346,60 @@ func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
 	}
 }
 
+// TestMessengerPeersCarryTheKeyTheParentListsThemUnder pins the parent key: a
+// run this branch publishes is keyed by the branch-namespaced ID, a run the
+// parent exports is keyed by its own ID, a run a registered child owns has none
+// because it is never published as this branch's own, and the result names the
+// parent generation that answered.
+func TestMessengerPeersCarryTheKeyTheParentListsThemUnder(t *testing.T) {
+	parent := newStubBroker(t, func(req stubRequest) (int, string) {
+		switch req.Path {
+		case pathRegister:
+			return http.StatusOK, `{"generation":"gen-parent"}`
+		case pathSessions:
+			return http.StatusOK, `{"generation":"gen-parent","sessions":[{"run_id":"run-y"}]}`
+		}
+		return http.StatusOK, `{}`
+	})
+	grandchild := ParentRunKey("child-two", "run-c")
+	local := newStubMessenger()
+	local.peers = []messaging.Peer{{RunID: "run-x"}, {RunID: grandchild}}
+	messenger := newTestMessenger(t, local, parent)
+	if _, err := messenger.Register(messaging.DescendantRegistration{
+		ChildID:    "child-two",
+		Endpoint:   "http://child-two",
+		Generation: "gen-b",
+		Runs:       []messaging.RunClaim{{RunID: "run-c", Token: "tok-c"}},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	ctx := testContext(t)
+	if err := messenger.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	res, err := messenger.Peers(ctx, messaging.PeersRequest{})
+	if err != nil {
+		t.Fatalf("Peers: %v", err)
+	}
+	keys := map[string]string{}
+	for _, peer := range res.Peers {
+		keys[peer.RunID] = peer.ParentKey
+	}
+	want := map[string]string{"run-x": ParentRunKey("child-one", "run-x"), grandchild: "", "run-y": "run-y"}
+	if len(keys) != len(want) {
+		t.Fatalf("parent keys = %v, want %v", keys, want)
+	}
+	for runID, key := range want {
+		if got, ok := keys[runID]; !ok || got != key {
+			t.Fatalf("parent keys = %v, want %v", keys, want)
+		}
+	}
+	if res.ParentGeneration != "gen-parent" {
+		t.Fatalf("ParentGeneration = %q, want the generation the parent answered with", res.ParentGeneration)
+	}
+}
+
 // TestMessengerLastFollowsTheRoutingRule pins which broker answers a last-turn
 // read: a run the local seam holds is read here, a run it does not hold is the
 // parent's, and a branch with no parent reads only its own.

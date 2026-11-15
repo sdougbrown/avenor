@@ -47,6 +47,23 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
     return answer
   }
 
+  // One fetch-and-merge for both listing and resolution. When the host's parent
+  // is the same broker incarnation the central listing came from, the two
+  // listings name some runs twice: the host reads central's own runs back, and
+  // central lists the host's runs under the keys the parent gives them.
+  async function listing(snapshot: MessageProvider[]) {
+    const results = await Promise.all(snapshot.map(p => p.peers()))
+    const hostResult = snapshot.length > 1 ? results[0] : undefined
+    const centralResult = results[results.length - 1]
+    const sameBroker = !!hostResult?.parentGeneration && hostResult.parentGeneration === centralResult.generation
+    const parentKeys = hostResult?.parentKeys ?? {}
+    const hostQualified = new Set(Object.entries(parentKeys).filter(([runId, key]) => key !== runId).map(([, key]) => key))
+    const listed = results.flatMap((r, i) => r.peers
+      .filter(peer => !sameBroker || (i === 0 ? parentKeys[peer.run_id] !== peer.run_id : !hostQualified.has(peer.run_id)))
+      .map(peer => ({ peer, provider: snapshot[i] })))
+    return { results, listed }
+  }
+
   return {
     ...central,
     surface: () => 'pi-host',
@@ -55,15 +72,15 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
     registerResumed: result => resumed.get(result)?.registerResumed?.(result) ?? Promise.resolve(),
     caller: () => ({ kind: 'owner', runId: central.caller().runId }),
     async peers() {
-      const results = await Promise.all(providers().map(p => p.peers()))
-      return { peers: results.flatMap(r => r.peers), detail: results.map(r => r.detail).filter(Boolean).join('; ') || undefined }
+      const { results, listed } = await listing(providers())
+      return { peers: listed.map(entry => entry.peer), detail: results.map(r => r.detail).filter(Boolean).join('; ') || undefined }
     },
     async resolve(ref) {
       const snapshot = providers()
       const host = snapshot.find(provider => provider !== central)
-      const results = await Promise.all(snapshot.map(p => p.peers()))
+      const { results, listed } = await listing(snapshot)
       if (results.some(r => r.detail)) throw new Error('the peer listing is incomplete: ' + results.map(r => r.detail).filter(Boolean).join('; '))
-      const rows = results.flatMap((r, i) => r.peers.map(peer => ({ run_id: peer.run_id, label: peer.label, provider: snapshot[i] })))
+      const rows = listed.map(({ peer, provider }) => ({ run_id: peer.run_id, label: peer.label, provider }))
       // The host's own runs are not rows in its own listing, so its own match rule
       // is the only thing that can name them. A public id it answers for joins the
       // merged rows as the one row those runs contribute.
