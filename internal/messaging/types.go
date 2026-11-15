@@ -158,8 +158,9 @@ type InboundMessage struct {
 type Peer struct {
 	RunID   string
 	Session json.RawMessage
-	// ParentKey is the run ID the parent broker lists this run under. It is
-	// empty when this broker has no parent or the parent does not list the run.
+	// ParentKey is the run ID the parent broker lists this run under: the run's
+	// own ID for a run read from the parent, the namespaced key the parent
+	// accepted for one of this broker's own runs, and empty otherwise.
 	ParentKey string
 }
 

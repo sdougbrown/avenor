@@ -115,7 +115,8 @@ type MessagePeersResult struct {
 	Peers      []MessagePeer `json:"peers"`
 	Generation string        `json:"generation,omitempty"`
 	// ParentGeneration is the generation of the parent broker that answered the
-	// listing; the parent keys on the peers are from that generation.
+	// listing. The parent keys on the peers are set only for runs
+	// this same parent generation listed or accepted.
 	ParentGeneration string `json:"parent_generation,omitempty"`
 	// PeersError names why the listing read only part of the peer set. The
 	// peers beside it are the ones that were read, so a caller keeps them and

@@ -211,10 +211,11 @@ func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 		err = errors.Join(err, upErr)
 	}
 	seen := make(map[string]struct{}, len(peers))
+	acceptedGeneration, accepted := m.up.acceptedKeys()
 	for i, peer := range peers {
 		seen[peer.RunID] = struct{}{}
-		if m.childID != "" && !m.registry.Owns(peer.RunID) {
-			peers[i].ParentKey = ParentRunKey(m.childID, peer.RunID)
+		if acceptedGeneration != "" && acceptedGeneration == remote.Generation {
+			peers[i].ParentKey = accepted[peer.RunID]
 		}
 	}
 	for _, peer := range remote.Peers {

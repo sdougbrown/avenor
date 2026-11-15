@@ -387,6 +387,14 @@ describe('child broker routes', () => {
     expect(headers['X-Avenor-Run-Token']).toBe('tok')
   })
 
+  it('carries the broker generation of the /sessions listing', async () => {
+    const { fetchImpl } = stubFetch({
+      '/sessions': () => Response.json({ generation: 'gen-central', sessions: [{ run_id: 'supervisor' }] }),
+    })
+    const result = await createBrokerChildBroker(env, fetchImpl).peers()
+    expect(result.generation).toBe('gen-central')
+  })
+
   it('carries a partial listing error from /sessions as the peers detail', async () => {
     const { fetchImpl } = stubFetch({
       '/sessions': () => Response.json({

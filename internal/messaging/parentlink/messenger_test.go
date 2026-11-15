@@ -347,32 +347,22 @@ func TestMessengerPeersShadowsAParentRunSharingALocalRunID(t *testing.T) {
 }
 
 // TestMessengerPeersCarryTheKeyTheParentListsThemUnder pins the parent key: a
-// run this branch publishes is keyed by the branch-namespaced ID, a run the
-// parent exports is keyed by its own ID, a run a registered child owns has none
-// because it is never published as this branch's own, and the result names the
-// parent generation that answered.
+// run the parent accepted is keyed by the key it accepted, a local run the
+// parent did not accept has none, a run read from the parent is keyed by its own
+// ID, and the result names the parent generation that answered.
 func TestMessengerPeersCarryTheKeyTheParentListsThemUnder(t *testing.T) {
 	parent := newStubBroker(t, func(req stubRequest) (int, string) {
 		switch req.Path {
 		case pathRegister:
-			return http.StatusOK, `{"generation":"gen-parent"}`
+			return http.StatusOK, `{"generation":"gen-parent","run_keys":{"run-a":"run-a@child-one"}}`
 		case pathSessions:
 			return http.StatusOK, `{"generation":"gen-parent","sessions":[{"run_id":"run-y"}]}`
 		}
 		return http.StatusOK, `{}`
 	})
-	grandchild := ParentRunKey("child-two", "run-c")
 	local := newStubMessenger()
-	local.peers = []messaging.Peer{{RunID: "run-x"}, {RunID: grandchild}}
+	local.peers = []messaging.Peer{{RunID: "run-a"}, {RunID: "run-x"}}
 	messenger := newTestMessenger(t, local, parent)
-	if _, err := messenger.Register(messaging.DescendantRegistration{
-		ChildID:    "child-two",
-		Endpoint:   "http://child-two",
-		Generation: "gen-b",
-		Runs:       []messaging.RunClaim{{RunID: "run-c", Token: "tok-c"}},
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
 	ctx := testContext(t)
 	if err := messenger.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -386,7 +376,7 @@ func TestMessengerPeersCarryTheKeyTheParentListsThemUnder(t *testing.T) {
 	for _, peer := range res.Peers {
 		keys[peer.RunID] = peer.ParentKey
 	}
-	want := map[string]string{"run-x": ParentRunKey("child-one", "run-x"), grandchild: "", "run-y": "run-y"}
+	want := map[string]string{"run-a": "run-a@child-one", "run-x": "", "run-y": "run-y"}
 	if len(keys) != len(want) {
 		t.Fatalf("parent keys = %v, want %v", keys, want)
 	}

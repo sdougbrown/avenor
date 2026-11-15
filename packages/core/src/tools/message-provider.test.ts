@@ -336,6 +336,23 @@ describe('host message provider', () => {
     expect(result.peers.map(peer => peer.run_id)).toEqual(['supervisor', 'rt_7'])
   })
 
+  it('carries the broker identity of a listing beside the peers', async () => {
+    const client = fakeClient({
+      messagePeers: mock(async () => ({
+        generation: 'gen-host',
+        parent_generation: 'gen-parent',
+        peers: [
+          { run_id: 'rt_1', parent_key: 'rt_1@b1', session: { run_id: 'rt_1', label: 'scout' } },
+          { run_id: 'rt_2', session: { run_id: 'rt_2' } },
+        ],
+      })),
+    })
+    const listed = await provider(client).peers()
+    expect(listed.generation).toBe('gen-host')
+    expect(listed.parentGeneration).toBe('gen-parent')
+    expect(listed.parentKeys).toEqual({ rt_1: 'rt_1@b1' })
+  })
+
   it('refuses resolution when the listing is incomplete, even for a peer it read', async () => {
     const client = fakeClient({
       messagePeers: mock(async () => ({

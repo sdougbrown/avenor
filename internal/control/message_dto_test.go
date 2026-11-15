@@ -96,6 +96,29 @@ func TestMessageDTOWireKeys(t *testing.T) {
 	}
 }
 
+func TestMessagePeersResultCarriesParentKeysOnTheWire(t *testing.T) {
+	in := messaging.PeersResult{
+		Generation:       "g",
+		ParentGeneration: "pg",
+		Peers:            []messaging.Peer{{RunID: "rt_1", ParentKey: "rt_1@b1"}, {RunID: "rt_2"}},
+	}
+	raw, err := json.Marshal(newMessagePeersResult(in))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"peers":[{"run_id":"rt_1","parent_key":"rt_1@b1"},{"run_id":"rt_2"}],"generation":"g","parent_generation":"pg"}`
+	if string(raw) != want {
+		t.Fatalf("wire = %s, want %s", raw, want)
+	}
+	var out MessagePeersResult
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := out.PeersResult(); got.ParentGeneration != "pg" || got.Generation != "g" || len(got.Peers) != 2 || got.Peers[0].ParentKey != "rt_1@b1" || got.Peers[1].ParentKey != "" {
+		t.Fatalf("decoded = %+v, want the parent keys and generations intact", got)
+	}
+}
+
 func TestMessageErrorDataClassifies(t *testing.T) {
 	data := messageErrorData(&router.ToolError{Code: "unknown_target", Message: "no run"}, messaging.OutcomeNotSent, "msg_1")
 	if data.Code != "unknown_target" || data.WireCode != "invalid-request" || data.Outcome != "not-sent" || data.MessageID != "msg_1" {

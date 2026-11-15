@@ -50,18 +50,26 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
   // One fetch-and-merge for both listing and resolution. When the host's parent
   // is the same broker incarnation the central listing came from, the two
   // listings name some runs twice: the host reads central's own runs back, and
-  // central lists the host's runs under the keys the parent gives them.
+  // central lists the host's runs under the keys the parent gives them. The
+  // central row of a host run is dropped and its key stays addressable as an
+  // alias of the host row.
   async function listing(snapshot: MessageProvider[]) {
     const results = await Promise.all(snapshot.map(p => p.peers()))
     const hostResult = snapshot.length > 1 ? results[0] : undefined
     const centralResult = results[results.length - 1]
     const sameBroker = !!hostResult?.parentGeneration && hostResult.parentGeneration === centralResult.generation
-    const parentKeys = hostResult?.parentKeys ?? {}
-    const hostQualified = new Set(Object.entries(parentKeys).filter(([runId, key]) => key !== runId).map(([, key]) => key))
+    const parentKeys = sameBroker ? hostResult?.parentKeys ?? {} : {}
+    const centralIds = new Set(centralResult.peers.map(peer => peer.run_id))
+    const aliases = new Map<string, string>()
+    for (const [runId, key] of Object.entries(parentKeys)) {
+      if (key !== runId) aliases.set(key, runId)
+    }
     const listed = results.flatMap((r, i) => r.peers
-      .filter(peer => !sameBroker || (i === 0 ? parentKeys[peer.run_id] !== peer.run_id : !hostQualified.has(peer.run_id)))
+      .filter(peer => i === 0 && hostResult
+        ? !(parentKeys[peer.run_id] === peer.run_id && centralIds.has(peer.run_id))
+        : !aliases.has(peer.run_id))
       .map(peer => ({ peer, provider: snapshot[i] })))
-    return { results, listed }
+    return { results, listed, aliases }
   }
 
   return {
@@ -78,7 +86,7 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
     async resolve(ref) {
       const snapshot = providers()
       const host = snapshot.find(provider => provider !== central)
-      const { results, listed } = await listing(snapshot)
+      const { results, listed, aliases } = await listing(snapshot)
       if (results.some(r => r.detail)) throw new Error('the peer listing is incomplete: ' + results.map(r => r.detail).filter(Boolean).join('; '))
       const rows = listed.map(({ peer, provider }) => ({ run_id: peer.run_id, label: peer.label, provider }))
       // The host's own runs are not rows in its own listing, so its own match rule
@@ -89,7 +97,12 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
       if (publicResolution && host && !rows.some(row => row.provider === host && row.run_id === ref)) {
         rows.push({ run_id: ref, label: publicResolution.label, provider: host })
       }
-      const { resolution: matched, row: hit } = matchPeerRows(rows, ref)
+      // A host run's qualified key names that host row alone: its bare id can
+      // also name a central run.
+      const aliased = aliases.get(ref)
+      const { resolution: matched, row: hit } = aliased !== undefined && host
+        ? matchPeerRows(rows.filter(row => row.provider === host), aliased)
+        : matchPeerRows(rows, ref)
       if (matched.match !== 'unique' || !hit) return matched
       // The rule already answered from the row, which came from this same fetch.
       // Only the host can add a field the listing does not carry — the public run

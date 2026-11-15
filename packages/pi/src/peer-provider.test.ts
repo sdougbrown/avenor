@@ -39,8 +39,9 @@ test('one broker incarnation lists a run to the session once, and only the prove
     { run_id: 'supervisor' },
     { run_id: 'rt_1', label: 'scout' },
     { run_id: 'pi-peer', label: 'poo-skills' },
+    { run_id: 'pi-unlisted', label: 'ghost' },
   ]
-  const parentKeys = { supervisor: 'supervisor@b1', rt_1: 'rt_1@b1', 'pi-peer': 'pi-peer' }
+  const parentKeys = { supervisor: 'supervisor@b1', rt_1: 'rt_1@b1', 'pi-peer': 'pi-peer', 'pi-unlisted': 'pi-unlisted' }
   const centralRows = [
     { run_id: 'supervisor', label: 'root' },
     { run_id: 'supervisor@b1' },
@@ -62,9 +63,15 @@ test('one broker incarnation lists a run to the session once, and only the prove
   const scout = await p.resolve('scout')
   expect(scout.match).toBe('unique')
   await p.tell(scout.routeKey ?? scout.runId, 'hi')
-  expect(sent).toEqual(['central:pi-peer', 'central:pi-peer', 'local:rt_1'])
+  for (const ref of ['rt_1@b1', 'supervisor@b1', 'ghost']) {
+    const r = await p.resolve(ref)
+    expect(r.match).toBe('unique')
+    await p.tell(r.routeKey ?? r.runId, 'hi')
+  }
+  expect(sent).toEqual(['central:pi-peer', 'central:pi-peer', 'local:rt_1', 'local:rt_1', 'local:supervisor', 'local:pi-unlisted'])
+  expect((await p.resolve('supervisor')).match).toBe('ambiguous')
   const listed = (await p.peers()).peers.map(row => row.run_id)
-  expect(listed.sort()).toEqual(['pi-peer', 'rt_1', 'supervisor', 'supervisor'])
+  expect(listed.sort()).toEqual(['pi-peer', 'pi-unlisted', 'rt_1', 'supervisor', 'supervisor'])
 
   expect((await build('g2', []).resolve('poo-skills')).match).toBe('ambiguous')
 })

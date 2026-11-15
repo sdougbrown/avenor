@@ -749,6 +749,21 @@ func (l *Link) pinnedGeneration() (string, bool) {
 	return l.generation, l.generation != ""
 }
 
+// acceptedKeys reports the parent generation the last registration was answered
+// with and the namespaced key the parent accepted for each claimed run. A run
+// the parent reported no key for is addressed by its own ID and is left out.
+func (l *Link) acceptedKeys() (string, map[string]string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	keys := make(map[string]string, len(l.keys))
+	for runID, key := range l.keys {
+		if key != runID {
+			keys[runID] = key
+		}
+	}
+	return l.generation, keys
+}
+
 // replacementOutcome reports what a rejected generation proves: a parent whose
 // generation changed is a replacement, so no edge from the pinned generation can
 // exist and nothing is replayed. An unchanged generation leaves the ask
