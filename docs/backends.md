@@ -229,6 +229,10 @@ AVENOR_CLAUDE_TERMINAL=tmux avenor --backend claude --prompt "say hi"
 
 `AVENOR_CLAUDE_TERMINAL` selects the launcher; `claude` defaults to PTY.
 
+### Workspace trust
+
+Before launching, Avenor marks the run directory trusted in Claude Code's global config (`$CLAUDE_CONFIG_DIR/.claude.json`, otherwise `~/.claude.json`) by setting `projects[<resolved run directory>].hasTrustDialogAccepted` to `true`, so the first-launch trust dialog does not appear. It never creates the file: a missing config means Claude Code's onboarding has not happened and is left alone. It holds Claude Code's own `<config path>.lock` directory from the read through the rename, waits about a second for a held lock, removes only a lock it still owns, gives up instead of renaming once it has held that lock for 5s, and re-reads the file when a writer changed it in between; a config owned by another user is left alone. The edit is skipped when the run's Claude Code would read a different file: with `CLAUDE_CODE_CUSTOM_OAUTH_URL` set it names its config `.claude-custom-oauth.json`, and it prefers a non-empty legacy `<config home>/.config.json` when one exists. Wrapped and tmux runs are skipped: a wrapper (container, VM) may not read the host config, and a tmux pane inherits the tmux server's environment rather than Avenor's, so the edit could write a file the child never reads; the key-driven dialog handler answers there instead. When the edit fails, the dialog appears and the session's key-driven handler answers it.
+
 ### Status reports (OSC 7501)
 
 On the PTY launcher Avenor answers Claude Code's OSC 7501 (Program Status Protocol) detection query, so Claude reports its own state: `idle`, `working`, `blocked` (on a permission, question, or authentication), and `done`. Without the answer Claude reports nothing, and Avenor ignores any report that arrives before it answered. After the first report Avenor uses the reports alongside the pane and transcript:

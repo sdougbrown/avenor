@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -33,6 +34,11 @@ type Provider struct {
 	sessions    map[string]*claudecore.Session
 	launcher    terminal.Launcher
 	cancelGrace time.Duration
+	// preTrustDir marks the run directory trusted in Claude Code's global
+	// config before launch. NewWithOptions sets it to claudecore.PreAcceptTrust;
+	// nil means skip. A Provider literal that omits the field must not touch a
+	// real config file.
+	preTrustDir func(ctx context.Context, dir string) error
 }
 
 var _ runtime.Provider = (*Provider)(nil)
@@ -67,6 +73,7 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		sessions:    make(map[string]*claudecore.Session),
 		launcher:    defaultLauncher(),
 		cancelGrace: defaultCancelGrace,
+		preTrustDir: claudecore.PreAcceptTrust,
 	}
 }
 
@@ -94,7 +101,8 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("claude binary not found in PATH: %w", err)
 	}
 
-	if _, ok := p.launcher.(terminal.TmuxLauncher); ok {
+	_, isTmux := p.launcher.(terminal.TmuxLauncher)
+	if isTmux {
 		if _, err := exec.LookPath("tmux"); err != nil {
 			return runtime.Session{}, fmt.Errorf("tmux not found in PATH: %w", err)
 		}
@@ -129,6 +137,19 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		return runtime.Session{}, fmt.Errorf("create stderr log: %w", err)
 	}
 	shellCmd := claudecore.LaunchCommand(claudeArgs, stderrLog, merged.LaunchWrapper)
+
+	// Pre-accepting the workspace trust keeps Claude's first-launch dialog out
+	// of the way. Any failure leaves the config untouched; the dialog then
+	// appears and Session's key-driven handler answers it. A wrapped launch is
+	// skipped: the wrapper (container, VM) may not read the host config, so
+	// editing it would only widen what the host trusts. A tmux launch is
+	// skipped too: the pane inherits the tmux server's environment, not
+	// avenor's, so the child may read a different config than the one edited.
+	if len(merged.LaunchWrapper) == 0 && !isTmux && p.preTrustDir != nil {
+		if err := p.preTrustDir(ctx, merged.Dir); err != nil {
+			log.Printf("claude: pre-accept workspace trust for %s: %v", merged.Dir, err)
+		}
+	}
 
 	var transcript *claudecore.TranscriptReader
 	if home, err := os.UserHomeDir(); err == nil {
