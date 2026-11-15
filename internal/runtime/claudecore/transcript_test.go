@@ -345,8 +345,9 @@ func TestTranscriptPathResolvesSymlinkedDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := TranscriptPath("/home/u", real, "sid")
-	if got := TranscriptPath("/home/u", link, "sid"); got != want {
+	projects := TranscriptRoot("/home/u")
+	want := TranscriptPath(projects, real, "sid")
+	if got := TranscriptPath(projects, link, "sid"); got != want {
 		t.Fatalf("symlinked dir: got %q, want %q", got, want)
 	}
 	if !strings.Contains(want, encodeProjectPath(real)) {
@@ -355,9 +356,75 @@ func TestTranscriptPathResolvesSymlinkedDir(t *testing.T) {
 }
 
 func TestTranscriptPathMissingDirUsedAsGiven(t *testing.T) {
-	got := TranscriptPath("/home/u", "/no/such/dir", "sid")
-	want := filepath.Join("/home/u", ".claude", "projects", "-no-such-dir", "sid.jsonl")
+	projects := filepath.Join("/home/u", ".claude", "projects")
+	got := TranscriptPath(projects, "/no/such/dir", "sid")
+	want := filepath.Join(projects, "-no-such-dir", "sid.jsonl")
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestTranscriptRootUsesTheClaudeConfigDir pins the path a run's Claude Code
+// writes to when CLAUDE_CONFIG_DIR is set: it is that directory, not
+// ~/.claude, so a reader pinned to ~/.claude misses every record.
+func TestTranscriptRootUsesTheClaudeConfigDir(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	if got, want := TranscriptRoot("/home/u"), filepath.Join(configDir, "projects"); got != want {
+		t.Fatalf("TranscriptRoot = %q, want %q", got, want)
+	}
+}
+
+// TestTranscriptRootDefaultsToTheClaudeDirInHome covers the unset and empty
+// cases: avenor falls back to ~/.claude/projects for both.
+func TestTranscriptRootDefaultsToTheClaudeDirInHome(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		unset bool
+	}{
+		{"unset", true},
+		{"empty", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			if tc.unset {
+				if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+					t.Fatalf("unset CLAUDE_CONFIG_DIR: %v", err)
+				}
+			}
+
+			want := filepath.Join("/home/u", ".claude", "projects")
+			if got := TranscriptRoot("/home/u"); got != want {
+				t.Fatalf("TranscriptRoot = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestTranscriptRootIgnoresARelativeClaudeConfigDir pins the documented
+// fallback: Claude Code resolves a relative value against its own working
+// directory, which avenor cannot name, so the default tree is used instead.
+func TestTranscriptRootIgnoresARelativeClaudeConfigDir(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join("relative", "config"))
+
+	want := filepath.Join("/home/u", ".claude", "projects")
+	if got := TranscriptRoot("/home/u"); got != want {
+		t.Fatalf("TranscriptRoot = %q, want %q", got, want)
+	}
+}
+
+// TestTranscriptRootNeedsAHomeWithoutAConfigDir covers a launch with no home
+// directory: only an absolute CLAUDE_CONFIG_DIR names a tree to follow.
+func TestTranscriptRootNeedsAHomeWithoutAConfigDir(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if got := TranscriptRoot(""); got != "" {
+		t.Fatalf("TranscriptRoot with no home and no config dir = %q, want empty", got)
+	}
+
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	if got, want := TranscriptRoot(""), filepath.Join(configDir, "projects"); got != want {
+		t.Fatalf("TranscriptRoot with a config dir and no home = %q, want %q", got, want)
 	}
 }

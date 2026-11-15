@@ -151,9 +151,17 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 
+	// The transcript tree comes from avenor's environment. A tmux pane inherits
+	// the tmux server's instead, so a run whose server sets a different
+	// CLAUDE_CONFIG_DIR or HOME may read another tree; pretrust skips its edit
+	// for the same reason.
 	var transcript *claudecore.TranscriptReader
-	if home, err := os.UserHomeDir(); err == nil {
-		transcript = claudecore.NewTranscriptReader(claudecore.TranscriptPath(home, merged.Dir, sessionID))
+	home, err := claudecore.ResolveHomeDir()
+	if err != nil {
+		home = ""
+	}
+	if root := claudecore.TranscriptRoot(home); root != "" {
+		transcript = claudecore.NewTranscriptReader(claudecore.TranscriptPath(root, merged.Dir, sessionID))
 	}
 
 	s := claudecore.NewSession(context.Background(), claudecore.SessionOptions{

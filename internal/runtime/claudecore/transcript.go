@@ -14,8 +14,9 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
-// Claude Code writes JSONL transcripts under ~/.claude/projects/<encoded>/
-// where <encoded> is the absolute project dir with anything outside the
+// Claude Code writes JSONL transcripts under <config dir>/projects/<encoded>/
+// where <config dir> is $CLAUDE_CONFIG_DIR when set and ~/.claude otherwise,
+// and <encoded> is the absolute project dir with anything outside the
 // [A-Za-z0-9-] character class collapsed to "-". This mapping is lossy
 // (e.g. ".foo" and "/foo" both encode to "-foo") but Claude treats it as
 // an opaque directory identifier; we only need to match its output.
@@ -25,15 +26,40 @@ func encodeProjectPath(dir string) string {
 	return projectPathEncode.ReplaceAllString(dir, "-")
 }
 
+// TranscriptRoot returns the directory Claude Code files a run's transcript
+// under, one subdirectory per project: <config dir>/projects. The config
+// directory is CLAUDE_CONFIG_DIR when it names an absolute path, otherwise
+// <home>/.claude. It is not where the global config file lives: that is
+// <CLAUDE_CONFIG_DIR or home>/.claude.json (see PreAcceptTrust).
+//
+// A relative CLAUDE_CONFIG_DIR falls back to <home>/.claude. Claude Code works
+// such a value out against its own working directory, so the tree a run writes
+// to is not one path avenor can name. PreAcceptTrust declines to edit a config
+// under one; the reader instead watches <home>/.claude/projects, where a run
+// with such a value finds no transcript.
+//
+// An empty root means neither an absolute CLAUDE_CONFIG_DIR nor a home
+// directory named one, and there is no transcript to follow.
+func TranscriptRoot(home string) string {
+	if configDir, err := claudeConfigDirOverride(); err == nil && configDir != "" {
+		return filepath.Join(configDir, "projects")
+	}
+	if strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects")
+}
+
 // TranscriptPath returns where Claude Code writes the transcript for a session
-// started in dir. Claude keys the project directory on the resolved working
-// directory (a launch in /tmp lands in "-private-tmp-..." on macOS), so dir is
-// symlink-resolved first; an unresolvable dir is used as given.
-func TranscriptPath(home, dir, sessionID string) string {
+// started in dir, under the transcript root from TranscriptRoot. Claude keys
+// the project directory on the resolved working directory (a launch in /tmp
+// lands in "-private-tmp-..." on macOS), so dir is symlink-resolved first; an
+// unresolvable dir is used as given.
+func TranscriptPath(root, dir, sessionID string) string {
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
 	}
-	return filepath.Join(home, ".claude", "projects", encodeProjectPath(dir), sessionID+".jsonl")
+	return filepath.Join(root, encodeProjectPath(dir), sessionID+".jsonl")
 }
 
 // TranscriptRecord is the minimal subset of JSONL fields used for status and
@@ -222,6 +248,11 @@ type TranscriptReader struct {
 
 func NewTranscriptReader(path string) *TranscriptReader {
 	return &TranscriptReader{path: path}
+}
+
+// Path is the transcript file this reader follows.
+func (r *TranscriptReader) Path() string {
+	return r.path
 }
 
 // Tick reads records appended since the previous call. It returns the
