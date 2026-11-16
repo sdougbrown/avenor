@@ -269,6 +269,9 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 		return nil, err
 	}
 	if req.IdempotencyKey != "" {
+		if err := validateInstantiationKey(req.IdempotencyKey); err != nil {
+			return nil, err
+		}
 		return m.instantiateIdempotent(req.IdempotencyKey, template, req.Params)
 	}
 	wf := NewWorkflowID()
@@ -300,8 +303,11 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 // appears. Once the instance is committed, a retry returns its current
 // revision, including when the instance is already terminal — a key never
 // silently becomes reusable while a caller may still retry. A record bound to
-// a different request fails with ErrInstantiationKeyConflict; metadata is
-// caller bookkeeping and outside the conflict fingerprint.
+// a different request fails with ErrInstantiationKeyConflict (as an
+// InstantiationKeyConflictError, which the control server maps to -32031);
+// metadata is caller bookkeeping and outside the conflict fingerprint.
+// Composition validation runs before the record write, so a request whose
+// tree fails to build never consumes the key.
 func (m *Manager) instantiateIdempotent(key string, template Template, params map[string]string) (any, error) {
 	unlock, err := m.store.lockInstantiationKeys()
 	if err != nil {
@@ -317,8 +323,11 @@ func (m *Manager) instantiateIdempotent(key string, template Template, params ma
 	var wf WorkflowID
 	if exists {
 		if rec.RequestHash != hash {
-			return nil, fmt.Errorf("%w: key %q is bound to template %s@%s with different params",
-				ErrInstantiationKeyConflict, key, rec.TemplateID, rec.TemplateVersion)
+			return nil, &InstantiationKeyConflictError{
+				Key:             key,
+				TemplateID:      rec.TemplateID,
+				TemplateVersion: rec.TemplateVersion,
+			}
 		}
 		wf = WorkflowID(rec.WorkflowID)
 		// A prior attempt already committed the instance: return its current
@@ -337,6 +346,16 @@ func (m *Manager) instantiateIdempotent(key string, template Template, params ma
 		// Fall through and complete the instantiation under the recorded ID.
 	} else {
 		wf = NewWorkflowID()
+	}
+	// Composition validation runs before the record write, so a request whose
+	// tree cannot be built — unresolvable pins, a cycle, the instance bound —
+	// never consumes the key. instantiateTemplate rebuilds the same composition
+	// from the same inputs (child IDs derive from wf), so the pre-pass is pure
+	// validation.
+	if _, _, err := BuildComposition(wf, template, m.resolveTemplate); err != nil {
+		return nil, err
+	}
+	if !exists {
 		rec = instantiationKeyRecord{
 			Key:             key,
 			TemplateID:      string(template.TemplateID),

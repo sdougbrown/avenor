@@ -10,6 +10,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -140,10 +142,185 @@ func TestManagerInstantiateIdempotencyKeyMetadataOutsideFingerprint(t *testing.T
 		t.Fatalf("WorkflowCreate: %v", err)
 	}
 
+	// Same key, same request, different metadata on each call: metadata is
+	// caller bookkeeping and must not conflict or fork the workflow.
+	first, err := m.WorkflowInstantiate([]byte(`{"template_id": "mgr-test", "template_version": "1", "idempotency_key": "unit-42", "metadata": {"attempt": 1}}`))
+	if err != nil {
+		t.Fatalf("first instantiate: %v", err)
+	}
+	retry, err := m.WorkflowInstantiate([]byte(`{"template_id": "mgr-test", "template_version": "1", "idempotency_key": "unit-42", "metadata": {"attempt": 2}}`))
+	if err != nil {
+		t.Fatalf("retry instantiate: %v", err)
+	}
+	firstID := first.(map[string]any)["workflow_id"]
+	if firstID != retry.(map[string]any)["workflow_id"] {
+		t.Fatalf("retry workflow_id = %v, want %v", retry.(map[string]any)["workflow_id"], firstID)
+	}
+	if got := countInstantiatedInstances(t, s); got != 1 {
+		t.Fatalf("instance count after metadata-differing retry = %d, want 1", got)
+	}
+}
+
+func TestManagerInstantiateIdempotencyKeyRejectsInvalidKey(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+
+	long := strings.Repeat("k", 257)
+	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "mgr-test", "template_version": "1", "idempotency_key": "` + long + `"}`)); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("overlong key error = %v, want length rejection", err)
+	}
+	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "mgr-test", "template_version": "1", "idempotency_key": "bad\u0000key"}`)); err == nil || !strings.Contains(err.Error(), "control characters") {
+		t.Fatalf("control-character key error = %v, want control-character rejection", err)
+	}
+	if got := countInstantiatedInstances(t, s); got != 0 {
+		t.Fatalf("instance count after invalid keys = %d, want 0", got)
+	}
+}
+
+func TestManagerInstantiateIdempotencyKeySurvivesSnapshotlessCrash(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+
 	first := instantiateWithKey(t, m, "unit-42", nil)
+	wf := WorkflowID(first["workflow_id"].(string))
+
+	// Simulate the crash between appendEvents and writeSnapshot: the event log
+	// is committed but the snapshot file is gone. The retry must resolve the
+	// instance through replay, not re-instantiate over the orphan (which would
+	// brick every later read of the instance).
+	if err := os.Remove(s.workflowPath(wf)); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
+	}
+	if _, ok, err := s.loadCurrent(wf); err != nil || !ok {
+		t.Fatalf("loadCurrent after snapshotless crash: exists=%v err=%v, want replayed instance", ok, err)
+	}
 	retry := instantiateWithKey(t, m, "unit-42", nil)
-	if first["workflow_id"] != retry["workflow_id"] {
+	if retry["workflow_id"] != first["workflow_id"] {
 		t.Fatalf("retry workflow_id = %v, want %v", retry["workflow_id"], first["workflow_id"])
+	}
+
+	// Every later read of the instance must still work: the orphaned event
+	// must not have bricked replay.
+	if _, ok, err := s.loadCurrent(wf); err != nil || !ok {
+		t.Fatalf("loadCurrent after recovery: exists=%v err=%v", ok, err)
+	}
+}
+
+func TestManagerInstantiateIdempotencyKeyRejectsCorruptRecord(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+
+	if err := os.MkdirAll(s.instantiationKeysDir(), 0o755); err != nil {
+		t.Fatalf("mkdir keys dir: %v", err)
+	}
+	if err := os.WriteFile(s.instantiationKeyPath("unit-42"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt record: %v", err)
+	}
+	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "mgr-test", "template_version": "1", "idempotency_key": "unit-42"}`)); err == nil {
+		t.Fatal("corrupt record accepted, want error")
+	}
+	if got := countInstantiatedInstances(t, s); got != 0 {
+		t.Fatalf("instance count after corrupt record = %d, want 0", got)
+	}
+}
+
+func TestManagerInstantiateIdempotencyKeyNotBoundByFailedValidation(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+
+	// A keyed request that fails before key resolution — here an unknown
+	// template — must not consume the key.
+	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "missing-template", "template_version": "1", "idempotency_key": "unit-42"}`)); err == nil {
+		t.Fatal("unknown template accepted, want error")
+	}
+	result := instantiateWithKey(t, m, "unit-42", nil)
+	if got, want := fmt.Sprint(result["revision"]), "1"; got != want {
+		t.Fatalf("revision = %s, want %s (fresh instance, key not pre-bound)", got, want)
+	}
+}
+
+func TestManagerInstantiateIdempotencyKeyReturnsCurrentRevisionAfterTerminal(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+
+	first := instantiateWithKey(t, m, "unit-42", nil)
+	wf := WorkflowID(first["workflow_id"].(string))
+
+	// Drive the manual start node to its terminal outcome so the workflow
+	// completes and its revision advances past the initial instantiate.
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: exists=%v err=%v", ok, err)
+	}
+	start := activationByNode(&snap.Instance, "start")
+	if start == nil {
+		t.Fatal("start activation not found")
+	}
+	res := claimActivation(t, m, wf, "start", string(start.ID), "alice")
+	out, err := m.WorkflowCommand(string(wf), startCommandPayload(t, "start", string(start.ID), res, nil))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	attemptID := out.(map[string]any)["attempt_id"].(string)
+	leaseID := res["lease_id"].(string)
+	if err := m.RecordAttemptTerminated(wf, "start", start.ID, AttemptID(attemptID), LeaseID(leaseID), AttemptSucceeded); err != nil {
+		t.Fatalf("RecordAttemptTerminated: %v", err)
+	}
+	complete, err := json.Marshal(map[string]any{
+		"op": "complete", "node_id": "start", "activation_id": string(start.ID),
+		"attempt_id": attemptID, "lease_id": leaseID, "owner_token": res["owner_token"],
+		"outcome": "done",
+	})
+	if err != nil {
+		t.Fatalf("marshal complete: %v", err)
+	}
+	if _, err := m.WorkflowCommand(string(wf), complete); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	// The key is still bound after the workflow went terminal: the retry
+	// returns the same workflow at its current revision, never a fresh one.
+	retry := instantiateWithKey(t, m, "unit-42", nil)
+	if retry["workflow_id"] != first["workflow_id"] {
+		t.Fatalf("retry workflow_id = %v, want %v", retry["workflow_id"], first["workflow_id"])
+	}
+	if retry["revision"] == first["revision"] {
+		t.Fatalf("retry revision = %v, want the current revision (past %v)", retry["revision"], first["revision"])
 	}
 }
 

@@ -84,6 +84,8 @@ rm -rf "$SCRATCH"   # never delete "$EV"
   ID every time (unchanged behavior).
 - Conflict fingerprint covers template, version, and params only — `metadata`
   is caller bookkeeping and never conflicts.
-- Requests that fail validation (unknown template, invalid params) never bind
-  the key: template and param validation run before key resolution, so a bad
-  request costs nothing.
+- Requests that fail validation (unknown template, invalid params, a tree
+  that cannot be built) never bind the key: template, param, and composition
+  validation run before key resolution, so a bad request costs nothing.
+- A reused key with a different request fails with the -32031 conflict code,
+  the same code template registration and spawn idempotency use.

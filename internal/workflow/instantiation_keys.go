@@ -13,11 +13,30 @@ import (
 	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
-// ErrInstantiationKeyConflict reports that a caller-supplied instantiation
-// idempotency key was reused for a different request. The caller should pick
-// a fresh key rather than retry; the original key stays bound to the request
-// it was first created with.
+// ErrInstantiationKeyConflict is the sentinel an instantiation key conflict
+// reduces to; errors.Is against it works for any conflict error.
 var ErrInstantiationKeyConflict = errors.New("workflow: instantiation idempotency key conflict")
+
+// InstantiationKeyConflictError reports that a caller-supplied instantiation
+// idempotency key was reused for a different request. The control server maps
+// it to -32031 — the conflict code programmatic clients already classify for
+// template registration and spawn idempotency — so a client can tell "pick a
+// fresh key" apart from any other failure. errors.Is against
+// ErrInstantiationKeyConflict holds.
+type InstantiationKeyConflictError struct {
+	Key             string
+	TemplateID      string
+	TemplateVersion string
+}
+
+func (e *InstantiationKeyConflictError) Error() string {
+	return fmt.Sprintf("workflow: instantiation idempotency key conflict: key %q is bound to template %s@%s with different params",
+		e.Key, e.TemplateID, e.TemplateVersion)
+}
+
+func (e *InstantiationKeyConflictError) Is(target error) bool {
+	return target == ErrInstantiationKeyConflict
+}
 
 // instantiationKeyRecord is the durable binding of one caller-supplied
 // idempotency key to the workflow instance created under it. Records live at
@@ -33,6 +52,21 @@ type instantiationKeyRecord struct {
 	RequestHash     string    `json:"request_hash"`
 	WorkflowID      string    `json:"workflow_id"`
 	CreatedAt       time.Time `json:"created_at"`
+}
+
+// validateInstantiationKey bounds a caller-supplied key, matching
+// validateParamValue's rule for caller-supplied durable strings: keys land in
+// a durable record, so length and control characters are rejected up front.
+func validateInstantiationKey(key string) error {
+	if len(key) > maxInstanceParamValueLength {
+		return fmt.Errorf("instantiation idempotency key exceeds %d characters", maxInstanceParamValueLength)
+	}
+	for _, r := range key {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("instantiation idempotency key must not contain control characters")
+		}
+	}
+	return nil
 }
 
 // lockInstantiationKeys acquires the root-scoped flock that serializes
