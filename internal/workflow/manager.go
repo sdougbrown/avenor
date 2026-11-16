@@ -237,12 +237,17 @@ func (m *Manager) WorkflowCreate(payload json.RawMessage) (any, error) {
 // cleanup is out of scope for this stage. The composition manifest rides on
 // the instantiate event record and is applied into the instance by the
 // reducer.
+//
+// When the request carries idempotency_key, the instantiation is retry-safe:
+// see instantiateIdempotent for the dedup, conflict, and crash-recovery
+// behavior. Requests without a key mint a fresh workflow ID every time.
 func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	var req struct {
 		TemplateID      TemplateID        `json:"template_id"`
 		TemplateVersion TemplateVersion   `json:"template_version"`
 		Metadata        map[string]any    `json:"metadata,omitempty"`
 		Params          map[string]string `json:"params,omitempty"`
+		IdempotencyKey  string            `json:"idempotency_key,omitempty"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, fmt.Errorf("instantiate payload: %w", err)
@@ -263,9 +268,89 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	if err := validateInstanceParams(template, req.Params); err != nil {
 		return nil, err
 	}
+	if req.IdempotencyKey != "" {
+		return m.instantiateIdempotent(req.IdempotencyKey, template, req.Params)
+	}
 	wf := NewWorkflowID()
 	var materialized int
 	snap, err := m.instantiateTemplate(wf, template, &materialized, req.Params)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"workflow_id": string(wf),
+		"revision":    snap.Instance.Revision,
+	}, nil
+}
+
+// instantiateIdempotent makes a retried instantiation converge on the first
+// attempt's workflow instead of minting a duplicate. The caller-supplied key
+// resolves against a durable record under <root>/instantiation-keys/, read
+// and written under the root-scoped keys flock, which the call holds across
+// the whole decision so concurrent same-key callers — including separate
+// supervisor processes sharing the workflow root — serialize and observe one
+// outcome.
+//
+// A record binding the same template, version, and params returns that
+// record's workflow ID. The binding is written before the instance is
+// created, so a crash between record and commit leaves a retry that completes
+// the interrupted instantiation under the recorded ID: ensureChildInstance
+// resumes the children the crashed attempt already materialized (their IDs
+// derive from the recorded parent), and no controller-eligible duplicate
+// appears. Once the instance is committed, a retry returns its current
+// revision, including when the instance is already terminal — a key never
+// silently becomes reusable while a caller may still retry. A record bound to
+// a different request fails with ErrInstantiationKeyConflict; metadata is
+// caller bookkeeping and outside the conflict fingerprint.
+func (m *Manager) instantiateIdempotent(key string, template Template, params map[string]string) (any, error) {
+	unlock, err := m.store.lockInstantiationKeys()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	hash := instantiationRequestHash(template.TemplateID, template.TemplateVersion, params)
+	rec, exists, err := m.store.loadInstantiationKey(key)
+	if err != nil {
+		return nil, err
+	}
+	var wf WorkflowID
+	if exists {
+		if rec.RequestHash != hash {
+			return nil, fmt.Errorf("%w: key %q is bound to template %s@%s with different params",
+				ErrInstantiationKeyConflict, key, rec.TemplateID, rec.TemplateVersion)
+		}
+		wf = WorkflowID(rec.WorkflowID)
+		// A prior attempt already committed the instance: return its current
+		// state as the original response would have. No re-instantiation.
+		snap, ok, err := m.store.loadCurrent(wf)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			return map[string]any{
+				"workflow_id": string(wf),
+				"revision":    snap.Instance.Revision,
+			}, nil
+		}
+		// Record present, instance absent: a crash between record and commit.
+		// Fall through and complete the instantiation under the recorded ID.
+	} else {
+		wf = NewWorkflowID()
+		rec = instantiationKeyRecord{
+			Key:             key,
+			TemplateID:      string(template.TemplateID),
+			TemplateVersion: string(template.TemplateVersion),
+			RequestHash:     hash,
+			WorkflowID:      string(wf),
+			CreatedAt:       m.now().UTC(),
+		}
+		if err := m.store.writeInstantiationKeyRecord(rec); err != nil {
+			return nil, err
+		}
+	}
+	var materialized int
+	snap, err := m.instantiateTemplate(wf, template, &materialized, params)
 	if err != nil {
 		return nil, err
 	}

@@ -200,6 +200,7 @@ func app() *clicontract.App {
 							{Name: "template-id", Kind: clicontract.String, Usage: "template id (required)", Required: true},
 							{Name: "template-version", Kind: clicontract.String, Usage: "template version (required)", Required: true},
 							{Name: "request-file", Kind: clicontract.String, Usage: "path to instance JSON file (required; {\"metadata\":{...},\"params\":{...}} or {})", Required: true},
+							{Name: "idempotency-key", Kind: clicontract.String, Usage: "retry-safe key: same key with the same request returns the original workflow; reuse for a different request is a conflict"},
 						},
 						InputRules: nonEmptyRequiredRules("template-id", "template-version", "request-file"),
 						Handle:     handleWorkflowInstantiate,
