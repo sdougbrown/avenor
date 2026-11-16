@@ -55,8 +55,12 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
   // alias of the host row.
   async function listing(snapshot: MessageProvider[]) {
     const results = await Promise.all(snapshot.map(p => p.peers()))
-    const hostResult = snapshot.length > 1 ? results[0] : undefined
-    const centralResult = results[results.length - 1]
+    // Which provider is the host, and which is central, is decided here once, by
+    // identity: the same answer every path below and the caller reuse.
+    const hostIndex = snapshot.findIndex(provider => provider !== central)
+    const host = hostIndex === -1 ? undefined : snapshot[hostIndex]
+    const hostResult = hostIndex === -1 ? undefined : results[hostIndex]
+    const centralResult = results[snapshot.indexOf(central)]
     const sameBroker = !!hostResult?.parentGeneration && hostResult.parentGeneration === centralResult.generation
     const parentKeys = sameBroker ? hostResult?.parentKeys ?? {} : {}
     const centralIds = new Set(centralResult.peers.map(peer => peer.run_id))
@@ -65,11 +69,11 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
       if (key !== runId) aliases.set(key, runId)
     }
     const listed = results.flatMap((r, i) => r.peers
-      .filter(peer => i === 0 && hostResult
+      .filter(peer => i === hostIndex
         ? !(parentKeys[peer.run_id] === peer.run_id && centralIds.has(peer.run_id))
         : !aliases.has(peer.run_id))
       .map(peer => ({ peer, provider: snapshot[i] })))
-    return { results, listed, aliases }
+    return { results, listed, aliases, host }
   }
 
   return {
@@ -85,8 +89,7 @@ export function combinePeerProviders(localSource: MessageProvider | (() => Messa
     },
     async resolve(ref) {
       const snapshot = providers()
-      const host = snapshot.find(provider => provider !== central)
-      const { results, listed, aliases } = await listing(snapshot)
+      const { results, listed, aliases, host } = await listing(snapshot)
       if (results.some(r => r.detail)) throw new Error('the peer listing is incomplete: ' + results.map(r => r.detail).filter(Boolean).join('; '))
       const rows = listed.map(({ peer, provider }) => ({ run_id: peer.run_id, label: peer.label, provider }))
       // The host's own runs are not rows in its own listing, so its own match rule
