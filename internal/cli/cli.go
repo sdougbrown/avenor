@@ -1576,26 +1576,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	}
 
 	emitPermissionResponse := func(requestID, optionID, kind, source string) {
-		fields := map[string]any{
-			"request_id": requestID,
-			"option_id":  optionID,
-			"kind":       kind,
-			"source":     source,
-			"ts":         time.Now().UnixMilli(),
-		}
-		if cfg.RunID != "" {
-			fields["run_id"] = cfg.RunID
-		}
-		if cfg.RunLabel != "" {
-			fields["run_label"] = cfg.RunLabel
-		}
-		if err := deps.Writer.Write(events.Event{
-			Event:     "permission.response",
-			SessionID: cfg.SessionID,
-			Fields:    fields,
-		}); err != nil {
-			fmt.Fprintf(deps.Stderr, "avenor: write permission.response event: %v\n", err)
-		}
+		writePermissionResponse(deps.Writer, deps.Stderr, cfg.SessionID, cfg.RunID, cfg.RunLabel, requestID, optionID, kind, source)
 	}
 
 	handlePermissionResult := func(res permissionResult) (sessionResult, bool) {
@@ -1742,7 +1723,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				}
 				requestID, _ := event.Fields["request_id"].(string)
 				requiresUserInput, _ := event.Fields["requires_user_input"].(bool)
-				resolverState := effectivePermissionResolverState(
+				resolverState := EffectivePermissionResolverState(
 					cfg.AutoApprove,
 					requiresUserInput,
 					deps.ControlServer != nil && deps.ControlServer.HasClients(),
@@ -2137,7 +2118,10 @@ func firstOptionKind(options []any, wantKind string) (string, string) {
 	return "", ""
 }
 
-func effectivePermissionResolverState(autoApprove, requiresUserInput, hasControlClient, hasFileHandler bool) control.PermissionResolverState {
+// EffectivePermissionResolverState picks the resolver a request's launch policy
+// gives it. Every path that publishes a permission.request reads it, so the
+// hint on the event and the claim's state agree.
+func EffectivePermissionResolverState(autoApprove, requiresUserInput, hasControlClient, hasFileHandler bool) control.PermissionResolverState {
 	switch {
 	case autoApprove && !requiresUserInput:
 		return control.PermissionResolverAutomatic
@@ -2147,6 +2131,72 @@ func effectivePermissionResolverState(autoApprove, requiresUserInput, hasControl
 		return control.PermissionResolverFile
 	default:
 		return control.PermissionResolverNoResolver
+	}
+}
+
+// OutOfTurnPermission is the resolver configuration for a permission request
+// raised by a run nobody prompted. There is no turn to wait on, so the launch's
+// own policy is the only thing that can answer.
+type OutOfTurnPermission struct {
+	Provider      runtime.Provider
+	FileHandler   *permission.FileHandler
+	ControlServer *control.ControlServer
+	Writer        EventSink
+	Stderr        io.Writer
+	SessionID     string
+	RunID         string
+	RunLabel      string
+	ClaimScope    string
+	AutoApprove   bool
+	ClaimTimeout  time.Duration
+}
+
+// ResolvePermissionOutOfTurn resolves one permission request that no attempt is
+// serving. It runs the resolver an attempt runs, so auto-approve, a connected
+// control client and the file handler answer an ask raised between attempts
+// exactly as they answer one raised during a turn, and it records the answer
+// with the same event. A request none of them owns stays pending for its own
+// delivery path, and that is not a failure.
+func ResolvePermissionOutOfTurn(ctx context.Context, cfg OutOfTurnPermission, event events.Event) error {
+	requestID, _ := event.Fields["request_id"].(string)
+	if requestID == "" {
+		return nil
+	}
+	res := resolvePermission(ctx, cfg.Provider, cfg.FileHandler, cfg.ControlServer, event, cfg.SessionID, cfg.ClaimScope, requestID, cfg.AutoApprove, cfg.ClaimTimeout)
+	if res.cancelled {
+		return nil
+	}
+	if res.err != nil {
+		return res.err
+	}
+	if res.requestID != "" {
+		writePermissionResponse(cfg.Writer, cfg.Stderr, cfg.SessionID, cfg.RunID, cfg.RunLabel, res.requestID, res.optionID, res.kind, res.source)
+	}
+	return nil
+}
+
+// writePermissionResponse records one resolved request in the event log, so a
+// resolver outside a turn leaves the same durable record as one inside it.
+func writePermissionResponse(writer EventSink, stderr io.Writer, sessionID, runID, runLabel, requestID, optionID, kind, source string) {
+	fields := map[string]any{
+		"request_id": requestID,
+		"option_id":  optionID,
+		"kind":       kind,
+		"source":     source,
+		"ts":         time.Now().UnixMilli(),
+	}
+	if runID != "" {
+		fields["run_id"] = runID
+	}
+	if runLabel != "" {
+		fields["run_label"] = runLabel
+	}
+	if err := writer.Write(events.Event{
+		Event:     "permission.response",
+		SessionID: sessionID,
+		Fields:    fields,
+	}); err != nil {
+		fmt.Fprintf(stderr, "avenor: write permission.response event: %v\n", err)
 	}
 }
 

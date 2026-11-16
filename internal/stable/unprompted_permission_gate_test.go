@@ -8,11 +8,12 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
-// TestIdlePermissionRequestGate covers the two refusals the idle path must
-// share with the canonical one: a closing child prepares no claim (nothing
-// could answer it), and a request whose ID another claim still holds is not
-// published, so poo's held replay cannot republish a live request invisibly.
-func TestIdlePermissionRequestGate(t *testing.T) {
+// TestUnpromptedPermissionRequestGate covers the two refusals the unprompted
+// path must share with the canonical one: a closing child prepares no claim
+// (nothing could answer it), and a request whose ID another claim still holds
+// is not published, so poo's held replay cannot republish a live request
+// invisibly.
+func TestUnpromptedPermissionRequestGate(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "idle-gate"), MaxRuntimes: 1})
 	request := events.Event{
 		Event:     "permission.request",
@@ -28,13 +29,13 @@ func TestIdlePermissionRequestGate(t *testing.T) {
 		held    bool
 		want    bool
 		// wantDelivery is what a later answer must see: NoResolver when the
-		// idle path claimed the request, NotFound when it prepared nothing.
+		// unprompted path claimed the request, NotFound when it prepared nothing.
 		// A foreign claim keeps its own state, which is never NoResolver.
 		wantDelivery control.PermissionAnswerDelivery
 		// wantHeld asserts only that a foreign claim was not replaced.
 		wantHeld bool
 	}{
-		{name: "idle claims a free request", want: true, wantDelivery: control.PermissionAnswerNoResolver},
+		{name: "unprompted claims a free request", want: true, wantDelivery: control.PermissionAnswerNoResolver},
 		{name: "closing child prepares nothing", closing: true, want: false, wantDelivery: control.PermissionAnswerNotFound},
 		{name: "a held request is not republished", held: true, want: false, wantHeld: true},
 	} {
@@ -52,14 +53,14 @@ func TestIdlePermissionRequestGate(t *testing.T) {
 			if tc.closing {
 				child.lc = lifecycleState{shutdown: shutdownRequested}
 			}
-			_, publish := sup.prepareIdleRequest(child, request)
+			_, _, publish := sup.prepareUnpromptedRequest(child, request)
 			if publish != tc.want {
 				t.Fatalf("publish = %v, want %v", publish, tc.want)
 			}
 			got := claimed(requestID)
 			if tc.wantHeld {
 				if got == control.PermissionAnswerNoResolver {
-					t.Fatalf("delivery state = NoResolver: the idle path replaced a held claim")
+					t.Fatalf("delivery state = NoResolver: the unprompted path replaced a held claim")
 				}
 			} else if got != tc.wantDelivery {
 				t.Fatalf("delivery state = %v, want %v", got, tc.wantDelivery)

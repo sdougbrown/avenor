@@ -4179,7 +4179,7 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 			// Poo closes the channel after unsubscribing on cancellation; its
 			// publisher never blocks on a full subscriber buffer.
 			for ev := range eventCh {
-				s.writeIdleEvent(child, writer, ev)
+				s.writeUnpromptedEvent(child.lifecycleCtx, child, attemptProvider, session.SessionID, writer, ev)
 			}
 			s.startIdleWatcher(child, attemptProvider, session.SessionID, writer)
 		}()
@@ -4243,11 +4243,13 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 // joined the attempt subscription, and the next attempt joins this watcher.
 // A gap can lose ordinary events as before; poo holds permission events for replay.
 // Cancellation alone is insufficient: Events unsubscribes asynchronously.
+// The watcher is named for when it runs, a child parked between attempts; the
+// events it publishes are named for what produced them, a run nobody prompted.
 func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Provider, sessionID string, writer *runtimeFanoutWriter) {
 	if child.lifecycleCtx.Err() != nil {
 		return
 	}
-	// A closing child cannot answer an idle request, so do not subscribe.
+	// A closing child cannot answer an unprompted request, so do not subscribe.
 	if _, admitted := s.beginChildProviderTurn(child, s.ensureChildProviderLifecycle(child)); !admitted {
 		return
 	}
@@ -4255,7 +4257,7 @@ func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Prov
 	eventCh, err := provider.Events(ctx, sessionID)
 	if err != nil {
 		cancel()
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s idle event subscription: %v\n", child.id, err)
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s unprompted event subscription: %v\n", child.id, err)
 		return
 	}
 	done := make(chan struct{})
@@ -4263,67 +4265,107 @@ func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Prov
 	go func() {
 		defer close(done)
 		for ev := range eventCh {
-			s.writeIdleEvent(child, writer, ev)
+			s.writeUnpromptedEvent(ctx, child, provider, sessionID, writer, ev)
 		}
 	}()
 }
 
-// writeIdleEvent publishes one event from an idle run through the canonical
-// writer. A permission request needs a claim before publication, and it gets
-// the same two refusals the canonical path gives: a request that cannot be
-// claimed is not published, and a failed publication ends the claim it made.
-func (s *Supervisor) writeIdleEvent(child *childRuntime, writer *runtimeFanoutWriter, ev events.Event) {
-	requestID, publish := s.prepareIdleRequest(child, ev)
+// writeUnpromptedEvent publishes one event from a run nobody prompted through
+// the canonical writer. A permission request is claimed and resolved the way an
+// attempt's is, so the launch's auto-approve, a connected control client and the
+// file handler answer it with no prompt in flight.
+func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRuntime, provider runtime.Provider, sessionID string, writer *runtimeFanoutWriter, ev events.Event) {
+	if ev.Event != "permission.request" {
+		if err := writer.Write(ev); err != nil {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s unprompted event write: %v\n", child.id, err)
+		}
+		return
+	}
+	requestID, resolverState, publish := s.prepareUnpromptedRequest(child, ev)
 	if !publish {
 		return
 	}
+	// The hint and the claim's state come from the same decision, so a reader
+	// of either learns the resolver this launch gave the request.
+	if ev.Fields == nil {
+		ev.Fields = map[string]any{}
+	}
+	ev.Fields["resolver"] = resolverState.String()
 	if err := writer.Write(ev); err != nil {
 		if requestID != "" && s.control != nil {
 			// A claim whose request never reached the log is unreachable.
 			s.control.EndPermissionClaim(child.id, requestID)
 		}
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s idle event write: %v\n", child.id, err)
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s unprompted event write: %v\n", child.id, err)
+		return
 	}
+	if requestID == "" {
+		return
+	}
+	// The resolver waits on its own clock, so it runs beside the event stream.
+	go func() {
+		err := cli.ResolvePermissionOutOfTurn(ctx, cli.OutOfTurnPermission{
+			Provider:      provider,
+			FileHandler:   child.fileHandler,
+			ControlServer: s.control,
+			Writer:        writer,
+			Stderr:        s.stderrWriter(),
+			SessionID:     sessionID,
+			RunID:         s.runID,
+			RunLabel:      child.label,
+			ClaimScope:    child.id,
+			AutoApprove:   child.autoApprove,
+			ClaimTimeout:  child.permClaimTimeout,
+		}, ev)
+		if err != nil {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission resolve: %v\n", child.id, err)
+		}
+	}()
 }
 
-// prepareIdleRequest decides whether one idle event may be published, and
-// claims a permission request's ID on the way. It mirrors the canonical
-// path's admission: no claim for a closing child, no publication over a claim
-// someone else holds.
-func (s *Supervisor) prepareIdleRequest(child *childRuntime, ev events.Event) (string, bool) {
-	if ev.Event != "permission.request" {
-		return "", true
-	}
+// prepareUnpromptedRequest decides whether one event from an unprompted run may
+// be published, and claims a permission request's ID on the way under the
+// resolver this launch's policy picks. It keeps the canonical path's two
+// refusals: no claim for a closing child, no publication over a claim someone
+// else holds.
+func (s *Supervisor) prepareUnpromptedRequest(child *childRuntime, ev events.Event) (string, control.PermissionResolverState, bool) {
 	requestID, _ := ev.Fields["request_id"].(string)
-	options, _ := ev.Fields["options"].([]any)
+	requiresUserInput, _ := ev.Fields["requires_user_input"].(bool)
+	resolverState := cli.EffectivePermissionResolverState(
+		child.autoApprove,
+		requiresUserInput,
+		s.control != nil && s.control.HasClients(),
+		child.fileHandler != nil,
+	)
 	if requestID == "" || s.control == nil {
-		return requestID, true
+		return requestID, resolverState, true
 	}
-	if !s.idleClaimAdmitted(child) {
+	options, _ := ev.Fields["options"].([]any)
+	if !s.unpromptedClaimAdmitted(child) {
 		// The child is closing, so nothing can answer this request: do not
 		// prepare a claim no path can resolve, and do not publish a request
 		// nothing will answer.
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s is closing; dropping idle permission request %s\n", child.id, requestID)
-		return requestID, false
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s is closing; dropping unprompted permission request %s\n", child.id, requestID)
+		return requestID, resolverState, false
 	}
 	// Prepare must precede publication so the request is answerable. It
 	// releases control locks before Write takes writeMu then controlMu. A
 	// pre-publication direct answer can race this write; its response also
 	// passes through the canonical writer.
-	if !s.control.PreparePermissionClaim(child.id, requestID, control.PermissionResolverNoResolver, options) {
+	if !s.control.PreparePermissionClaim(child.id, requestID, resolverState, options) {
 		// A claim is already pending for this request, so the canonical path
 		// refuses to publish it and this one refuses too: poo's held replay can
 		// otherwise republish a live request invisibly.
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission request %s is already claimed\n", child.id, requestID)
-		return requestID, false
+		return requestID, resolverState, false
 	}
-	return requestID, true
+	return requestID, resolverState, true
 }
 
-// idleClaimAdmitted applies the admission gate the canonical claim path
+// unpromptedClaimAdmitted applies the admission gate the canonical claim path
 // checks: once the supervisor, the child or its event writer is closing, a
 // prepared claim has no owner that could answer it.
-func (s *Supervisor) idleClaimAdmitted(child *childRuntime) bool {
+func (s *Supervisor) unpromptedClaimAdmitted(child *childRuntime) bool {
 	return child.lifecycleCtx.Err() == nil && !child.lc.isShuttingDown() && !child.lc.isWriterClosing()
 }
 
