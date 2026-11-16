@@ -2,13 +2,20 @@ package stable
 
 import (
 	"context"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/cli"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/permission"
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 // TestUnpromptedPermissionRequestGate drives the publication sequence the
@@ -139,5 +146,138 @@ func TestOutOfTurnCancelLeavesTheRequestAnswerable(t *testing.T) {
 	}
 	if got := sup.control.DeliverPendingPermission(child.id, "a1", "allow", ""); got != control.PermissionAnswerNoResolver {
 		t.Fatalf("delivery state = %v, want NoResolver: the claim did not survive the cancel", got)
+	}
+}
+
+// TestPublisherReleasesAClaimItsWriteFailed covers the shared publisher's one
+// failure that would otherwise leak: a request that never reached the log keeps
+// no claim, so a reused request id is not refused forever.
+func TestPublisherReleasesAClaimItsWriteFailed(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "publish-write-fail"), MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_write", lifecycleCtx: context.Background()}
+	request := events.Event{
+		Event:     "permission.request",
+		SessionID: "session",
+		Fields:    map[string]any{"request_id": "a1", "options": []any{map[string]any{"optionId": "allow"}}},
+	}
+	publisher := sup.unpromptedPublisher(child, "session", nil)
+	publisher.Write = func(events.Event) error { return errors.New("log is closed") }
+	if _, _, err := publisher.Publish(request); !errors.Is(err, cli.ErrPermissionNotWritten) {
+		t.Fatalf("publish error = %v, want ErrPermissionNotWritten", err)
+	}
+	if got := sup.control.DeliverPendingPermission(child.id, "a1", "allow", ""); got != control.PermissionAnswerNotFound {
+		t.Fatalf("delivery state = %v, want NotFound: the claim outlived a request nobody published", got)
+	}
+}
+
+// TestOutOfTurnFileCancelLeavesTheRequestAnswerable covers the other way an
+// out-of-turn resolve ends without an answer: a file-protocol reader that
+// declines. The request is recorded as answered by nobody, so it must not
+// report a response and must stay answerable.
+func TestOutOfTurnFileCancelLeavesTheRequestAnswerable(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "out-of-turn-file-cancel"), MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_file_cancel", lifecycleCtx: context.Background()}
+	options := []any{map[string]any{"optionId": "allow"}}
+	request := events.Event{
+		Event:     "permission.request",
+		SessionID: "session",
+		Fields:    map[string]any{"request_id": "a1", "options": options},
+	}
+	if !sup.control.PreparePermissionClaim(child.id, "a1", control.PermissionResolverFile, options) {
+		t.Fatal("claim was refused")
+	}
+	base := filepath.Join(t.TempDir(), "perm")
+	handler := permission.NewFileHandler(base)
+	handler.PollInterval = time.Millisecond
+	requestPath, responsePath := permission.FilePaths(base)
+	sink := &recordingSink{}
+	done := make(chan error, 1)
+	go func() {
+		done <- cli.ResolvePermissionOutOfTurn(context.Background(), cli.OutOfTurnPermission{
+			Provider:      stubProvider{},
+			FileHandler:   handler,
+			ControlServer: sup.control,
+			Writer:        sink,
+			Stderr:        io.Discard,
+			SessionID:     "session",
+			ClaimScope:    child.id,
+		}, request)
+	}()
+	waitFor(t, "permission file request", func() bool {
+		_, err := os.Stat(requestPath)
+		return err == nil
+	})
+	if err := os.WriteFile(responsePath, []byte(`{"outcome":"cancelled"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("resolve out of turn: %v", err)
+	}
+	if written := sink.written(); len(written) != 0 {
+		t.Fatalf("recorded %d events, want none: %v", len(written), written)
+	}
+	if got := sup.control.DeliverPendingPermission(child.id, "a1", "allow", ""); got != control.PermissionAnswerNoResolver {
+		t.Fatalf("delivery state = %v, want NoResolver: a declined request stopped being answerable", got)
+	}
+}
+
+// stubProvider satisfies the provider a file handler requires at entry. A
+// request the reader declines never reaches it: the handler answers nobody.
+type stubProvider struct{ runtime.Provider }
+
+// recordingSink keeps what a resolver wrote, so a test can prove nothing was.
+type recordingSink struct {
+	mu     sync.Mutex
+	events []events.Event
+}
+
+func (r *recordingSink) Write(event events.Event) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, event)
+	return nil
+}
+
+func (r *recordingSink) Close() error { return nil }
+
+func (r *recordingSink) written() []events.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]events.Event(nil), r.events...)
+}
+
+// TestPublisherAsksForAClientPerRequest pins the hint to the client state at
+// publication, not at session start: a client that connects while a turn runs
+// must be the resolver the next request is published for.
+func TestPublisherAsksForAClientPerRequest(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "publish-per-request"), MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_hint", lifecycleCtx: context.Background()}
+	connected := false
+	var hints []string
+	publisher := sup.unpromptedPublisher(child, "session", nil)
+	publisher.HasControlClient = func() bool { return connected }
+	publisher.Claim = func(string, control.PermissionResolverState, []any) bool { return true }
+	publisher.Write = func(event events.Event) error {
+		hint, _ := event.Fields["resolver"].(string)
+		hints = append(hints, hint)
+		return nil
+	}
+	request := func(requestID string) events.Event {
+		return events.Event{
+			Event:     "permission.request",
+			SessionID: "session",
+			Fields:    map[string]any{"request_id": requestID, "options": []any{map[string]any{"optionId": "allow"}}},
+		}
+	}
+	if _, _, err := publisher.Publish(request("a1")); err != nil {
+		t.Fatal(err)
+	}
+	connected = true
+	if _, _, err := publisher.Publish(request("a2")); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"none", "reserved"}
+	if len(hints) != len(want) || hints[0] != want[0] || hints[1] != want[1] {
+		t.Fatalf("resolver hints = %v, want %v", hints, want)
 	}
 }

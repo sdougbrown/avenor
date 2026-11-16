@@ -4315,10 +4315,12 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 // here is this path's admission and its own idea of what a bad write costs.
 func (s *Supervisor) unpromptedPublisher(child *childRuntime, sessionID string, writer *runtimeFanoutWriter) cli.PermissionRequestPublisher {
 	return cli.PermissionRequestPublisher{
-		AutoApprove:      child.autoApprove,
-		HasControlClient: s.control != nil && s.control.HasClients(),
-		HasFileHandler:   child.fileHandler != nil,
-		Claim:            s.claimUnpromptedRequest(child),
+		AutoApprove: child.autoApprove,
+		HasControlClient: func() bool {
+			return s.control != nil && s.control.HasClients()
+		},
+		HasFileHandler: child.fileHandler != nil,
+		Claim:          s.claimUnpromptedRequest(child),
 		Write: func(event events.Event) error {
 			return writer.Write(event)
 		},

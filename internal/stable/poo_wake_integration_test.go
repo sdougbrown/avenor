@@ -251,6 +251,10 @@ func testPooInboxWake(t *testing.T, mode wakeMode) {
 		if count := strings.Count(string(data), `"event":"permission.request"`); count != 1 {
 			t.Fatalf("got %d permission requests, want one: %s", count, data)
 		}
+		// Answering an ask from a run nobody prompted must leave the parked
+		// turn as it was: the ask belongs to the unattended run, not to the
+		// turn the supervisor is still reporting.
+		assertParkedPreserved(t, sup, spawned.RuntimeID, sentinel, before, statusBefore, resultBefore)
 		return
 	}
 	waitFor(t, "wake settlement", func() bool {
@@ -258,25 +262,7 @@ func testPooInboxWake(t *testing.T, mode wakeMode) {
 		eventData, _ := os.ReadFile(eventPath)
 		return calls.Load() >= 2 && strings.Count(string(data), `"record":"run.settled"`) >= 2 && strings.Count(string(eventData), `"event":"session.end"`) >= 2
 	})
-	after, err := os.ReadFile(sentinel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statusAfter, _ := sup.RuntimeStatus(spawned.RuntimeID)
-	resultAfter, _ := sup.RuntimeResult(spawned.RuntimeID)
-	if resultBefore.(map[string]any)["final_output"] != "answer-1" || resultAfter.(map[string]any)["final_output"] != "answer-1" {
-		t.Fatalf("parked result changed: %v -> %v", resultBefore, resultAfter)
-	}
-	if statusBefore.(map[string]any)["final_output"] != statusAfter.(map[string]any)["final_output"] {
-		t.Fatalf("parked status changed: %v -> %v", statusBefore, statusAfter)
-	}
-	if string(before) != string(after) {
-		t.Fatalf("sentinel changed: %s -> %s", before, after)
-	}
-	status := statusAfter.(map[string]any)
-	if status["status"] != "idle" || status["exit_code"] != 0 {
-		t.Fatalf("status after wake: %v", status)
-	}
+	assertParkedPreserved(t, sup, spawned.RuntimeID, sentinel, before, statusBefore, resultBefore)
 	resumed, err := sup.Resume(messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}, messaging.ResumeRequest{RunID: resumeUUID1, Target: spawned.RuntimeID, Message: "continue", SentinelFile: filepath.Join(root, "resume.env"), EventLog: filepath.Join(root, "resume.log")})
 	if err != nil {
 		t.Fatal(err)
@@ -295,5 +281,29 @@ func testPooInboxWake(t *testing.T, mode wakeMode) {
 	resumeSentinel, err := os.ReadFile(filepath.Join(root, "resume.env"))
 	if err != nil || !strings.Contains(string(resumeSentinel), "STOP_REASON=end_turn") {
 		t.Fatalf("resume sentinel: %s %v", resumeSentinel, err)
+	}
+}
+
+// assertParkedPreserved proves a wake left the parked turn untouched: the same
+// sentinel, the same reported status and final output, and a child still idle.
+func assertParkedPreserved(t *testing.T, sup *Supervisor, runtimeID, sentinel string, before []byte, statusBefore, resultBefore any) {
+	t.Helper()
+	after, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusAfter, _ := sup.RuntimeStatus(runtimeID)
+	resultAfter, _ := sup.RuntimeResult(runtimeID)
+	if resultBefore.(map[string]any)["final_output"] != "answer-1" || resultAfter.(map[string]any)["final_output"] != "answer-1" {
+		t.Fatalf("parked result changed: %v -> %v", resultBefore, resultAfter)
+	}
+	if statusBefore.(map[string]any)["final_output"] != statusAfter.(map[string]any)["final_output"] {
+		t.Fatalf("parked status changed: %v -> %v", statusBefore, statusAfter)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("sentinel changed: %s -> %s", before, after)
+	}
+	if status := statusAfter.(map[string]any); status["status"] != "idle" || status["exit_code"] != 0 {
+		t.Fatalf("status after wake: %v", status)
 	}
 }

@@ -1384,9 +1384,11 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 	}
 	permissionProvider := permissionTurnProvider{Provider: provider, turn: providerTurn}
 	permissionPublisher := PermissionRequestPublisher{
-		AutoApprove:      cfg.AutoApprove,
-		HasControlClient: deps.ControlServer != nil && deps.ControlServer.HasClients(),
-		HasFileHandler:   deps.FileHandler != nil,
+		AutoApprove: cfg.AutoApprove,
+		HasControlClient: func() bool {
+			return deps.ControlServer != nil && deps.ControlServer.HasClients()
+		},
+		HasFileHandler: deps.FileHandler != nil,
 		Claim: func(requestID string, state control.PermissionResolverState, options []any) bool {
 			if deps.ControlServer == nil {
 				return true
@@ -2164,24 +2166,20 @@ func ResolvePermissionOutOfTurn(ctx context.Context, cfg OutOfTurnPermission, ev
 		return nil
 	}
 	res := resolvePermission(ctx, outOfTurnProvider(cfg), cfg.FileHandler, cfg.ControlServer, event, cfg.SessionID, cfg.ClaimScope, requestID, cfg.AutoApprove, cfg.ClaimTimeout)
-	if res.cancelled {
-		return nil
-	}
-	if res.err != nil {
-		// A cancelled out-of-turn resolve is not an abandoned request: the
-		// attempt that cancelled it has not taken the ask over yet, and poo
-		// still holds it. Leaving the claim prepared keeps a direct answer in
-		// that window answerable, which is what it was before a resolver
-		// owned the request. The resolver's handoff already released its own
-		// claim, so this prepares a fresh one.
-		if errors.Is(res.err, context.Canceled) || errors.Is(res.err, context.DeadlineExceeded) {
-			if cfg.ControlServer != nil {
-				options, _ := event.Fields["options"].([]any)
-				cfg.ControlServer.PreparePermissionClaim(cfg.ClaimScope, requestID, control.PermissionResolverNoResolver, options)
-			}
-			return nil
+	// No answer belongs to an out-of-turn resolve that ended without one: a
+	// cancelled resolve, and a request a file-protocol reader declined to
+	// answer. The attempt that cancelled the first has not taken the ask over
+	// yet, and poo still holds it either way, so the claim goes back to being
+	// answerable rather than dying with the resolver.
+	if res.cancelled || res.err != nil {
+		if res.err != nil && !errors.Is(res.err, context.Canceled) && !errors.Is(res.err, context.DeadlineExceeded) {
+			return res.err
 		}
-		return res.err
+		if cfg.ControlServer != nil {
+			options, _ := event.Fields["options"].([]any)
+			cfg.ControlServer.PreparePermissionClaim(cfg.ClaimScope, requestID, control.PermissionResolverNoResolver, options)
+		}
+		return nil
 	}
 	if res.requestID != "" {
 		writePermissionResponse(cfg.Writer, cfg.Stderr, cfg.SessionID, cfg.RunID, cfg.RunLabel, res.requestID, res.optionID, res.kind, res.source)
@@ -2246,8 +2244,11 @@ var (
 // request no resolver can answer. What a refusal means for the run stays with the
 // caller.
 type PermissionRequestPublisher struct {
-	AutoApprove      bool
-	HasControlClient bool
+	AutoApprove bool
+	// HasControlClient reports whether a control client can answer right now.
+	// It is asked per request: a client connects and disconnects while a turn
+	// runs, and the hint it decides must be the one the resolver will use.
+	HasControlClient func() bool
 	HasFileHandler   bool
 	// Claim prepares the claim for the request's resolver state, and reports
 	// false when the request cannot be claimed.
@@ -2270,7 +2271,8 @@ func (p PermissionRequestPublisher) Publish(event events.Event) (string, control
 	}
 	requestID, _ := event.Fields["request_id"].(string)
 	requiresUserInput, _ := event.Fields["requires_user_input"].(bool)
-	resolverState := EffectivePermissionResolverState(p.AutoApprove, requiresUserInput, p.HasControlClient, p.HasFileHandler)
+	hasControlClient := p.HasControlClient != nil && p.HasControlClient()
+	resolverState := EffectivePermissionResolverState(p.AutoApprove, requiresUserInput, hasControlClient, p.HasFileHandler)
 	event.Fields["resolver"] = resolverState.String()
 	options, _ := event.Fields["options"].([]any)
 	if requestID != "" && p.Claim != nil && !p.Claim(requestID, resolverState, options) {
