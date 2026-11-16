@@ -1446,7 +1446,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		// turn did not complete its work: report the denial instead of letting
 		// it count as success. Ordinary failed tool calls without an abort
 		// remain recoverable and keep their own classification.
-		emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "stop_reason", "turn reported end_turn after an aborted or rejected tool call; classified as "+runtime.ToolDeniedStopReason, deps.Stderr, cfg.RunLabel)
+		EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "stop_reason", "turn reported end_turn after an aborted or rejected tool call; classified as "+runtime.ToolDeniedStopReason, deps.Stderr, cfg.RunLabel)
 		finalStopReason = runtime.ToolDeniedStopReason
 	}
 	complete := func() sessionResult {
@@ -1593,7 +1593,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			}
 			// The permission error always leaves a diagnostic in the event log,
 			// even when the authoritative session-end result owns the outcome.
-			emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
+			EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", fmt.Sprintf("permission handler: %v", res.err), deps.Stderr, cfg.RunLabel)
 			if result, ok := completeAuthoritativeAfterStop(); ok {
 				return result, true
 			}
@@ -1641,7 +1641,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 						adopted = cfg.AcceptSessionID(externalID)
 					}
 					if !adopted {
-						emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "session", fmt.Sprintf("authoritative session ID %q conflicts with an existing session", externalID), deps.Stderr, cfg.RunLabel)
+						EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "session", fmt.Sprintf("authoritative session ID %q conflicts with an existing session", externalID), deps.Stderr, cfg.RunLabel)
 						return sessionResult{ExitCode: 1, StopReason: runtime.SessionIDConflictStopReason}
 					}
 					cfg.SessionID = externalID
@@ -1741,7 +1741,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 							return result
 						}
 					default:
-						emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
+						EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
 						return sessionResult{ExitCode: 1}
 					}
 				}
@@ -1758,7 +1758,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					return terminate("cancelled")
 				}
 				if claimConflict {
-					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
+					EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
 					return sessionResult{ExitCode: 1}
 				}
 				if err := deps.Writer.Write(event); err != nil {
@@ -1771,7 +1771,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				if requestID == "" {
 					// Malformed request from backend: no request_id means we cannot
 					// call AnswerPermission. Emit an error and stay in waiting state.
-					emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "permission.request missing request_id", deps.Stderr, cfg.RunLabel)
+					EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "permission.request missing request_id", deps.Stderr, cfg.RunLabel)
 					continue
 				}
 				done := make(chan permissionResult, 1)
@@ -1811,7 +1811,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				promptFailureText = err.Error()
 				// The prompt error always leaves a diagnostic in the event log,
 				// even when the authoritative session-end result owns the outcome.
-				emitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
+				EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "prompt", fmt.Sprintf("prompt: %v", err), deps.Stderr, cfg.RunLabel)
 				if result, ok := completeAuthoritativeAfterStop(); ok {
 					return result
 				}
@@ -1868,7 +1868,7 @@ func cancelProvider(turn *ProviderTurn, writer EventSink, sessionID, runID, runL
 		err = context.DeadlineExceeded
 	}
 	if err != nil {
-		emitErrorEvent(writer, sessionID, runID, "cancel", fmt.Sprintf("cancel session: %v", err), stderr, runLabel)
+		EmitErrorEvent(writer, sessionID, runID, "cancel", fmt.Sprintf("cancel session: %v", err), stderr, runLabel)
 	}
 }
 
@@ -2149,6 +2149,10 @@ type OutOfTurnPermission struct {
 	ClaimScope    string
 	AutoApprove   bool
 	ClaimTimeout  time.Duration
+	// Turn is the provider turn the answer is a call on. An answer outside a
+	// turn still has to be one: a close that finds no live call ends the
+	// provider in the middle of it. A nil turn answers untracked.
+	Turn *ProviderTurn
 }
 
 // ResolvePermissionOutOfTurn resolves one permission request that no attempt is
@@ -2162,7 +2166,7 @@ func ResolvePermissionOutOfTurn(ctx context.Context, cfg OutOfTurnPermission, ev
 	if requestID == "" {
 		return nil
 	}
-	res := resolvePermission(ctx, cfg.Provider, cfg.FileHandler, cfg.ControlServer, event, cfg.SessionID, cfg.ClaimScope, requestID, cfg.AutoApprove, cfg.ClaimTimeout)
+	res := resolvePermission(ctx, outOfTurnProvider(cfg), cfg.FileHandler, cfg.ControlServer, event, cfg.SessionID, cfg.ClaimScope, requestID, cfg.AutoApprove, cfg.ClaimTimeout)
 	if res.cancelled {
 		return nil
 	}
@@ -2173,6 +2177,16 @@ func ResolvePermissionOutOfTurn(ctx context.Context, cfg OutOfTurnPermission, ev
 		writePermissionResponse(cfg.Writer, cfg.Stderr, cfg.SessionID, cfg.RunID, cfg.RunLabel, res.requestID, res.optionID, res.kind, res.source)
 	}
 	return nil
+}
+
+// outOfTurnProvider returns the provider an out-of-turn resolve calls. A turn
+// routes the answer through the lifecycle's call tracking, the same way an
+// attempt's answer is routed, so a close waits for it.
+func outOfTurnProvider(cfg OutOfTurnPermission) runtime.Provider {
+	if cfg.Turn == nil {
+		return cfg.Provider
+	}
+	return permissionTurnProvider{Provider: cfg.Provider, turn: cfg.Turn}
 }
 
 // writePermissionResponse records one resolved request in the event log, so a

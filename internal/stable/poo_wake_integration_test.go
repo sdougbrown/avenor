@@ -97,6 +97,16 @@ func (m wakeMode) resolver() string {
 	}[m]
 }
 
+// responseSource is the answer's source in the permission.response event: the
+// resolver that actually answered.
+func (m wakeMode) responseSource() string {
+	return map[wakeMode]string{
+		wakeControlAnswer: "control",
+		wakeFileAnswer:    "file",
+		wakeAutoApprove:   "avenor",
+	}[m]
+}
+
 func testPooInboxWake(t *testing.T, mode wakeMode) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
@@ -221,6 +231,18 @@ func testPooInboxWake(t *testing.T, mode wakeMode) {
 		waitFor(t, "wake tool result and settlement", func() bool {
 			data, _ := os.ReadFile(sessionLog)
 			return calls.Load() >= 3 && strings.Contains(string(data), "wake\\n") && strings.Count(string(data), `"record":"run.settled"`) >= 2
+		})
+		// The resolver's own record has to reach the log: the backend settles
+		// whether or not Avenor recorded the answer it gave.
+		waitFor(t, "permission response", func() bool {
+			data, _ := os.ReadFile(eventPath)
+			for _, line := range strings.Split(string(data), "\n") {
+				var event map[string]any
+				if json.Unmarshal([]byte(line), &event) == nil && event["event"] == "permission.response" {
+					return event["source"] == mode.responseSource()
+				}
+			}
+			return false
 		})
 		data, err := os.ReadFile(eventPath)
 		if err != nil {

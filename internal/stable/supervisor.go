@@ -4178,10 +4178,15 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 			writer := s.fanoutWriterLocked(child)
 			// Poo closes the channel after unsubscribing on cancellation; its
 			// publisher never blocks on a full subscriber buffer.
+			// One admission covers this drain and the watcher that follows it: the
+			// answers either path resolves are calls on the same idle turn.
+			turn, admitted := s.beginChildProviderTurn(child, s.ensureChildProviderLifecycle(child))
 			for ev := range eventCh {
-				s.writeUnpromptedEvent(child.lifecycleCtx, child, attemptProvider, session.SessionID, writer, ev)
+				s.writeUnpromptedEvent(child.lifecycleCtx, child, attemptProvider, turn, session.SessionID, writer, ev)
 			}
-			s.startIdleWatcher(child, attemptProvider, session.SessionID, writer)
+			if admitted {
+				s.startIdleWatcher(child, attemptProvider, turn, session.SessionID, writer)
+			}
 		}()
 	}
 
@@ -4245,12 +4250,8 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 // Cancellation alone is insufficient: Events unsubscribes asynchronously.
 // The watcher is named for when it runs, a child parked between attempts; the
 // events it publishes are named for what produced them, a run nobody prompted.
-func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Provider, sessionID string, writer *runtimeFanoutWriter) {
+func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Provider, turn *cli.ProviderTurn, sessionID string, writer *runtimeFanoutWriter) {
 	if child.lifecycleCtx.Err() != nil {
-		return
-	}
-	// A closing child cannot answer an unprompted request, so do not subscribe.
-	if _, admitted := s.beginChildProviderTurn(child, s.ensureChildProviderLifecycle(child)); !admitted {
 		return
 	}
 	ctx, cancel := context.WithCancel(child.lifecycleCtx)
@@ -4265,7 +4266,7 @@ func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Prov
 	go func() {
 		defer close(done)
 		for ev := range eventCh {
-			s.writeUnpromptedEvent(ctx, child, provider, sessionID, writer, ev)
+			s.writeUnpromptedEvent(ctx, child, provider, turn, sessionID, writer, ev)
 		}
 	}()
 }
@@ -4274,7 +4275,7 @@ func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Prov
 // the canonical writer. A permission request is claimed and resolved the way an
 // attempt's is, so the launch's auto-approve, a connected control client and the
 // file handler answer it with no prompt in flight.
-func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRuntime, provider runtime.Provider, sessionID string, writer *runtimeFanoutWriter, ev events.Event) {
+func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRuntime, provider runtime.Provider, turn *cli.ProviderTurn, sessionID string, writer *runtimeFanoutWriter, ev events.Event) {
 	if ev.Event != "permission.request" {
 		if err := writer.Write(ev); err != nil {
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s unprompted event write: %v\n", child.id, err)
@@ -4300,12 +4301,14 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 		return
 	}
 	if requestID == "" {
+		cli.EmitErrorEvent(writer, sessionID, s.runID, "permission", "permission.request missing request_id", s.stderrWriter(), child.label)
 		return
 	}
 	// The resolver waits on its own clock, so it runs beside the event stream.
 	go func() {
 		err := cli.ResolvePermissionOutOfTurn(ctx, cli.OutOfTurnPermission{
 			Provider:      provider,
+			Turn:          turn,
 			FileHandler:   child.fileHandler,
 			ControlServer: s.control,
 			Writer:        writer,

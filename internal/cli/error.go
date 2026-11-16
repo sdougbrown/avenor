@@ -8,9 +8,9 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
-// emitErrorEvent logs message to stderr and writes an avenor.error event to
+// EmitErrorEvent logs message to stderr and writes an avenor.error event to
 // the event log. If the event write fails, that failure is also logged.
-func emitErrorEvent(writer EventSink, sessionID, runID, source, message string, stderr io.Writer, runLabel ...string) {
+func EmitErrorEvent(writer EventSink, sessionID, runID, source, message string, stderr io.Writer, runLabel ...string) {
 	fmt.Fprintf(stderr, "avenor: %s\n", message)
 	if writer == nil {
 		return
