@@ -4282,30 +4282,10 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 		}
 		return
 	}
-	requestID, resolverState, publish := s.prepareUnpromptedRequest(child, ev)
-	if !publish {
-		return
-	}
-	// The hint and the claim's state come from the same decision, so a reader
-	// of either learns the resolver this launch gave the request. The event
-	// belongs to the client that delivered it: poo holds the same event and
-	// publishes its Fields map to every subscriber, so the hint goes on a copy,
-	// as the canonical path writes it.
-	ev = events.Clone(ev)
-	if ev.Fields == nil {
-		ev.Fields = map[string]any{}
-	}
-	ev.Fields["resolver"] = resolverState.String()
-	if err := writer.Write(ev); err != nil {
-		if requestID != "" && s.control != nil {
-			// A claim whose request never reached the log is unreachable.
-			s.control.EndPermissionClaim(child.id, requestID)
+	if _, _, publishErr := s.unpromptedPublisher(child, sessionID, writer).Publish(ev); publishErr != nil {
+		if !errors.Is(publishErr, cli.ErrPermissionNoRequestID) {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s %v\n", child.id, publishErr)
 		}
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s unprompted event write: %v\n", child.id, err)
-		return
-	}
-	if requestID == "" {
-		cli.EmitErrorEvent(writer, sessionID, s.runID, "permission", "permission.request missing request_id", s.stderrWriter(), child.label)
 		return
 	}
 	// The resolver waits on its own clock, so it runs beside the event stream.
@@ -4330,50 +4310,67 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 	}()
 }
 
-// prepareUnpromptedRequest decides whether one event from an unprompted run may
-// be published, and claims a permission request's ID on the way under the
-// resolver this launch's policy picks. It keeps the canonical path's two
-// refusals: no claim for a closing child, no publication over a claim someone
-// else holds.
-func (s *Supervisor) prepareUnpromptedRequest(child *childRuntime, ev events.Event) (string, control.PermissionResolverState, bool) {
-	requestID, _ := ev.Fields["request_id"].(string)
-	requiresUserInput, _ := ev.Fields["requires_user_input"].(bool)
-	resolverState := cli.EffectivePermissionResolverState(
-		child.autoApprove,
-		requiresUserInput,
-		s.control != nil && s.control.HasClients(),
-		child.fileHandler != nil,
-	)
-	if requestID == "" || s.control == nil {
-		return requestID, resolverState, true
+// unpromptedPublisher builds the publisher for a child's unprompted events. The
+// sequence a permission request passes is the turn loop's, from cli; what stays
+// here is this path's admission and its own idea of what a bad write costs.
+func (s *Supervisor) unpromptedPublisher(child *childRuntime, sessionID string, writer *runtimeFanoutWriter) cli.PermissionRequestPublisher {
+	return cli.PermissionRequestPublisher{
+		AutoApprove:      child.autoApprove,
+		HasControlClient: s.control != nil && s.control.HasClients(),
+		HasFileHandler:   child.fileHandler != nil,
+		Claim:            s.claimUnpromptedRequest(child),
+		Write: func(event events.Event) error {
+			return writer.Write(event)
+		},
+		EndClaim: func(requestID string) {
+			if s.control != nil {
+				// A claim whose request never reached the log is unreachable.
+				s.control.EndPermissionClaim(child.id, requestID)
+			}
+		},
+		Diagnose: func(message string) {
+			cli.EmitErrorEvent(writer, sessionID, s.runID, "permission", message, s.stderrWriter(), child.label)
+		},
 	}
-	options, _ := ev.Fields["options"].([]any)
-	if !s.unpromptedClaimAdmitted(child) {
-		// The child is closing, so nothing can answer this request: do not
-		// prepare a claim no path can resolve, and do not publish a request
-		// nothing will answer.
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s is closing; dropping unprompted permission request %s\n", child.id, requestID)
-		return requestID, resolverState, false
-	}
-	// Prepare must precede publication so the request is answerable. It
-	// releases control locks before Write takes writeMu then controlMu. A
-	// pre-publication direct answer can race this write; its response also
-	// passes through the canonical writer.
-	if !s.control.PreparePermissionClaim(child.id, requestID, resolverState, options) {
-		// A claim is already pending for this request, so the canonical path
-		// refuses to publish it and this one refuses too: poo's held replay can
-		// otherwise republish a live request invisibly.
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission request %s is already claimed\n", child.id, requestID)
-		return requestID, resolverState, false
-	}
-	return requestID, resolverState, true
 }
 
-// unpromptedClaimAdmitted applies the admission gate the canonical claim path
-// checks: once the supervisor, the child or its event writer is closing, a
-// prepared claim has no owner that could answer it.
+// claimUnpromptedRequest is the unprompted path's admission: no claim for a
+// child that is closing, and no publication over a claim someone else holds.
+func (s *Supervisor) claimUnpromptedRequest(child *childRuntime) func(string, control.PermissionResolverState, []any) bool {
+	return func(requestID string, resolverState control.PermissionResolverState, options []any) bool {
+		if s.control == nil {
+			return true
+		}
+		if !s.unpromptedClaimAdmitted(child) {
+			// The child is closing, so nothing can answer this request: do not
+			// prepare a claim no path can resolve, and do not publish a request
+			// nothing will answer.
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s is closing; dropping unprompted permission request %s\n", child.id, requestID)
+			return false
+		}
+		// Prepare must precede publication so the request is answerable. It
+		// releases control locks before Write takes writeMu then controlMu. A
+		// pre-publication direct answer can race this write; its response also
+		// passes through the canonical writer.
+		if !s.control.PreparePermissionClaim(child.id, requestID, resolverState, options) {
+			// A claim is already pending for this request, so the canonical path
+			// refuses to publish it and this one refuses too: poo's held replay can
+			// otherwise republish a live request invisibly.
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission request %s is already claimed\n", child.id, requestID)
+			return false
+		}
+		return true
+	}
+}
+
+// unpromptedClaimAdmitted applies the admission gate the canonical claim paths
+// check: an answer prepared while the supervisor, the child or its event writer
+// is closing has no owner that could deliver it.
 func (s *Supervisor) unpromptedClaimAdmitted(child *childRuntime) bool {
-	return child.lifecycleCtx.Err() == nil && !child.lc.isShuttingDown() && !child.lc.isWriterClosing()
+	s.controlMu.Lock()
+	supervisorClosing := s.shuttingDown
+	s.controlMu.Unlock()
+	return !supervisorClosing && child.lifecycleCtx.Err() == nil && !child.lc.isShuttingDown() && !child.lc.isWriterClosing()
 }
 
 func (s *Supervisor) stopIdleWatcher(child *childRuntime) {

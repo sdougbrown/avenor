@@ -1383,6 +1383,29 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 		providerTurn = NewProviderLifecycle(provider).NewTurn()
 	}
 	permissionProvider := permissionTurnProvider{Provider: provider, turn: providerTurn}
+	permissionPublisher := PermissionRequestPublisher{
+		AutoApprove:      cfg.AutoApprove,
+		HasControlClient: deps.ControlServer != nil && deps.ControlServer.HasClients(),
+		HasFileHandler:   deps.FileHandler != nil,
+		Claim: func(requestID string, state control.PermissionResolverState, options []any) bool {
+			if deps.ControlServer == nil {
+				return true
+			}
+			if deps.PreparePermissionClaim != nil {
+				return deps.PreparePermissionClaim(permissionCtx, cfg.PermissionClaimScope, requestID, state, options)
+			}
+			return deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state, options)
+		},
+		Write: func(event events.Event) error { return deps.Writer.Write(event) },
+		EndClaim: func(requestID string) {
+			if deps.ControlServer != nil {
+				deps.ControlServer.EndPermissionClaim(cfg.PermissionClaimScope, requestID)
+			}
+		},
+		Diagnose: func(message string) {
+			EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", message, deps.Stderr, cfg.RunLabel)
+		},
+	}
 
 	// Context cancellation stops cooperative resolvers; the bound prevents a
 	// third-party provider that ignores context from deadlocking teardown.
@@ -1716,20 +1739,6 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 				}
 			}
 			if event.Event == "permission.request" {
-				// Auto-answer / control-owner / file fallback resolver.
-				event = events.Clone(event)
-				if event.Fields == nil {
-					event.Fields = map[string]any{}
-				}
-				requestID, _ := event.Fields["request_id"].(string)
-				requiresUserInput, _ := event.Fields["requires_user_input"].(bool)
-				resolverState := EffectivePermissionResolverState(
-					cfg.AutoApprove,
-					requiresUserInput,
-					deps.ControlServer != nil && deps.ControlServer.HasClients(),
-					deps.FileHandler != nil,
-				)
-				event.Fields["resolver"] = resolverState.String()
 				if permissionDone != nil {
 					// A non-nil channel may hold a completed result that has not won
 					// the outer select. Consume only ready results; never wait for an
@@ -1745,33 +1754,21 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 						return sessionResult{ExitCode: 1}
 					}
 				}
-				claimConflict := false
-				if requestID != "" && deps.ControlServer != nil {
-					options, _ := event.Fields["options"].([]any)
-					if deps.PreparePermissionClaim != nil {
-						claimConflict = !deps.PreparePermissionClaim(permissionCtx, cfg.PermissionClaimScope, requestID, resolverState, options)
-					} else {
-						claimConflict = !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, resolverState, options)
+				// Auto-answer / control-owner / file fallback resolver.
+				requestID, _, publishErr := permissionPublisher.Publish(event)
+				switch {
+				case errors.Is(publishErr, ErrPermissionClaimConflict):
+					if permissionCtx.Err() != nil {
+						return terminate("cancelled")
 					}
-				}
-				if claimConflict && permissionCtx.Err() != nil {
-					return terminate("cancelled")
-				}
-				if claimConflict {
 					EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "another permission request is already pending", deps.Stderr, cfg.RunLabel)
 					return sessionResult{ExitCode: 1}
-				}
-				if err := deps.Writer.Write(event); err != nil {
-					if requestID != "" && deps.ControlServer != nil {
-						deps.ControlServer.EndPermissionClaim(cfg.PermissionClaimScope, requestID)
-					}
-					fmt.Fprintf(deps.Stderr, "avenor: write event: %v\n", err)
+				case errors.Is(publishErr, ErrPermissionNotWritten):
+					fmt.Fprintf(deps.Stderr, "avenor: %v\n", publishErr)
 					return sessionResult{ExitCode: 1}
-				}
-				if requestID == "" {
+				case errors.Is(publishErr, ErrPermissionNoRequestID):
 					// Malformed request from backend: no request_id means we cannot
-					// call AnswerPermission. Emit an error and stay in waiting state.
-					EmitErrorEvent(deps.Writer, cfg.SessionID, cfg.RunID, "permission", "permission.request missing request_id", deps.Stderr, cfg.RunLabel)
+					// call AnswerPermission. Stay in the waiting state.
 					continue
 				}
 				done := make(chan permissionResult, 1)
@@ -2171,6 +2168,19 @@ func ResolvePermissionOutOfTurn(ctx context.Context, cfg OutOfTurnPermission, ev
 		return nil
 	}
 	if res.err != nil {
+		// A cancelled out-of-turn resolve is not an abandoned request: the
+		// attempt that cancelled it has not taken the ask over yet, and poo
+		// still holds it. Leaving the claim prepared keeps a direct answer in
+		// that window answerable, which is what it was before a resolver
+		// owned the request. The resolver's handoff already released its own
+		// claim, so this prepares a fresh one.
+		if errors.Is(res.err, context.Canceled) || errors.Is(res.err, context.DeadlineExceeded) {
+			if cfg.ControlServer != nil {
+				options, _ := event.Fields["options"].([]any)
+				cfg.ControlServer.PreparePermissionClaim(cfg.ClaimScope, requestID, control.PermissionResolverNoResolver, options)
+			}
+			return nil
+		}
 		return res.err
 	}
 	if res.requestID != "" {
@@ -2212,6 +2222,73 @@ func writePermissionResponse(writer EventSink, stderr io.Writer, sessionID, runI
 	}); err != nil {
 		fmt.Fprintf(stderr, "avenor: write permission.response event: %v\n", err)
 	}
+}
+
+// The reasons a permission request could not be published. What each one means
+// for the run belongs to the caller: the turn loop ends the turn, the
+// unprompted watcher leaves the child parked.
+var (
+	// ErrPermissionClaimConflict reports a request whose claim another resolver
+	// already holds.
+	ErrPermissionClaimConflict = errors.New("permission request is already claimed")
+	// ErrPermissionNotWritten reports a request whose event never reached the
+	// log. The claim it made, if any, is released before this is returned.
+	ErrPermissionNotWritten = errors.New("permission request was not written")
+	// ErrPermissionNoRequestID reports a malformed request: it is published, and
+	// no resolver can answer it.
+	ErrPermissionNoRequestID = errors.New("permission.request missing request_id")
+)
+
+// PermissionRequestPublisher publishes one permission.request with the resolver
+// hint its launch gives it. The turn loop and the unprompted watcher both publish
+// through this, so the sequence a request must pass has one owner: clone, set the
+// hint, claim, write, release a claim whose request was not written, and report a
+// request no resolver can answer. What a refusal means for the run stays with the
+// caller.
+type PermissionRequestPublisher struct {
+	AutoApprove      bool
+	HasControlClient bool
+	HasFileHandler   bool
+	// Claim prepares the claim for the request's resolver state, and reports
+	// false when the request cannot be claimed.
+	Claim func(requestID string, state control.PermissionResolverState, options []any) bool
+	// Write publishes the event, which arrives cloned and carrying its hint.
+	Write func(event events.Event) error
+	// EndClaim releases a claim whose request never reached the log.
+	EndClaim func(requestID string)
+	// Diagnose reports a request no resolver can answer.
+	Diagnose func(message string)
+}
+
+// Publish returns the request id and the resolver state its claim was prepared
+// under. A nil error means the request was published and, when it carries a
+// request id, claimed.
+func (p PermissionRequestPublisher) Publish(event events.Event) (string, control.PermissionResolverState, error) {
+	event = events.Clone(event)
+	if event.Fields == nil {
+		event.Fields = map[string]any{}
+	}
+	requestID, _ := event.Fields["request_id"].(string)
+	requiresUserInput, _ := event.Fields["requires_user_input"].(bool)
+	resolverState := EffectivePermissionResolverState(p.AutoApprove, requiresUserInput, p.HasControlClient, p.HasFileHandler)
+	event.Fields["resolver"] = resolverState.String()
+	options, _ := event.Fields["options"].([]any)
+	if requestID != "" && p.Claim != nil && !p.Claim(requestID, resolverState, options) {
+		return requestID, resolverState, ErrPermissionClaimConflict
+	}
+	if err := p.Write(event); err != nil {
+		if requestID != "" && p.EndClaim != nil {
+			p.EndClaim(requestID)
+		}
+		return requestID, resolverState, fmt.Errorf("%w: %v", ErrPermissionNotWritten, err)
+	}
+	if requestID == "" {
+		if p.Diagnose != nil {
+			p.Diagnose("permission.request missing request_id")
+		}
+		return "", resolverState, ErrPermissionNoRequestID
+	}
+	return requestID, resolverState, nil
 }
 
 func resolvePermission(
