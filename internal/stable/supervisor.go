@@ -4287,7 +4287,11 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 		return
 	}
 	// The hint and the claim's state come from the same decision, so a reader
-	// of either learns the resolver this launch gave the request.
+	// of either learns the resolver this launch gave the request. The event
+	// belongs to the client that delivered it: poo holds the same event and
+	// publishes its Fields map to every subscriber, so the hint goes on a copy,
+	// as the canonical path writes it.
+	ev = events.Clone(ev)
 	if ev.Fields == nil {
 		ev.Fields = map[string]any{}
 	}
