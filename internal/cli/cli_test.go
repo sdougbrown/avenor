@@ -656,10 +656,10 @@ func TestEffectivePermissionResolverState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := effectivePermissionResolverState(tt.autoApprove, tt.requiresUserInput, tt.hasControlClient, tt.hasFileHandler); got != tt.want {
-				t.Fatalf("effectivePermissionResolverState() = %v, want %v", got, tt.want)
+			if got := EffectivePermissionResolverState(tt.autoApprove, tt.requiresUserInput, tt.hasControlClient, tt.hasFileHandler); got != tt.want {
+				t.Fatalf("EffectivePermissionResolverState() = %v, want %v", got, tt.want)
 			}
-			if got := effectivePermissionResolverState(tt.autoApprove, tt.requiresUserInput, tt.hasControlClient, tt.hasFileHandler).String(); got != tt.want.String() {
+			if got := EffectivePermissionResolverState(tt.autoApprove, tt.requiresUserInput, tt.hasControlClient, tt.hasFileHandler).String(); got != tt.want.String() {
 				t.Fatalf("serialized resolver = %q, want %q", got, tt.want.String())
 			}
 		})

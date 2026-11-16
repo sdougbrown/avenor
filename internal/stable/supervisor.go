@@ -4178,10 +4178,15 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 			writer := s.fanoutWriterLocked(child)
 			// Poo closes the channel after unsubscribing on cancellation; its
 			// publisher never blocks on a full subscriber buffer.
+			// One admission covers this drain and the watcher that follows it: the
+			// answers either path resolves are calls on the same idle turn.
+			turn, admitted := s.beginChildProviderTurn(child, s.ensureChildProviderLifecycle(child))
 			for ev := range eventCh {
-				s.writeIdleEvent(child, writer, ev)
+				s.writeUnpromptedEvent(child.lifecycleCtx, child, attemptProvider, turn, session.SessionID, writer, ev)
 			}
-			s.startIdleWatcher(child, attemptProvider, session.SessionID, writer)
+			if admitted {
+				s.startIdleWatcher(child, attemptProvider, turn, session.SessionID, writer)
+			}
 		}()
 	}
 
@@ -4243,19 +4248,17 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 // joined the attempt subscription, and the next attempt joins this watcher.
 // A gap can lose ordinary events as before; poo holds permission events for replay.
 // Cancellation alone is insufficient: Events unsubscribes asynchronously.
-func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Provider, sessionID string, writer *runtimeFanoutWriter) {
+// The watcher is named for when it runs, a child parked between attempts; the
+// events it publishes are named for what produced them, a run nobody prompted.
+func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Provider, turn *cli.ProviderTurn, sessionID string, writer *runtimeFanoutWriter) {
 	if child.lifecycleCtx.Err() != nil {
-		return
-	}
-	// A closing child cannot answer an idle request, so do not subscribe.
-	if _, admitted := s.beginChildProviderTurn(child, s.ensureChildProviderLifecycle(child)); !admitted {
 		return
 	}
 	ctx, cancel := context.WithCancel(child.lifecycleCtx)
 	eventCh, err := provider.Events(ctx, sessionID)
 	if err != nil {
 		cancel()
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s idle event subscription: %v\n", child.id, err)
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s unprompted event subscription: %v\n", child.id, err)
 		return
 	}
 	done := make(chan struct{})
@@ -4263,68 +4266,123 @@ func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Prov
 	go func() {
 		defer close(done)
 		for ev := range eventCh {
-			s.writeIdleEvent(child, writer, ev)
+			s.writeUnpromptedEvent(ctx, child, provider, turn, sessionID, writer, ev)
 		}
 	}()
 }
 
-// writeIdleEvent publishes one event from an idle run through the canonical
-// writer. A permission request needs a claim before publication, and it gets
-// the same two refusals the canonical path gives: a request that cannot be
-// claimed is not published, and a failed publication ends the claim it made.
-func (s *Supervisor) writeIdleEvent(child *childRuntime, writer *runtimeFanoutWriter, ev events.Event) {
-	requestID, publish := s.prepareIdleRequest(child, ev)
-	if !publish {
+// writeUnpromptedEvent publishes one event from a run nobody prompted through
+// the canonical writer. A permission request is claimed and resolved the way an
+// attempt's is, so the launch's auto-approve, a connected control client and the
+// file handler answer it with no prompt in flight.
+func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRuntime, provider runtime.Provider, turn *cli.ProviderTurn, sessionID string, writer *runtimeFanoutWriter, ev events.Event) {
+	if ev.Event != "permission.request" {
+		if err := writer.Write(ev); err != nil {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s unprompted event write: %v\n", child.id, err)
+		}
 		return
 	}
-	if err := writer.Write(ev); err != nil {
-		if requestID != "" && s.control != nil {
-			// A claim whose request never reached the log is unreachable.
-			s.control.EndPermissionClaim(child.id, requestID)
+	published, _, publishErr := s.unpromptedPublisher(child, sessionID, writer).Publish(ev)
+	if publishErr != nil {
+		if !errors.Is(publishErr, cli.ErrPermissionNoRequestID) {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s %v\n", child.id, publishErr)
 		}
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s idle event write: %v\n", child.id, err)
+		return
+	}
+	// The resolver waits on its own clock, so it runs beside the event stream.
+	go func() {
+		err := cli.ResolvePermissionOutOfTurn(ctx, cli.OutOfTurnPermission{
+			Provider:      provider,
+			Turn:          turn,
+			FileHandler:   child.fileHandler,
+			ControlServer: s.control,
+			Writer:        writer,
+			Stderr:        s.stderrWriter(),
+			SessionID:     sessionID,
+			RunID:         s.runID,
+			RunLabel:      child.label,
+			ClaimScope:    child.id,
+			AutoApprove:   child.autoApprove,
+			ClaimTimeout:  child.permClaimTimeout,
+			// A restored claim goes through the admission this path publishes
+			// under, so a child that started closing refuses it the same way.
+			RestoreClaim: func(requestID string, options []any) bool {
+				return s.claimUnpromptedRequest(child)(requestID, control.PermissionResolverNoResolver, options) == nil
+			},
+		}, published)
+		if err != nil {
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission resolve: %v\n", child.id, err)
+		}
+	}()
+}
+
+// errChildClosing reports a request dropped because the child could not answer
+// it, which is not the same finding as a claim another resolver owns.
+var errChildClosing = errors.New("child is closing")
+
+// unpromptedPublisher builds the publisher for a child's unprompted events. The
+// sequence a permission request passes is the turn loop's, from cli; what stays
+// here is this path's admission and its own idea of what a bad write costs.
+func (s *Supervisor) unpromptedPublisher(child *childRuntime, sessionID string, writer *runtimeFanoutWriter) cli.PermissionRequestPublisher {
+	return cli.PermissionRequestPublisher{
+		AutoApprove: child.autoApprove,
+		HasControlClient: func() bool {
+			return s.control != nil && s.control.HasClients()
+		},
+		HasFileHandler: child.fileHandler != nil,
+		Claim:          s.claimUnpromptedRequest(child),
+		Write: func(event events.Event) error {
+			return writer.Write(event)
+		},
+		EndClaim: func(requestID string) {
+			if s.control != nil {
+				// A claim whose request never reached the log is unreachable.
+				s.control.EndPermissionClaim(child.id, requestID)
+			}
+		},
+		Diagnose: func(message string) {
+			cli.EmitErrorEvent(writer, sessionID, s.runID, "permission", message, s.stderrWriter(), child.label)
+		},
 	}
 }
 
-// prepareIdleRequest decides whether one idle event may be published, and
-// claims a permission request's ID on the way. It mirrors the canonical
-// path's admission: no claim for a closing child, no publication over a claim
-// someone else holds.
-func (s *Supervisor) prepareIdleRequest(child *childRuntime, ev events.Event) (string, bool) {
-	if ev.Event != "permission.request" {
-		return "", true
+// claimUnpromptedRequest is the unprompted path's admission: no claim for a
+// child that is closing, and no publication over a claim someone else holds.
+// Each refusal says which one it is, because the two mean opposite things to an
+// operator reading the log.
+func (s *Supervisor) claimUnpromptedRequest(child *childRuntime) func(string, control.PermissionResolverState, []any) error {
+	return func(requestID string, resolverState control.PermissionResolverState, options []any) error {
+		if s.control == nil {
+			return nil
+		}
+		if !s.unpromptedClaimAdmitted(child) {
+			// The child is closing, so nothing can answer this request: do not
+			// prepare a claim no path can resolve, and do not publish a request
+			// nothing will answer.
+			return fmt.Errorf("%w; dropped unprompted permission request %s", errChildClosing, requestID)
+		}
+		// Prepare must precede publication so the request is answerable. It
+		// releases control locks before Write takes writeMu then controlMu. A
+		// pre-publication direct answer can race this write; its response also
+		// passes through the canonical writer.
+		if !s.control.PreparePermissionClaim(child.id, requestID, resolverState, options) {
+			// A claim is already pending for this request, so the canonical path
+			// refuses to publish it and this one refuses too: poo's held replay can
+			// otherwise republish a live request invisibly.
+			return fmt.Errorf("%w: %s", cli.ErrPermissionClaimConflict, requestID)
+		}
+		return nil
 	}
-	requestID, _ := ev.Fields["request_id"].(string)
-	options, _ := ev.Fields["options"].([]any)
-	if requestID == "" || s.control == nil {
-		return requestID, true
-	}
-	if !s.idleClaimAdmitted(child) {
-		// The child is closing, so nothing can answer this request: do not
-		// prepare a claim no path can resolve, and do not publish a request
-		// nothing will answer.
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s is closing; dropping idle permission request %s\n", child.id, requestID)
-		return requestID, false
-	}
-	// Prepare must precede publication so the request is answerable. It
-	// releases control locks before Write takes writeMu then controlMu. A
-	// pre-publication direct answer can race this write; its response also
-	// passes through the canonical writer.
-	if !s.control.PreparePermissionClaim(child.id, requestID, control.PermissionResolverNoResolver, options) {
-		// A claim is already pending for this request, so the canonical path
-		// refuses to publish it and this one refuses too: poo's held replay can
-		// otherwise republish a live request invisibly.
-		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission request %s is already claimed\n", child.id, requestID)
-		return requestID, false
-	}
-	return requestID, true
 }
 
-// idleClaimAdmitted applies the admission gate the canonical claim path
-// checks: once the supervisor, the child or its event writer is closing, a
-// prepared claim has no owner that could answer it.
-func (s *Supervisor) idleClaimAdmitted(child *childRuntime) bool {
-	return child.lifecycleCtx.Err() == nil && !child.lc.isShuttingDown() && !child.lc.isWriterClosing()
+// unpromptedClaimAdmitted applies the admission gate the canonical claim paths
+// check: an answer prepared while the supervisor, the child or its event writer
+// is closing has no owner that could deliver it.
+func (s *Supervisor) unpromptedClaimAdmitted(child *childRuntime) bool {
+	s.controlMu.Lock()
+	supervisorClosing := s.shuttingDown
+	s.controlMu.Unlock()
+	return !supervisorClosing && child.lifecycleCtx.Err() == nil && !child.lc.isShuttingDown() && !child.lc.isWriterClosing()
 }
 
 func (s *Supervisor) stopIdleWatcher(child *childRuntime) {
