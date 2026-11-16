@@ -691,7 +691,14 @@ export function createBrokerChildBroker(
         : undefined
       // A partial listing still arrives with peers; the error rides along so
       // the router can say the list is incomplete instead of dropping it.
-      return typeof detail === 'string' && detail ? { peers, detail } : { peers }
+      const generation = body !== null && typeof body === 'object'
+        ? (body as Record<string, unknown>).generation
+        : undefined
+      return {
+        peers,
+        ...(typeof detail === 'string' && detail ? { detail } : {}),
+        ...(typeof generation === 'string' && generation ? { generation } : {}),
+      }
     },
 
     async rename(req) {

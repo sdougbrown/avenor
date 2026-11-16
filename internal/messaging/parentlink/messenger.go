@@ -211,8 +211,12 @@ func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 		err = errors.Join(err, upErr)
 	}
 	seen := make(map[string]struct{}, len(peers))
-	for _, peer := range peers {
+	acceptedGeneration, accepted := m.up.acceptedKeys()
+	for i, peer := range peers {
 		seen[peer.RunID] = struct{}{}
+		if acceptedGeneration != "" && acceptedGeneration == remote.Generation {
+			peers[i].ParentKey = accepted[peer.RunID]
+		}
 	}
 	for _, peer := range remote.Peers {
 		// A literal run ID names the local run: a parent-exported run that
@@ -226,9 +230,10 @@ func (m *Messenger) Peers(ctx context.Context, req messaging.PeersRequest) (mess
 			continue
 		}
 		seen[peer.RunID] = struct{}{}
+		peer.ParentKey = peer.RunID
 		peers = append(peers, peer)
 	}
-	return messaging.PeersResult{Peers: peers, Generation: result.Generation}, err
+	return messaging.PeersResult{Peers: peers, Generation: result.Generation, ParentGeneration: remote.Generation}, err
 }
 
 // Last reads one run's recorded last turn. A run the local broker holds is

@@ -105,14 +105,19 @@ type MessagePeersParams struct {
 
 // MessagePeer is one visible peer on the control wire.
 type MessagePeer struct {
-	RunID   string          `json:"run_id"`
-	Session json.RawMessage `json:"session,omitempty"`
+	RunID     string          `json:"run_id"`
+	Session   json.RawMessage `json:"session,omitempty"`
+	ParentKey string          `json:"parent_key,omitempty"`
 }
 
 // MessagePeersResult is the message_peers response.
 type MessagePeersResult struct {
 	Peers      []MessagePeer `json:"peers"`
 	Generation string        `json:"generation,omitempty"`
+	// ParentGeneration is the generation of the parent broker that answered the
+	// listing. The parent keys on the peers are set only for runs
+	// this same parent generation listed or accepted.
+	ParentGeneration string `json:"parent_generation,omitempty"`
 	// PeersError names why the listing read only part of the peer set. The
 	// peers beside it are the ones that were read, so a caller keeps them and
 	// reports the listing as incomplete.
@@ -403,9 +408,9 @@ func newMessageReceiveResult(res messaging.ReceiveResult) MessageReceiveResult {
 }
 
 func newMessagePeersResult(res messaging.PeersResult) MessagePeersResult {
-	out := MessagePeersResult{Peers: make([]MessagePeer, 0, len(res.Peers)), Generation: res.Generation}
+	out := MessagePeersResult{Peers: make([]MessagePeer, 0, len(res.Peers)), Generation: res.Generation, ParentGeneration: res.ParentGeneration}
 	for _, peer := range res.Peers {
-		out.Peers = append(out.Peers, MessagePeer{RunID: peer.RunID, Session: peer.Session})
+		out.Peers = append(out.Peers, MessagePeer{RunID: peer.RunID, Session: peer.Session, ParentKey: peer.ParentKey})
 	}
 	return out
 }
@@ -539,9 +544,9 @@ func (r MessageReceiveResult) ReceiveResult() messaging.ReceiveResult {
 
 // PeersResult decodes a peers response.
 func (r MessagePeersResult) PeersResult() messaging.PeersResult {
-	out := messaging.PeersResult{Generation: r.Generation, Peers: make([]messaging.Peer, 0, len(r.Peers))}
+	out := messaging.PeersResult{Generation: r.Generation, ParentGeneration: r.ParentGeneration, Peers: make([]messaging.Peer, 0, len(r.Peers))}
 	for _, peer := range r.Peers {
-		out.Peers = append(out.Peers, messaging.Peer{RunID: peer.RunID, Session: peer.Session})
+		out.Peers = append(out.Peers, messaging.Peer{RunID: peer.RunID, Session: peer.Session, ParentKey: peer.ParentKey})
 	}
 	return out
 }

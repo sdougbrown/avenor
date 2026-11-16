@@ -1,10 +1,10 @@
-import { expect, test } from 'bun:test'
-import { createChildMessageProvider, type MessageProvider, type ChildBroker } from '@dougbots/avenor-core'
+import { describe, expect, test } from 'bun:test'
+import { createChildMessageProvider, type MessageProvider, type ChildBroker, type PeersProviderResult } from '@dougbots/avenor-core'
 import { combinePeerProviders } from './peer-provider.js'
 
-function provider(id: string, rows: Array<{ run_id: string; label?: string }>, sent: string[], detail?: string): MessageProvider {
+function provider(id: string, rows: Array<{ run_id: string; label?: string }>, sent: string[], detail?: string, identity?: Omit<PeersProviderResult, 'peers' | 'detail'>): MessageProvider {
   const broker = {
-    peers: async () => ({ peers: rows, detail }),
+    peers: async () => ({ peers: rows, detail, ...identity }),
     tell: async (target: string) => { sent.push(`${id}:${target}`); return { outcome: 'sent' as const } },
     ask: async () => ({ outcome: 'timed-out', messageId: `${id}-ask` }),
     reply: async () => ({ outcome: 'replied' }),
@@ -32,6 +32,69 @@ test('duplicate names and IDs remain ambiguous without identity equivalence', as
   expect((await p.resolve('same')).match).toBe('ambiguous')
   expect((await p.resolve('scout')).match).toBe('ambiguous')
   expect(sent).toEqual([])
+})
+
+describe('one broker incarnation lists a run to the session once', () => {
+  const hostRows = [
+    { run_id: 'supervisor' },
+    { run_id: 'rt_1', label: 'scout' },
+    { run_id: 'pi-peer', label: 'poo-skills' },
+    { run_id: 'pi-unlisted', label: 'ghost' },
+  ]
+  const parentKeys = { supervisor: 'supervisor@b1', rt_1: 'rt_1@b1', 'pi-peer': 'pi-peer', 'pi-unlisted': 'pi-unlisted' }
+  const centralRows = [
+    { run_id: 'supervisor', label: 'root' },
+    { run_id: 'supervisor@b1' },
+    { run_id: 'rt_1@b1', label: 'scout' },
+    { run_id: 'pi-peer', label: 'poo-skills' },
+  ]
+  const build = (centralGeneration: string, sent: string[]) => combinePeerProviders(
+    provider('local', hostRows, sent, undefined, { generation: 'h', parentKeys, parentGeneration: 'g1' }),
+    provider('central', centralRows, sent, undefined, { generation: centralGeneration }),
+  )
+  async function tell(p: MessageProvider, ref: string) {
+    const r = await p.resolve(ref)
+    expect(r.match).toBe('unique')
+    await p.tell(r.routeKey ?? r.runId, 'hi')
+  }
+
+  test('a run the host read back from central is listed once and routes to central', async () => {
+    const sent: string[] = []
+    const p = build('g1', sent)
+    await tell(p, 'poo-skills')
+    await tell(p, 'pi-peer')
+    expect(sent).toEqual(['central:pi-peer', 'central:pi-peer'])
+  })
+
+  test('a host run routes through its label and through the key its parent accepted', async () => {
+    const sent: string[] = []
+    const p = build('g1', sent)
+    await tell(p, 'scout')
+    await tell(p, 'rt_1@b1')
+    expect(sent).toEqual(['local:rt_1', 'local:rt_1'])
+  })
+
+  test('a qualified key and a row central never listed each reach their own host row', async () => {
+    const sent: string[] = []
+    const p = build('g1', sent)
+    await tell(p, 'supervisor@b1')
+    await tell(p, 'ghost')
+    expect(sent).toEqual(['local:supervisor', 'local:pi-unlisted'])
+  })
+
+  test('a row a host run and a central run share stays listed twice', async () => {
+    const p = build('g1', [])
+    const listed = (await p.peers()).peers.map(row => row.run_id)
+    expect(listed.sort()).toEqual(['pi-peer', 'pi-unlisted', 'rt_1', 'supervisor', 'supervisor'])
+  })
+
+  test('a bare id both brokers list stays ambiguous', async () => {
+    expect((await build('g1', []).resolve('supervisor')).match).toBe('ambiguous')
+  })
+
+  test('a listing from another parent generation collapses nothing', async () => {
+    expect((await build('g2', []).resolve('poo-skills')).match).toBe('ambiguous')
+  })
 })
 
 test('a label match routes to the authority whose row carried that label', async () => {

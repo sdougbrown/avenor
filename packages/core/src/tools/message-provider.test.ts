@@ -336,6 +336,27 @@ describe('host message provider', () => {
     expect(result.peers.map(peer => peer.run_id)).toEqual(['supervisor', 'rt_7'])
   })
 
+  it('carries the broker identity of a listing beside the peers', async () => {
+    const client = fakeClient({
+      messagePeers: mock(async () => ({
+        generation: 'gen-host',
+        parent_generation: 'gen-parent',
+        peers: [
+          { run_id: 'rt_1', parent_key: 'rt_1@b1', session: { run_id: 'rt_1', label: 'scout' } },
+          { run_id: 'rt_2', session: { run_id: 'rt_2' } },
+          // The wire id and the session's id differ here: a key filed under the
+          // wire id would attach to a run this listing does not contain.
+          { run_id: 'rt_3@b2', parent_key: 'rt_3@b2', session: { run_id: 'rt_3', label: 'scout-b' } },
+        ],
+      })),
+    })
+    const listed = await provider(client).peers()
+    expect(listed.generation).toBe('gen-host')
+    expect(listed.parentGeneration).toBe('gen-parent')
+    expect(listed.peers.map(peer => peer.run_id)).toEqual(['rt_1', 'rt_2', 'rt_3'])
+    expect(listed.parentKeys).toEqual({ rt_1: 'rt_1@b1', rt_3: 'rt_3@b2' })
+  })
+
   it('refuses resolution when the listing is incomplete, even for a peer it read', async () => {
     const client = fakeClient({
       messagePeers: mock(async () => ({
