@@ -318,3 +318,68 @@ func TestPublisherReturnsTheEventItWrote(t *testing.T) {
 		t.Fatal("the backend's own event was mutated: the hint belongs on the copy")
 	}
 }
+
+// TestAnUnpromptedAnswerRunsOnItsTurn pins the glue that keeps an out-of-turn
+// answer inside the provider lifecycle: the answer is a call on the turn the
+// watcher admitted, so a close that has already begun refuses it instead of the
+// answer reaching the provider untracked while the provider is ending.
+func TestAnUnpromptedAnswerRunsOnItsTurn(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "out-of-turn-turn"), MaxRuntimes: 1})
+	request := events.Event{
+		Event:     "permission.request",
+		SessionID: "session",
+		Fields:    map[string]any{"request_id": "a1", "options": []any{map[string]any{"optionId": "allow", "kind": "allow"}}},
+	}
+	answer := func(provider runtime.Provider, turn *cli.ProviderTurn) error {
+		return cli.ResolvePermissionOutOfTurn(context.Background(), cli.OutOfTurnPermission{
+			Provider:      provider,
+			Turn:          turn,
+			ControlServer: sup.control,
+			Writer:        &recordingSink{},
+			Stderr:        io.Discard,
+			SessionID:     "session",
+			ClaimScope:    "rt_turn",
+			AutoApprove:   true,
+		}, request)
+	}
+
+	provider := &answeringProvider{Provider: stubProvider{}}
+	live := cli.NewProviderLifecycle(provider)
+	if err := answer(provider, live.NewTurn()); err != nil {
+		t.Fatalf("answer on a live turn: %v", err)
+	}
+	if got := provider.answers(); got != 1 {
+		t.Fatalf("provider answered %d calls, want 1", got)
+	}
+
+	closing := cli.NewProviderLifecycle(provider)
+	turn := closing.NewTurn()
+	closing.RequestClose()
+	if err := answer(provider, turn); err == nil {
+		t.Fatal("an answer on a closed turn reached the provider")
+	}
+	if got := provider.answers(); got != 1 {
+		t.Fatalf("provider answered %d calls, want still 1: a closing provider was written to", got)
+	}
+}
+
+// answeringProvider records the answers that reach it, so a test can prove one
+// did or did not.
+type answeringProvider struct {
+	runtime.Provider
+	mu   sync.Mutex
+	sent int
+}
+
+func (p *answeringProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sent++
+	return nil
+}
+
+func (p *answeringProvider) answers() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sent
+}
