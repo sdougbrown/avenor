@@ -4282,7 +4282,8 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 		}
 		return
 	}
-	if _, _, publishErr := s.unpromptedPublisher(child, sessionID, writer).Publish(ev); publishErr != nil {
+	published, _, publishErr := s.unpromptedPublisher(child, sessionID, writer).Publish(ev)
+	if publishErr != nil {
 		if !errors.Is(publishErr, cli.ErrPermissionNoRequestID) {
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s %v\n", child.id, publishErr)
 		}
@@ -4303,7 +4304,7 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 			ClaimScope:    child.id,
 			AutoApprove:   child.autoApprove,
 			ClaimTimeout:  child.permClaimTimeout,
-		}, ev)
+		}, published)
 		if err != nil {
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission resolve: %v\n", child.id, err)
 		}

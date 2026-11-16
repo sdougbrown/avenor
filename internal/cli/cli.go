@@ -1757,7 +1757,7 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					}
 				}
 				// Auto-answer / control-owner / file fallback resolver.
-				requestID, _, publishErr := permissionPublisher.Publish(event)
+				published, _, publishErr := permissionPublisher.Publish(event)
 				switch {
 				case errors.Is(publishErr, ErrPermissionClaimConflict):
 					if permissionCtx.Err() != nil {
@@ -1773,6 +1773,8 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 					// call AnswerPermission. Stay in the waiting state.
 					continue
 				}
+				event = published
+				requestID, _ := event.Fields["request_id"].(string)
 				done := make(chan permissionResult, 1)
 				permissionDone = done
 				go func() {
@@ -2261,10 +2263,12 @@ type PermissionRequestPublisher struct {
 	Diagnose func(message string)
 }
 
-// Publish returns the request id and the resolver state its claim was prepared
-// under. A nil error means the request was published and, when it carries a
-// request id, claimed.
-func (p PermissionRequestPublisher) Publish(event events.Event) (string, control.PermissionResolverState, error) {
+// Publish returns the event it wrote and the resolver state its claim was
+// prepared under. The event comes back because it carries the hint: a reader of
+// the log and a resolver reading the same request must see the same fields, and
+// the file protocol copies them into its request. A nil error means the request
+// was published and, when it carries a request id, claimed.
+func (p PermissionRequestPublisher) Publish(event events.Event) (events.Event, control.PermissionResolverState, error) {
 	event = events.Clone(event)
 	if event.Fields == nil {
 		event.Fields = map[string]any{}
@@ -2276,21 +2280,21 @@ func (p PermissionRequestPublisher) Publish(event events.Event) (string, control
 	event.Fields["resolver"] = resolverState.String()
 	options, _ := event.Fields["options"].([]any)
 	if requestID != "" && p.Claim != nil && !p.Claim(requestID, resolverState, options) {
-		return requestID, resolverState, ErrPermissionClaimConflict
+		return event, resolverState, ErrPermissionClaimConflict
 	}
 	if err := p.Write(event); err != nil {
 		if requestID != "" && p.EndClaim != nil {
 			p.EndClaim(requestID)
 		}
-		return requestID, resolverState, fmt.Errorf("%w: %v", ErrPermissionNotWritten, err)
+		return event, resolverState, fmt.Errorf("%w: %v", ErrPermissionNotWritten, err)
 	}
 	if requestID == "" {
 		if p.Diagnose != nil {
 			p.Diagnose("permission.request missing request_id")
 		}
-		return "", resolverState, ErrPermissionNoRequestID
+		return event, resolverState, ErrPermissionNoRequestID
 	}
-	return requestID, resolverState, nil
+	return event, resolverState, nil
 }
 
 func resolvePermission(

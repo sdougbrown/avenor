@@ -281,3 +281,30 @@ func TestPublisherAsksForAClientPerRequest(t *testing.T) {
 		t.Fatalf("resolver hints = %v, want %v", hints, want)
 	}
 }
+
+// TestPublisherReturnsTheEventItWrote pins the event a caller must resolve: the
+// one carrying the hint, cloned away from the map the backend published. The
+// file protocol copies these fields into its request, so a resolver reading the
+// original would write a request no reader could match to the log.
+func TestPublisherReturnsTheEventItWrote(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "publish-returns"), MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_returns", lifecycleCtx: context.Background()}
+	original := events.Event{
+		Event:     "permission.request",
+		SessionID: "session",
+		Fields:    map[string]any{"request_id": "a1"},
+	}
+	publisher := sup.unpromptedPublisher(child, "session", nil)
+	publisher.Claim = func(string, control.PermissionResolverState, []any) bool { return true }
+	publisher.Write = func(events.Event) error { return nil }
+	published, state, err := publisher.Publish(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hint, _ := published.Fields["resolver"].(string); hint != state.String() {
+		t.Fatalf("published resolver = %q, want %q", hint, state.String())
+	}
+	if _, mutated := original.Fields["resolver"]; mutated {
+		t.Fatal("the backend's own event was mutated: the hint belongs on the copy")
+	}
+}

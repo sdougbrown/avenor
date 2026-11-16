@@ -48,6 +48,11 @@ func answerPermissionFile(t *testing.T, base, wantRequestID string) {
 	if request.RequestID != wantRequestID {
 		t.Fatalf("permission file request id = %q, want %q", request.RequestID, wantRequestID)
 	}
+	// The file protocol promises the normalized event fields, so the resolver
+	// hint the log carries has to be here too.
+	if hint, _ := request.Payload["resolver"].(string); hint != "file" {
+		t.Fatalf("permission file payload resolver = %q, want \"file\": %v", hint, request.Payload)
+	}
 	optionID := ""
 	options, _ := request.Options.([]any)
 	for _, option := range options {
