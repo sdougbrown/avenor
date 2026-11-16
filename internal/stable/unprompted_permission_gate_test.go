@@ -550,9 +550,9 @@ func TestStopIdleWatcherReleasesOnlyUnclaimedRequests(t *testing.T) {
 	}
 }
 
-// TestStopIdleWatcherJoinsTheWindowResolvers pins the other half: a resolver
-// that is still running when the attempt takes over is cancelled and joined, so
-// it cannot claim or answer behind the attempt's back.
+// TestStopIdleWatcherJoinsTheWindowResolvers pins the join, not the cancel: the
+// resolver keeps working after the window is cancelled, so an implementation
+// that cancels and moves on returns while the resolver is still in flight.
 func TestStopIdleWatcherJoinsTheWindowResolvers(t *testing.T) {
 	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "join-resolvers"), MaxRuntimes: 1})
 	child := &childRuntime{id: "rt_join", lifecycleCtx: context.Background()}
@@ -560,19 +560,24 @@ func TestStopIdleWatcherJoinsTheWindowResolvers(t *testing.T) {
 	returned := make(chan struct{})
 	sup.startUnpromptedResolve(child, func() {
 		<-window.Done()
+		// Work that outlives the cancel: only a join can wait for it.
+		time.Sleep(200 * time.Millisecond)
 		close(returned)
 	})
 	sup.stopIdleWatcher(child)
 	select {
 	case <-returned:
-	case <-time.After(time.Second):
-		t.Fatal("stopIdleWatcher returned before its resolver did")
+	default:
+		t.Fatal("stopIdleWatcher returned while its resolver was still running")
 	}
 	// A resolver started after the window closed never runs: it would claim a
-	// request the next attempt owns.
-	ran := false
-	sup.startUnpromptedResolve(child, func() { ran = true })
-	if ran {
+	// request the next attempt owns. The channel is read after a short wait, so
+	// a spawned goroutine has the chance to prove itself.
+	ran := make(chan struct{}, 1)
+	sup.startUnpromptedResolve(child, func() { ran <- struct{}{} })
+	select {
+	case <-ran:
 		t.Fatal("a resolver started after the window closed")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
