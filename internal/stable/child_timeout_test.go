@@ -13,6 +13,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/phaseconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // hangingProvider is a continuously active backend: Prompt blocks until the
@@ -89,7 +90,8 @@ func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) { return provider, nil }
 
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
-	child := &childRuntime{id: "rt_run_timeout", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}, provider: provider}
+	terminated := make(chan workflow.AttemptStatus, 1)
+	child := &childRuntime{id: "rt_run_timeout", workflowID: "wf1", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}, provider: provider, onWorkflowTerminate: func(status workflow.AttemptStatus) { terminated <- status }}
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	go sup.runChild(context.Background(), child, "work", 1, 0)
 
@@ -97,6 +99,14 @@ func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 	case <-child.done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("run child did not stop at the run deadline")
+	}
+	select {
+	case status := <-terminated:
+		if status != workflow.AttemptTimedOut {
+			t.Fatalf("workflow termination status = %s, want timed out", status)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("workflow termination not recorded")
 	}
 
 	raw, err := os.ReadFile(sentinel)

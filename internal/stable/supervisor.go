@@ -2552,6 +2552,15 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 	// teardown defer's post-completion work (such as the capacity release) is
 	// done, so test teardown can join this goroutine before reading counters.
 	defer child.closeRunDone()
+	// The run deadline bounds every attempt and retry backoff of this child:
+	// each WaitForSession derives its own timer from it, so a retry cannot
+	// consume or miss a single one-shot tick.
+	if timeoutSec > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Duration(timeoutSec)*time.Second))
+		// Termination must observe the context before cleanup cancels it.
+		defer cancel()
+	}
 	defer func() {
 		panicked := false
 		if r := recover(); r != nil {
@@ -2586,15 +2595,6 @@ func (s *Supervisor) runChild(ctx context.Context, child *childRuntime, promptTe
 
 	if s.broker != nil {
 		s.ensureChildBrokerRun(child)
-	}
-
-	// The run deadline bounds every attempt and retry backoff of this child:
-	// each WaitForSession derives its own timer from it, so a retry cannot
-	// consume or miss a single one-shot tick.
-	if timeoutSec > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, time.Now().Add(time.Duration(timeoutSec)*time.Second))
-		defer cancel()
 	}
 
 	resumeID := ""
