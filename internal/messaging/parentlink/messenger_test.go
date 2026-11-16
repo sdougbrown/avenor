@@ -390,6 +390,69 @@ func TestMessengerPeersCarryTheKeyTheParentListsThemUnder(t *testing.T) {
 	}
 }
 
+// TestMessengerPeersWithholdTheKeyOfAReplacedParent pins the other half of the
+// parent-key contract: the key the parent accepted is stamped only when the
+// listing came from the generation that accepted it. A parent answering from a
+// later generation, or reporting none, leaves this broker's own runs unkeyed,
+// while a run read from the parent is still keyed by its own ID.
+func TestMessengerPeersWithholdTheKeyOfAReplacedParent(t *testing.T) {
+	cases := []struct {
+		name        string
+		registerGen string
+		listingGen  string
+	}{
+		{name: "replaced", registerGen: "gen-old", listingGen: "gen-new"},
+		{name: "both-unreported", registerGen: "", listingGen: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := newStubBroker(t, func(req stubRequest) (int, string) {
+				switch req.Path {
+				case pathRegister:
+					if tc.registerGen == "" {
+						return http.StatusOK, `{"run_keys":{"run-a":"run-a@child-one"}}`
+					}
+					return http.StatusOK, `{"generation":"` + tc.registerGen + `","run_keys":{"run-a":"run-a@child-one"}}`
+				case pathSessions:
+					if tc.listingGen == "" {
+						return http.StatusOK, `{"sessions":[{"run_id":"run-y"}]}`
+					}
+					return http.StatusOK, `{"generation":"` + tc.listingGen + `","sessions":[{"run_id":"run-y"}]}`
+				}
+				return http.StatusOK, `{}`
+			})
+			local := newStubMessenger()
+			local.peers = []messaging.Peer{{RunID: "run-a"}, {RunID: "run-x"}}
+			messenger := newTestMessenger(t, local, parent)
+			ctx := testContext(t)
+			if err := messenger.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			res, err := messenger.Peers(ctx, messaging.PeersRequest{})
+			if err != nil {
+				t.Fatalf("Peers: %v", err)
+			}
+			keys := map[string]string{}
+			for _, peer := range res.Peers {
+				keys[peer.RunID] = peer.ParentKey
+			}
+			want := map[string]string{"run-a": "", "run-x": "", "run-y": "run-y"}
+			if len(keys) != len(want) {
+				t.Fatalf("parent keys = %v, want %v", keys, want)
+			}
+			for runID, key := range want {
+				if got, ok := keys[runID]; !ok || got != key {
+					t.Fatalf("parent keys = %v, want %v", keys, want)
+				}
+			}
+			if res.ParentGeneration != tc.listingGen {
+				t.Fatalf("ParentGeneration = %q, want %q", res.ParentGeneration, tc.listingGen)
+			}
+		})
+	}
+}
+
 // TestMessengerLastFollowsTheRoutingRule pins which broker answers a last-turn
 // read: a run the local seam holds is read here, a run it does not hold is the
 // parent's, and a branch with no parent reads only its own.
