@@ -4304,6 +4304,11 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 			ClaimScope:    child.id,
 			AutoApprove:   child.autoApprove,
 			ClaimTimeout:  child.permClaimTimeout,
+			// A restored claim goes through the admission this path publishes
+			// under, so a child that started closing refuses it the same way.
+			RestoreClaim: func(requestID string, options []any) bool {
+				return s.claimUnpromptedRequest(child)(requestID, control.PermissionResolverNoResolver, options) == nil
+			},
 		}, published)
 		if err != nil {
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission resolve: %v\n", child.id, err)

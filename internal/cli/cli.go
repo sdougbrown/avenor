@@ -2156,6 +2156,10 @@ type OutOfTurnPermission struct {
 	ClaimScope    string
 	AutoApprove   bool
 	ClaimTimeout  time.Duration
+	// RestoreClaim re-prepares a claim whose resolver ended without an answer,
+	// through the same admission the publication used. A caller that gates
+	// claims supplies it; a nil RestoreClaim prepares the claim directly.
+	RestoreClaim func(requestID string, options []any) bool
 	// Turn is the provider turn the answer is a call on. An answer outside a
 	// turn still has to be one: a close that finds no live call ends the
 	// provider in the middle of it. A nil turn answers untracked.
@@ -2183,8 +2187,10 @@ func ResolvePermissionOutOfTurn(ctx context.Context, cfg OutOfTurnPermission, ev
 		if res.err != nil && !errors.Is(res.err, context.Canceled) && !errors.Is(res.err, context.DeadlineExceeded) {
 			return res.err
 		}
-		if cfg.ControlServer != nil {
-			options, _ := event.Fields["options"].([]any)
+		options, _ := event.Fields["options"].([]any)
+		if cfg.RestoreClaim != nil {
+			cfg.RestoreClaim(requestID, options)
+		} else if cfg.ControlServer != nil {
 			cfg.ControlServer.PreparePermissionClaim(cfg.ClaimScope, requestID, control.PermissionResolverNoResolver, options)
 		}
 		return nil

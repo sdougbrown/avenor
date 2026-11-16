@@ -159,6 +159,40 @@ func TestOutOfTurnCancelLeavesTheRequestAnswerable(t *testing.T) {
 	}
 }
 
+// TestOutOfTurnCancelOnAClosingChildRestoresNothing covers the same cancel for a
+// child that has started closing: the restore goes through the admission this
+// path publishes under, so it is refused like any other claim on a closing
+// child and no claim is left that nothing owns.
+func TestOutOfTurnCancelOnAClosingChildRestoresNothing(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "cancel-closing"), MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_cancel_closing", lifecycleCtx: context.Background(), lc: lifecycleState{shutdown: shutdownRequested}}
+	options := []any{map[string]any{"optionId": "allow"}}
+	request := events.Event{
+		Event:     "permission.request",
+		SessionID: "session",
+		Fields:    map[string]any{"request_id": "a1", "options": options},
+	}
+	if !sup.control.PreparePermissionClaim(child.id, "a1", control.PermissionResolverReserved, options) {
+		t.Fatal("claim was refused")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cli.ResolvePermissionOutOfTurn(ctx, cli.OutOfTurnPermission{
+		ControlServer: sup.control,
+		Stderr:        io.Discard,
+		SessionID:     "session",
+		ClaimScope:    child.id,
+		RestoreClaim: func(requestID string, options []any) bool {
+			return sup.claimUnpromptedRequest(child)(requestID, control.PermissionResolverNoResolver, options) == nil
+		},
+	}, request); err != nil {
+		t.Fatalf("resolve out of turn: %v", err)
+	}
+	if got := sup.control.DeliverPendingPermission(child.id, "a1", "allow", ""); got != control.PermissionAnswerNotFound {
+		t.Fatalf("delivery state = %v, want NotFound: a claim was restored on a child that cannot answer", got)
+	}
+}
+
 // TestPublisherReleasesAClaimItsWriteFailed covers the shared publisher's one
 // failure that would otherwise leak: a request that never reached the log keeps
 // no claim, so a reused request id is not refused forever.
@@ -379,6 +413,90 @@ func (p *answeringProvider) AnswerPermission(context.Context, string, string, ru
 }
 
 func (p *answeringProvider) answers() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sent
+}
+
+// TestIdleWatcherAnswersAParkedAsk drives the wiring this PR adds without a
+// backend: a provider that emits a permission request while the child is parked
+// must reach the resolver through the watcher, and its answer must land on the
+// fanout writer the log and the control surface share.
+func TestIdleWatcherAnswersAParkedAsk(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "watcher-answers"), MaxRuntimes: 1})
+	log := &recordingSink{}
+	provider := &askingProvider{sink: log}
+	child := &childRuntime{
+		id:           "rt_watcher",
+		lifecycleCtx: context.Background(),
+		provider:     provider,
+		eventWriter:  log,
+		session:      runtime.Session{SessionID: "session"},
+		autoApprove:  true,
+	}
+	writer := newRuntimeFanoutWriter(sup, child, nil, nil)
+	lifecycle := sup.ensureChildProviderLifecycle(child)
+	if lifecycle == nil {
+		t.Fatal("no provider lifecycle")
+	}
+	turn, admitted := sup.beginChildProviderTurn(child, lifecycle)
+	if !admitted {
+		t.Fatal("turn was not admitted")
+	}
+	sup.startIdleWatcher(child, provider, turn, "session", writer)
+	t.Cleanup(func() { sup.stopIdleWatcher(child) })
+
+	waitFor(t, "permission response from the watcher", func() bool {
+		for _, event := range log.written() {
+			if event.Event != "permission.response" {
+				continue
+			}
+			if source, _ := event.Fields["source"].(string); source == "avenor" {
+				return true
+			}
+		}
+		return false
+	})
+	if got := provider.answers(); got != 1 {
+		t.Fatalf("provider answered %d calls, want 1", got)
+	}
+}
+
+// askingProvider emits one permission request on demand, then waits for the
+// watcher's context, and records what it was asked to answer.
+type askingProvider struct {
+	runtime.Provider
+	sink       *recordingSink
+	mu         sync.Mutex
+	sent       int
+	askRequest events.Event
+}
+
+func (p *askingProvider) Events(ctx context.Context, _ string) (<-chan events.Event, error) {
+	out := make(chan events.Event, 1)
+	out <- events.Event{
+		Event:     "permission.request",
+		SessionID: "session",
+		Fields: map[string]any{
+			"request_id": "a1",
+			"options":    []any{map[string]any{"optionId": "allow", "kind": "allow"}},
+		},
+	}
+	go func() {
+		<-ctx.Done()
+		close(out)
+	}()
+	return out, nil
+}
+
+func (p *askingProvider) AnswerPermission(context.Context, string, string, runtime.PermissionResponse) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sent++
+	return nil
+}
+
+func (p *askingProvider) answers() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.sent
