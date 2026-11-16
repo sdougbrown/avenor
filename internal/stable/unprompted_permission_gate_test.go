@@ -83,6 +83,16 @@ func TestUnpromptedPermissionRequestGate(t *testing.T) {
 			if publish := err == nil; publish != tc.want {
 				t.Fatalf("publish = %v (err %v), want %v", publish, err, tc.want)
 			}
+			if tc.closing || tc.shuttingDown {
+				// A child that cannot answer is not a claim conflict, and
+				// saying so would send an operator after the wrong owner.
+				if errors.Is(err, cli.ErrPermissionClaimConflict) {
+					t.Fatalf("closing drop reported as a claim conflict: %v", err)
+				}
+			}
+			if tc.held && !errors.Is(err, cli.ErrPermissionClaimConflict) {
+				t.Fatalf("held request error = %v, want ErrPermissionClaimConflict", err)
+			}
 			got := claimed(requestID)
 			if tc.wantHeld {
 				if got == control.PermissionAnswerNoResolver {
@@ -256,7 +266,7 @@ func TestPublisherAsksForAClientPerRequest(t *testing.T) {
 	var hints []string
 	publisher := sup.unpromptedPublisher(child, "session", nil)
 	publisher.HasControlClient = func() bool { return connected }
-	publisher.Claim = func(string, control.PermissionResolverState, []any) bool { return true }
+	publisher.Claim = func(string, control.PermissionResolverState, []any) error { return nil }
 	publisher.Write = func(event events.Event) error {
 		hint, _ := event.Fields["resolver"].(string)
 		hints = append(hints, hint)
@@ -295,7 +305,7 @@ func TestPublisherReturnsTheEventItWrote(t *testing.T) {
 		Fields:    map[string]any{"request_id": "a1"},
 	}
 	publisher := sup.unpromptedPublisher(child, "session", nil)
-	publisher.Claim = func(string, control.PermissionResolverState, []any) bool { return true }
+	publisher.Claim = func(string, control.PermissionResolverState, []any) error { return nil }
 	publisher.Write = func(events.Event) error { return nil }
 	published, state, err := publisher.Publish(original)
 	if err != nil {

@@ -4311,6 +4311,10 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 	}()
 }
 
+// errChildClosing reports a request dropped because the child could not answer
+// it, which is not the same finding as a claim another resolver owns.
+var errChildClosing = errors.New("child is closing")
+
 // unpromptedPublisher builds the publisher for a child's unprompted events. The
 // sequence a permission request passes is the turn loop's, from cli; what stays
 // here is this path's admission and its own idea of what a bad write costs.
@@ -4339,17 +4343,18 @@ func (s *Supervisor) unpromptedPublisher(child *childRuntime, sessionID string, 
 
 // claimUnpromptedRequest is the unprompted path's admission: no claim for a
 // child that is closing, and no publication over a claim someone else holds.
-func (s *Supervisor) claimUnpromptedRequest(child *childRuntime) func(string, control.PermissionResolverState, []any) bool {
-	return func(requestID string, resolverState control.PermissionResolverState, options []any) bool {
+// Each refusal says which one it is, because the two mean opposite things to an
+// operator reading the log.
+func (s *Supervisor) claimUnpromptedRequest(child *childRuntime) func(string, control.PermissionResolverState, []any) error {
+	return func(requestID string, resolverState control.PermissionResolverState, options []any) error {
 		if s.control == nil {
-			return true
+			return nil
 		}
 		if !s.unpromptedClaimAdmitted(child) {
 			// The child is closing, so nothing can answer this request: do not
 			// prepare a claim no path can resolve, and do not publish a request
 			// nothing will answer.
-			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s is closing; dropping unprompted permission request %s\n", child.id, requestID)
-			return false
+			return fmt.Errorf("%w; dropped unprompted permission request %s", errChildClosing, requestID)
 		}
 		// Prepare must precede publication so the request is answerable. It
 		// releases control locks before Write takes writeMu then controlMu. A
@@ -4359,10 +4364,9 @@ func (s *Supervisor) claimUnpromptedRequest(child *childRuntime) func(string, co
 			// A claim is already pending for this request, so the canonical path
 			// refuses to publish it and this one refuses too: poo's held replay can
 			// otherwise republish a live request invisibly.
-			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission request %s is already claimed\n", child.id, requestID)
-			return false
+			return fmt.Errorf("%w: %s", cli.ErrPermissionClaimConflict, requestID)
 		}
-		return true
+		return nil
 	}
 }
 

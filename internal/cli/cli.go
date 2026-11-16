@@ -1389,14 +1389,20 @@ func WaitForSession(ctx context.Context, provider runtime.Provider, cfg SessionW
 			return deps.ControlServer != nil && deps.ControlServer.HasClients()
 		},
 		HasFileHandler: deps.FileHandler != nil,
-		Claim: func(requestID string, state control.PermissionResolverState, options []any) bool {
+		Claim: func(requestID string, state control.PermissionResolverState, options []any) error {
 			if deps.ControlServer == nil {
-				return true
+				return nil
 			}
 			if deps.PreparePermissionClaim != nil {
-				return deps.PreparePermissionClaim(permissionCtx, cfg.PermissionClaimScope, requestID, state, options)
+				if !deps.PreparePermissionClaim(permissionCtx, cfg.PermissionClaimScope, requestID, state, options) {
+					return ErrPermissionClaimConflict
+				}
+				return nil
 			}
-			return deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state, options)
+			if !deps.ControlServer.PreparePermissionClaim(cfg.PermissionClaimScope, requestID, state, options) {
+				return ErrPermissionClaimConflict
+			}
+			return nil
 		},
 		Write: func(event events.Event) error { return deps.Writer.Write(event) },
 		EndClaim: func(requestID string) {
@@ -2252,9 +2258,11 @@ type PermissionRequestPublisher struct {
 	// runs, and the hint it decides must be the one the resolver will use.
 	HasControlClient func() bool
 	HasFileHandler   bool
-	// Claim prepares the claim for the request's resolver state, and reports
-	// false when the request cannot be claimed.
-	Claim func(requestID string, state control.PermissionResolverState, options []any) bool
+	// Claim prepares the claim for the request's resolver state. A nil error
+	// means the request is claimed; any other error says why it could not be,
+	// and Publish returns it unchanged so the caller reports the real reason
+	// rather than a guess about it.
+	Claim func(requestID string, state control.PermissionResolverState, options []any) error
 	// Write publishes the event, which arrives cloned and carrying its hint.
 	Write func(event events.Event) error
 	// EndClaim releases a claim whose request never reached the log.
@@ -2279,8 +2287,10 @@ func (p PermissionRequestPublisher) Publish(event events.Event) (events.Event, c
 	resolverState := EffectivePermissionResolverState(p.AutoApprove, requiresUserInput, hasControlClient, p.HasFileHandler)
 	event.Fields["resolver"] = resolverState.String()
 	options, _ := event.Fields["options"].([]any)
-	if requestID != "" && p.Claim != nil && !p.Claim(requestID, resolverState, options) {
-		return event, resolverState, ErrPermissionClaimConflict
+	if requestID != "" && p.Claim != nil {
+		if err := p.Claim(requestID, resolverState, options); err != nil {
+			return event, resolverState, err
+		}
 	}
 	if err := p.Write(event); err != nil {
 		if requestID != "" && p.EndClaim != nil {
