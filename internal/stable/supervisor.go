@@ -514,6 +514,16 @@ type childRuntime struct {
 	// idleWatchCancel and idleWatchDone are owned by the direct run goroutine.
 	idleWatchCancel context.CancelFunc
 	idleWatchDone   <-chan struct{}
+	// The unprompted window is one parked period between attempts. It owns the
+	// resolvers started for asks Avenor did not prompt, and the claims those
+	// resolvers prepared, so the attempt that follows can end them before its
+	// own claim path runs. Every field below is guarded by unpromptedMu.
+	unpromptedMu     sync.Mutex
+	unpromptedCtx    context.Context
+	unpromptedCancel context.CancelFunc
+	unpromptedClosed bool
+	unpromptedCalls  sync.WaitGroup
+	unpromptedClaims map[string]struct{}
 	// lc is the closed lifecycle state owned by the pure machine
 	// (runtime_lifecycle.go) and committed field by field by the adapter
 	// (runtime_lifecycle_apply.go). Read it through the field-specific
@@ -4178,11 +4188,16 @@ func (s *Supervisor) runChildAttempt(ctx context.Context, child *childRuntime, r
 			writer := s.fanoutWriterLocked(child)
 			// Poo closes the channel after unsubscribing on cancellation; its
 			// publisher never blocks on a full subscriber buffer.
-			// One admission covers this drain and the watcher that follows it: the
-			// answers either path resolves are calls on the same idle turn.
+			// One admission and one window cover this drain and the watcher that
+			// follows it: the answers either path resolves are calls on the same
+			// idle turn, and the attempt that ends the window ends them together.
 			turn, admitted := s.beginChildProviderTurn(child, s.ensureChildProviderLifecycle(child))
+			windowCtx := child.lifecycleCtx
+			if admitted {
+				windowCtx = s.beginUnpromptedWindow(child)
+			}
 			for ev := range eventCh {
-				s.writeUnpromptedEvent(child.lifecycleCtx, child, attemptProvider, turn, session.SessionID, writer, ev)
+				s.writeUnpromptedEvent(windowCtx, child, attemptProvider, turn, session.SessionID, writer, ev)
 			}
 			if admitted {
 				s.startIdleWatcher(child, attemptProvider, turn, session.SessionID, writer)
@@ -4254,7 +4269,7 @@ func (s *Supervisor) startIdleWatcher(child *childRuntime, provider runtime.Prov
 	if child.lifecycleCtx.Err() != nil {
 		return
 	}
-	ctx, cancel := context.WithCancel(child.lifecycleCtx)
+	ctx, cancel := context.WithCancel(s.unpromptedWindow(child))
 	eventCh, err := provider.Events(ctx, sessionID)
 	if err != nil {
 		cancel()
@@ -4289,8 +4304,9 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 		}
 		return
 	}
-	// The resolver waits on its own clock, so it runs beside the event stream.
-	go func() {
+	// The resolver waits on its own clock, so it runs beside the event stream,
+	// inside the window that owns it.
+	s.startUnpromptedResolve(child, func() {
 		err := cli.ResolvePermissionOutOfTurn(ctx, cli.OutOfTurnPermission{
 			Provider:      provider,
 			Turn:          turn,
@@ -4307,13 +4323,16 @@ func (s *Supervisor) writeUnpromptedEvent(ctx context.Context, child *childRunti
 			// A restored claim goes through the admission this path publishes
 			// under, so a child that started closing refuses it the same way.
 			RestoreClaim: func(requestID string, options []any) bool {
-				return s.claimUnpromptedRequest(child)(requestID, control.PermissionResolverNoResolver, options) == nil
+				if err := s.claimUnpromptedRequest(child)(requestID, control.PermissionResolverNoResolver, options); err != nil {
+					return false
+				}
+				return true
 			},
 		}, published)
 		if err != nil {
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s permission resolve: %v\n", child.id, err)
 		}
-	}()
+	})
 }
 
 // errChildClosing reports a request dropped because the child could not answer
@@ -4371,6 +4390,7 @@ func (s *Supervisor) claimUnpromptedRequest(child *childRuntime) func(string, co
 			// otherwise republish a live request invisibly.
 			return fmt.Errorf("%w: %s", cli.ErrPermissionClaimConflict, requestID)
 		}
+		s.trackUnpromptedClaim(child, requestID)
 		return nil
 	}
 }
@@ -4386,10 +4406,118 @@ func (s *Supervisor) unpromptedClaimAdmitted(child *childRuntime) bool {
 }
 
 func (s *Supervisor) stopIdleWatcher(child *childRuntime) {
+	child.unpromptedMu.Lock()
+	cancel := child.unpromptedCancel
+	child.unpromptedCancel, child.unpromptedCtx = nil, nil
+	child.unpromptedClosed = true
+	child.unpromptedMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if child.idleWatchCancel != nil {
 		child.idleWatchCancel()
 		<-child.idleWatchDone
 		child.idleWatchCancel, child.idleWatchDone = nil, nil
+	}
+	s.awaitUnpromptedResolvers(child)
+	s.releaseUnpromptedClaims(child)
+}
+
+// unpromptedJoinTimeout bounds the wait for a resolver the next attempt is
+// taking over. It matches the turn loop's permission join.
+const unpromptedJoinTimeout = 5 * time.Second
+
+// beginUnpromptedWindow opens one parked period and returns its context. The
+// drain that follows the attempt and the watcher that outlives it both resolve
+// inside this window, so the attempt that ends the period ends them together.
+func (s *Supervisor) beginUnpromptedWindow(child *childRuntime) context.Context {
+	ctx, cancel := context.WithCancel(child.lifecycleCtx)
+	child.unpromptedMu.Lock()
+	child.unpromptedCtx, child.unpromptedCancel = ctx, cancel
+	child.unpromptedClosed = false
+	child.unpromptedMu.Unlock()
+	return ctx
+}
+
+// unpromptedWindow is the context a resolver belongs to. A child with no window
+// open falls back to its own lifetime.
+func (s *Supervisor) unpromptedWindow(child *childRuntime) context.Context {
+	child.unpromptedMu.Lock()
+	defer child.unpromptedMu.Unlock()
+	if child.unpromptedCtx != nil {
+		return child.unpromptedCtx
+	}
+	if child.lifecycleCtx != nil {
+		return child.lifecycleCtx
+	}
+	return context.Background()
+}
+
+// startUnpromptedResolve runs one resolver inside the window, unless the window
+// has closed: a resolver started after its child moved on would claim a request
+// the next attempt already owns.
+func (s *Supervisor) startUnpromptedResolve(child *childRuntime, run func()) {
+	child.unpromptedMu.Lock()
+	if child.unpromptedClosed {
+		child.unpromptedMu.Unlock()
+		return
+	}
+	child.unpromptedCalls.Add(1)
+	child.unpromptedMu.Unlock()
+	go func() {
+		defer child.unpromptedCalls.Done()
+		run()
+	}()
+}
+
+// awaitUnpromptedResolvers waits for the window's resolvers to return, bounded so
+// a provider that ignores its context cannot hold the next attempt.
+func (s *Supervisor) awaitUnpromptedResolvers(child *childRuntime) {
+	done := make(chan struct{})
+	go func() {
+		child.unpromptedCalls.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(unpromptedJoinTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		fmt.Fprintf(s.stderrWriter(), "avenor stable: child %s unprompted resolver outlived %s\n", child.id, unpromptedJoinTimeout)
+	}
+}
+
+// trackUnpromptedClaim records a claim the window prepared, so the attempt that
+// follows can release it.
+func (s *Supervisor) trackUnpromptedClaim(child *childRuntime, requestID string) {
+	child.unpromptedMu.Lock()
+	defer child.unpromptedMu.Unlock()
+	if child.unpromptedClaims == nil {
+		child.unpromptedClaims = map[string]struct{}{}
+	}
+	child.unpromptedClaims[requestID] = struct{}{}
+}
+
+// releaseUnpromptedClaims ends the claims this window left behind. A request
+// that a resolver answered, or that the following attempt has already published
+// again, now belongs to someone else and is left alone: only a claim still
+// waiting for an owner is this window's to end.
+func (s *Supervisor) releaseUnpromptedClaims(child *childRuntime) {
+	child.unpromptedMu.Lock()
+	requests := make([]string, 0, len(child.unpromptedClaims))
+	for requestID := range child.unpromptedClaims {
+		requests = append(requests, requestID)
+	}
+	child.unpromptedClaims = nil
+	child.unpromptedMu.Unlock()
+	if s.control == nil {
+		return
+	}
+	for _, requestID := range requests {
+		if s.control.PermissionResolverState(child.id, requestID) != control.PermissionResolverNoResolver {
+			continue
+		}
+		s.control.EndPermissionClaim(child.id, requestID)
 	}
 }
 

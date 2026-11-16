@@ -118,19 +118,7 @@ func TestUnpromptedPermissionRequestGate(t *testing.T) {
 func TestOutOfTurnCancelLeavesTheRequestAnswerable(t *testing.T) {
 	socket := newStableSocketPath(t, "out-of-turn-cancel")
 	sup := newTestSupervisor(t, Config{ControlSocket: socket, MaxRuntimes: 1})
-	if err := sup.control.Start(socket); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { sup.control.Stop() })
-	conn, err := client.Dial(socket)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := conn.Identity(); err != nil {
-		t.Fatal(err)
-	}
-	attachOwnerForTest(t, conn, socket)
+	attachControlClient(t, sup, socket)
 
 	child := &childRuntime{id: "rt_cancel", lifecycleCtx: context.Background()}
 	options := []any{map[string]any{"optionId": "allow"}}
@@ -164,7 +152,11 @@ func TestOutOfTurnCancelLeavesTheRequestAnswerable(t *testing.T) {
 // path publishes under, so it is refused like any other claim on a closing
 // child and no claim is left that nothing owns.
 func TestOutOfTurnCancelOnAClosingChildRestoresNothing(t *testing.T) {
-	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "cancel-closing"), MaxRuntimes: 1})
+	socket := newStableSocketPath(t, "cancel-closing")
+	sup := newTestSupervisor(t, Config{ControlSocket: socket, MaxRuntimes: 1})
+	// A client is attached so the claim is not signalled as disconnected: that
+	// branch keeps the claim whatever the cancel path does.
+	attachControlClient(t, sup, socket)
 	child := &childRuntime{id: "rt_cancel_closing", lifecycleCtx: context.Background(), lc: lifecycleState{shutdown: shutdownRequested}}
 	options := []any{map[string]any{"optionId": "allow"}}
 	request := events.Event{
@@ -263,6 +255,26 @@ func TestOutOfTurnFileCancelLeavesTheRequestAnswerable(t *testing.T) {
 	if got := sup.control.DeliverPendingPermission(child.id, "a1", "allow", ""); got != control.PermissionAnswerNoResolver {
 		t.Fatalf("delivery state = %v, want NoResolver: a declined request stopped being answerable", got)
 	}
+}
+
+// attachControlClient starts the control socket and attaches an owner, so a
+// claim is not signalled as disconnected and the cancel path is the only one
+// that can hand it off.
+func attachControlClient(t *testing.T, sup *Supervisor, socket string) {
+	t.Helper()
+	if err := sup.control.Start(socket); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sup.control.Stop() })
+	conn, err := client.Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := conn.Identity(); err != nil {
+		t.Fatal(err)
+	}
+	attachOwnerForTest(t, conn, socket)
 }
 
 // stubProvider satisfies the provider a file handler requires at entry. A
@@ -500,4 +512,72 @@ func (p *askingProvider) answers() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.sent
+}
+
+// TestStopIdleWatcherReleasesOnlyUnclaimedRequests covers what the attempt that
+// follows a parked period takes over. A request still waiting for an owner is
+// released, because a replayed request with the same id would otherwise be
+// refused as already claimed; a request a resolver already owns is left alone.
+func TestStopIdleWatcherReleasesOnlyUnclaimedRequests(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "release-claims"), MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_release", lifecycleCtx: context.Background()}
+	sup.beginUnpromptedWindow(child)
+	publisher := sup.unpromptedPublisher(child, "session", nil)
+	publisher.Write = func(events.Event) error { return nil }
+	publisher.HasControlClient = func() bool { return false }
+	ask := func(requestID string) events.Event {
+		return events.Event{
+			Event:     "permission.request",
+			SessionID: "session",
+			Fields:    map[string]any{"request_id": requestID, "options": []any{map[string]any{"optionId": "allow"}}},
+		}
+	}
+	for _, requestID := range []string{"a1", "a2"} {
+		if _, _, err := publisher.Publish(ask(requestID)); err != nil {
+			t.Fatalf("publish %s: %v", requestID, err)
+		}
+	}
+	// The next attempt takes a2 over while the parked period is still open.
+	sup.control.SetPermissionResolverState(child.id, "a2", control.PermissionResolverReserved)
+
+	sup.stopIdleWatcher(child)
+
+	if got := sup.control.DeliverPendingPermission(child.id, "a1", "allow", ""); got != control.PermissionAnswerNotFound {
+		t.Fatalf("a1 delivery state = %v, want NotFound: the stale claim outlived the parked period", got)
+	}
+	if got := sup.control.DeliverPendingPermission(child.id, "a2", "allow", ""); got == control.PermissionAnswerNotFound {
+		t.Fatal("a2 was released: a claim someone else owns must survive the takeover")
+	}
+}
+
+// TestStopIdleWatcherJoinsTheWindowResolvers pins the join, not the cancel: the
+// resolver keeps working after the window is cancelled, so an implementation
+// that cancels and moves on returns while the resolver is still in flight.
+func TestStopIdleWatcherJoinsTheWindowResolvers(t *testing.T) {
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "join-resolvers"), MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_join", lifecycleCtx: context.Background()}
+	window := sup.beginUnpromptedWindow(child)
+	returned := make(chan struct{})
+	sup.startUnpromptedResolve(child, func() {
+		<-window.Done()
+		// Work that outlives the cancel: only a join can wait for it.
+		time.Sleep(200 * time.Millisecond)
+		close(returned)
+	})
+	sup.stopIdleWatcher(child)
+	select {
+	case <-returned:
+	default:
+		t.Fatal("stopIdleWatcher returned while its resolver was still running")
+	}
+	// A resolver started after the window closed never runs: it would claim a
+	// request the next attempt owns. The channel is read after a short wait, so
+	// a spawned goroutine has the chance to prove itself.
+	ran := make(chan struct{}, 1)
+	sup.startUnpromptedResolve(child, func() { ran <- struct{}{} })
+	select {
+	case <-ran:
+		t.Fatal("a resolver started after the window closed")
+	case <-time.After(50 * time.Millisecond):
+	}
 }
