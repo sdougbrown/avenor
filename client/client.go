@@ -821,8 +821,10 @@ func (c *Client) WorkflowCreate(template json.RawMessage) (map[string]any, error
 
 // WorkflowInstantiate creates a workflow instance from a stored template.
 // params supplies the instance parameters the template declares; an empty
-// params is omitted from the wire.
-func (c *Client) WorkflowInstantiate(templateID, templateVersion string, metadata map[string]any, params map[string]string) (map[string]any, error) {
+// params is omitted from the wire. idempotencyKey, when non-empty, makes a
+// retried request converge on the first attempt's workflow; reuse of the key
+// for a different template, version, or params is a conflict error.
+func (c *Client) WorkflowInstantiate(templateID, templateVersion string, metadata map[string]any, params map[string]string, idempotencyKey string) (map[string]any, error) {
 	req := map[string]any{
 		"template_id":      templateID,
 		"template_version": templateVersion,
@@ -832,6 +834,9 @@ func (c *Client) WorkflowInstantiate(templateID, templateVersion string, metadat
 	}
 	if len(params) > 0 {
 		req["params"] = params
+	}
+	if idempotencyKey != "" {
+		req["idempotency_key"] = idempotencyKey
 	}
 	var result map[string]any
 	err := c.Call("workflow.instantiate", req, &result)

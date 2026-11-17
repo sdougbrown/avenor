@@ -7,6 +7,10 @@
 // DisallowUnknownFields semantics and json struct tags are applied uniformly
 // across all formats. This keeps deferred or misspelled fields from silently
 // becoming no-ops regardless of how the author chose to write the file.
+//
+// Numeric strictness is JSON-shaped too: non-JSON numbers pass through
+// json.Marshal first. An integer-valued literal such as 3.0 or 1e2 therefore
+// decodes into an int field, though JSON rejects it directly.
 package configfile
 
 import (
@@ -34,19 +38,31 @@ const (
 	FormatTOML
 )
 
+// extensionFormats maps the file extensions configfile recognizes to the
+// format each one selects.
+var extensionFormats = map[string]Format{
+	".json": FormatJSON,
+	".yaml": FormatYAML,
+	".yml":  FormatYAML,
+	".toml": FormatTOML,
+}
+
 // DetectFormat infers the config format from the file extension. Unknown
 // extensions default to JSON so that existing callers that pass paths
 // without an explicit extension continue to work.
 func DetectFormat(path string) Format {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".yaml", ".yml":
-		return FormatYAML
-	case ".toml":
-		return FormatTOML
-	default:
-		return FormatJSON
+	if f, ok := extensionFormats[strings.ToLower(filepath.Ext(path))]; ok {
+		return f
 	}
+	return FormatJSON
+}
+
+// HasKnownExtension reports whether name's extension is one configfile
+// parses: .json, .yaml, .yml, or .toml. Callers that scan a directory use
+// it to skip files they cannot decode.
+func HasKnownExtension(name string) bool {
+	_, ok := extensionFormats[strings.ToLower(filepath.Ext(name))]
+	return ok
 }
 
 // Load reads a config file and decodes it into dst. The format is detected
