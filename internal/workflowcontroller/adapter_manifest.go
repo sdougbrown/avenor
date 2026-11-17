@@ -109,9 +109,10 @@ func (r *AdapterRegistry) IDs() []string {
 	return ids
 }
 
-// LoadAdapterRegistry loads every immediate *.json file in dir as one adapter
-// manifest. Subdirectories and files with extensions configfile does not
-// parse (.json, .yaml, .yml, .toml) are ignored; the filename is
+// LoadAdapterRegistry loads every immediate manifest file in dir as one
+// adapter manifest. Manifest files are the extensions configfile parses
+// (.json, .yaml, .yml, or .toml); subdirectories and other files are
+// ignored; the filename is
 // not the adapter ID. A missing directory yields an empty registry, not an
 // error. Loading is per manifest: an invalid or untrusted file is recorded as
 // a load error on the returned registry while valid manifests still load;
@@ -130,7 +131,7 @@ func LoadAdapterRegistry(dir string) (*AdapterRegistry, error) {
 	// file declaring the ID instead of silently keeping one of them.
 	byID := map[string][]*AdapterManifest{}
 	for _, entry := range entries {
-		if entry.IsDir() || !isConfigFormatFile(entry.Name()) {
+		if entry.IsDir() || !configfile.HasKnownExtension(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
