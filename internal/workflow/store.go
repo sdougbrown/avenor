@@ -243,7 +243,20 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 		return Snapshot{}, err
 	}
 	if !exists {
-		if cmd.Kind != CommandInstantiate {
+		// An events log without a snapshot is an orphaned write from a crash
+		// between appendEvents and writeSnapshot. The appended events were
+		// validated by the reducer before they reached the log, so replaying
+		// them from empty recovers the committed state; the command then runs
+		// against it, and an ExpectedRevision it does not expect fails honestly
+		// instead of silently re-applying over the orphan.
+		replayed, recovered, err := s.persistRecoveredOrphan(workflowID)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		if recovered {
+			snap, exists = replayed, true
+		}
+		if !exists && cmd.Kind != CommandInstantiate {
 			return Snapshot{}, fmt.Errorf("workflow %s does not exist", workflowID)
 		}
 	} else {
@@ -509,11 +522,24 @@ func (s *Store) LoadTemplate(templateID TemplateID, templateVersion TemplateVers
 func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
 	// Reads must not materialize an empty instance directory for a workflow
 	// that does not exist. Writes create the directory via ensureInstanceDir.
+	snapshotExists := true
 	if _, err := os.Stat(s.workflowPath(workflowID)); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return Snapshot{}, false, err
+		}
+		snapshotExists = false
+	}
+	if !snapshotExists {
+		// An events log without a snapshot is an orphaned write from a crash
+		// between appendEvents and writeSnapshot: the committed events remain
+		// authoritative. With no log at all, the workflow does not exist.
+		orphan, err := s.hasOrphanedLog(workflowID)
+		if err != nil {
+			return Snapshot{}, false, err
+		}
+		if !orphan {
 			return Snapshot{}, false, nil
 		}
-		return Snapshot{}, false, err
 	}
 	if err := os.MkdirAll(s.instanceDir(workflowID), StateDirPerm); err != nil {
 		return Snapshot{}, false, err
@@ -524,11 +550,64 @@ func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
 	}
 	defer unlock()
 	snap, exists, err := s.loadSnapshot(workflowID)
-	if err != nil || !exists {
-		return snap, exists, err
+	if err != nil {
+		return snap, false, err
+	}
+	if !exists {
+		return s.replayOrphanedEvents(workflowID)
 	}
 	replayed, _, _, err := replayEvents(snap, s.eventsPath(workflowID), s.policies)
 	return replayed, true, err
+}
+
+// replayOrphanedEvents recovers an instance whose events were appended but
+// whose snapshot was never written: it replays the log from empty, reporting
+// whether the replayed state is an existing instance. Read-only: the caller
+// decides whether to persist (persistRecoveredOrphan) or not (loadCurrent).
+func (s *Store) replayOrphanedEvents(workflowID WorkflowID) (Snapshot, bool, error) {
+	replayed, _, _, err := replayEvents(Snapshot{}, s.eventsPath(workflowID), s.policies)
+	if err != nil {
+		return replayed, true, err
+	}
+	if replayed.Instance.WorkflowID == "" {
+		return Snapshot{}, false, nil
+	}
+	return replayed, true, nil
+}
+
+// hasOrphanedLog reports whether the instance has an orphaned write — an
+// events log without a snapshot file — the single encoding of the crash
+// between appendEvents and writeSnapshot. Absent on both counts reads as no
+// orphan (the workflow does not exist).
+func (s *Store) hasOrphanedLog(workflowID WorkflowID) (bool, error) {
+	if _, err := os.Stat(s.workflowPath(workflowID)); err == nil {
+		return false, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	if _, err := os.Stat(s.eventsPath(workflowID)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// persistRecoveredOrphan replays the orphaned log from empty and persists the
+// recovered snapshot, so the instance stops being a read-only orphan. It
+// reports whether the instance exists after recovery. The caller holds the
+// instance lock; callers propagate or swallow replay errors per their surface
+// (see recoverOrphanedEvents for the catalog-swallowing variant).
+func (s *Store) persistRecoveredOrphan(workflowID WorkflowID) (Snapshot, bool, error) {
+	replayed, recovered, err := s.replayOrphanedEvents(workflowID)
+	if err != nil || !recovered {
+		return replayed, false, err
+	}
+	if err := s.writeSnapshot(workflowID, replayed); err != nil {
+		return Snapshot{}, false, err
+	}
+	return replayed, true, nil
 }
 
 // regenerateProjections regenerates derived projections for an instance after a

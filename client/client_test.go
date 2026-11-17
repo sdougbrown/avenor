@@ -905,9 +905,10 @@ func TestClientAnswerPermissionWithMessageOmitsEmpty(t *testing.T) {
 }
 
 // TestWorkflowInstantiateParamsWire pins the wire contract: params are sent
-// only when non-empty (omitted from the JSON when empty).
+// only when non-empty (omitted from the JSON when empty), and the
+// idempotency key rides on the request only when set.
 func TestWorkflowInstantiateParamsWire(t *testing.T) {
-	call := func(metadata map[string]any, params map[string]string) map[string]any {
+	call := func(metadata map[string]any, params map[string]string, idempotencyKey string) map[string]any {
 		t.Helper()
 		serverConn, clientConn := net.Pipe()
 		defer serverConn.Close()
@@ -931,7 +932,7 @@ func TestWorkflowInstantiateParamsWire(t *testing.T) {
 			serverConn.Write(respData)
 			done <- raw
 		}()
-		if _, err := c.WorkflowInstantiate("tmpl_1", "1", metadata, params); err != nil {
+		if _, err := c.WorkflowInstantiate("tmpl_1", "1", metadata, params, idempotencyKey); err != nil {
 			t.Fatalf("WorkflowInstantiate: %v", err)
 		}
 		select {
@@ -944,7 +945,7 @@ func TestWorkflowInstantiateParamsWire(t *testing.T) {
 	}
 
 	// Non-empty params are sent on the wire (nested under the JSON-RPC params object).
-	raw := call(nil, map[string]string{"worktree": "avenor-issue-130"})
+	raw := call(nil, map[string]string{"worktree": "avenor-issue-130"}, "")
 	outer, _ := raw["params"].(map[string]any)
 	if outer == nil {
 		t.Fatalf("params missing from request: %v", raw)
@@ -958,13 +959,25 @@ func TestWorkflowInstantiateParamsWire(t *testing.T) {
 	}
 
 	// Empty params are omitted from the wire.
-	raw = call(nil, nil)
+	raw = call(nil, nil, "")
 	outer, _ = raw["params"].(map[string]any)
 	if outer == nil {
 		t.Fatalf("params missing from request: %v", raw)
 	}
 	if _, hasParams := outer["params"]; hasParams {
 		t.Fatalf("params should be omitted when empty: %v", raw)
+	}
+
+	// An idempotency key rides on the request when set, and is omitted when not.
+	raw = call(nil, nil, "unit-42")
+	outer, _ = raw["params"].(map[string]any)
+	if got := outer["idempotency_key"]; got != "unit-42" {
+		t.Fatalf("idempotency_key = %v, want unit-42: %v", got, raw)
+	}
+	raw = call(nil, nil, "")
+	outer, _ = raw["params"].(map[string]any)
+	if _, has := outer["idempotency_key"]; has {
+		t.Fatalf("idempotency_key should be omitted when empty: %v", raw)
 	}
 }
 

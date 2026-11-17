@@ -436,7 +436,7 @@ Status and list are readable through the MCP `workflow` tool with `action: "cont
 
 Pass `--workflow-adapter-dir` to the stable command to point the supervisor at a directory of external-gate adapter manifests (default: `$XDG_CONFIG_HOME/avenor/workflow-adapters`, falling back to `~/.config/avenor/workflow-adapters`).
 
-Pass `--workflow-controller-dir` to point the supervisor at a directory of controller definition files, so a host can change a controller's settings declaratively instead of editing store state by hand (default: `$XDG_CONFIG_HOME/avenor/workflow-controllers`, falling back to `~/.config/avenor/workflow-controllers`). Each `*.json` file is one definition:
+Pass `--workflow-controller-dir` to point the supervisor at a directory of controller definition files, so a host can change a controller's settings declaratively instead of editing store state by hand (default: `$XDG_CONFIG_HOME/avenor/workflow-controllers`, falling back to `~/.config/avenor/workflow-controllers`). Each definition file is `.json`, `.yaml`, `.yml`, or `.toml` (other files in the directory are ignored):
 
 ```json
 { "controller_id": "review-pr-auto", "max_inflight": 3, "desired_state": "enabled" }
