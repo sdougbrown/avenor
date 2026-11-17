@@ -267,9 +267,6 @@ func fsyncEvidenceDirs(fsync func(string) error, syncRoot, leafDir string, creat
 
 // StageEvidence — public Store method (no workflow state transition).
 func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string, required bool, expectedSHA256 string) (StagedEvidence, error) {
-	if err := s.ensureInstanceDir(workflowID); err != nil {
-		return StagedEvidence{}, err
-	}
 	evID, size, digest, err := s.stageIntoFreshDir(workflowID, storedName, func(dir string) (int64, string, error) {
 		return stageInto(srcPath, dir, storedName, required, expectedSHA256, s.instanceDir(workflowID), s.syncDir)
 	})
@@ -292,6 +289,11 @@ func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string,
 func (s *Store) stageIntoFreshDir(workflowID WorkflowID, storedName string, stage func(dir string) (int64, string, error)) (EvidenceID, int64, string, error) {
 	evID, dir, err := s.prepareEvidenceDir(workflowID, storedName)
 	if err != nil {
+		return "", 0, "", err
+	}
+	// The directory is created only after the request is known to be valid, so a
+	// rejected id or stored name leaves nothing on disk.
+	if err := s.ensureInstanceDir(workflowID); err != nil {
 		return "", 0, "", err
 	}
 	size, digest, err := stage(dir)

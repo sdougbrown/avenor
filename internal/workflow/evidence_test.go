@@ -543,7 +543,14 @@ func TestStageEvidence_RemovesNestedFreshDirsWhenFsyncFails(t *testing.T) {
 		t.Fatalf("sibling staging: %v", err)
 	}
 
-	s.fsyncDir = func(string) error { return errors.New("injected fsync failure") }
+	// Fail only the leaf's own sync, so the nested subdirectory and the copy exist
+	// by the time cleanup runs: that is the shape this test is about.
+	s.fsyncDir = func(dir string) error {
+		if strings.Contains(dir, string(filepath.Separator)+"evidence"+string(filepath.Separator)) {
+			return errors.New("injected fsync failure")
+		}
+		return nil
+	}
 	if _, err := s.StageEvidence("wf-rollback", writeTestFile(t, "lost\n"), "logs/lost.txt", false, ""); err == nil {
 		t.Fatal("staging with a failing fsync succeeded")
 	}
@@ -809,5 +816,30 @@ func TestStageStreamDedupeStillSyncsDirectories(t *testing.T) {
 	}
 	if len(synced) == 0 {
 		t.Fatal("dedupe staging synced no directory, want the ancestor chain recorded")
+	}
+}
+
+// TestStageEvidenceRejectionTouchesNothing proves a rejected request leaves no
+// trace on disk: the id is validated before any directory is created, so a
+// traversal-bearing id cannot create a directory outside the instance namespace.
+func TestStageEvidenceRejectionTouchesNothing(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "workflow-root")
+	s := New(root)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	if _, err := s.StageEvidence(WorkflowID("../evil"), writeTestFile(t, "x\n"), "a.txt", false, ""); err == nil {
+		t.Fatal("staging with a traversal id succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "evil")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat escaped path: %v, want nothing created outside the root", err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "instances")); err == nil {
+		for _, entry := range entries {
+			if entry.Name() == "evil" {
+				t.Fatalf("instances holds %q, want the rejected id to leave nothing", entry.Name())
+			}
+		}
 	}
 }
