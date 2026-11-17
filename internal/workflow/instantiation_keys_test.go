@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // newIdempotencyFixture builds an ephemeral store + manager with the
@@ -525,6 +526,116 @@ func TestManagerInstantiateIdempotencyKeyNotBoundByFailedComposition(t *testing.
 	result := instantiateWithKey(t, m, "unit-42", nil)
 	if got, want := fmt.Sprint(result["revision"]), "1"; got != want {
 		t.Fatalf("revision = %s, want %s (key not consumed by the failed request)", got, want)
+	}
+}
+
+func TestStoreSweepRecoversOrphanedLog(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	wf := WorkflowID("wf_orphan_sweep")
+	mustInstantiate(t, s, wf)
+
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: exists=%v err=%v", ok, err)
+	}
+	past := time.Now().UTC().Add(-time.Hour)
+	snap = mustStoreApply(t, s, wf, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "claim-sweep",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "start", ActivationID: snap.Instance.Activations[0].ID},
+		LeaseID:          "sweep-lease",
+		Actor:            "alice",
+		Lease: &Lease{
+			ID:           "sweep-lease",
+			ActivationID: snap.Instance.Activations[0].ID,
+			Owner:        "alice",
+			AcquiredAt:   past.Add(-time.Minute),
+			ExpiresAt:    past,
+		},
+	})
+	if err := os.Remove(s.workflowPath(wf)); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
+	}
+
+	// The live detector must recover the orphaned log before sweeping, so the
+	// stale lease is expired and the instance is materialized.
+	expired, retained, err := s.sweepStaleLeases(wf, "stale", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("sweepStaleLeases: %v", err)
+	}
+	if expired != 1 || retained != 0 {
+		t.Fatalf("sweep = expired:%d retained:%d, want 1/0", expired, retained)
+	}
+	if _, err := os.Stat(s.workflowPath(wf)); err != nil {
+		t.Fatalf("snapshot not materialized by the sweep: %v", err)
+	}
+	snap, ok, err = s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent after sweep: exists=%v err=%v", ok, err)
+	}
+	act := activationByNode(&snap.Instance, "start")
+	if act.Status != ActivationLeaseExpired || act.ActiveLease != nil {
+		t.Fatalf("activation = %+v, want lease_expired with no lease", act)
+	}
+	var sawStale bool
+	for _, e := range readEvents(t, s, wf) {
+		if e.Kind == EventLeaseExpired && e.Reason == "stale" {
+			sawStale = true
+		}
+	}
+	if !sawStale {
+		t.Fatal(`event log has no lease_expired event with reason "stale"`)
+	}
+}
+
+func TestStoreCatalogSkipsUnreplayableOrphan(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	wf := WorkflowID("wf_healthy")
+	mustInstantiate(t, s, wf)
+
+	// One orphaned log that cannot replay (an empty event object fails the
+	// reducer); Catalog must still recover and list the healthy instance
+	// instead of failing the whole restart recovery on the corrupt orphan.
+	bad := WorkflowID("wf_corrupt_orphan")
+	if err := os.MkdirAll(s.instanceDir(bad), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.eventsPath(bad), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := s.Catalog()
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	sawHealthy, sawBad := false, false
+	for _, c := range list {
+		switch WorkflowID(c.WorkflowID) {
+		case wf:
+			sawHealthy = true
+		case bad:
+			sawBad = true
+		}
+	}
+	if !sawHealthy {
+		t.Fatalf("Catalog did not include the healthy instance %q: %+v", wf, list)
+	}
+	if sawBad {
+		t.Fatalf("Catalog included the unreplayable orphan %q", bad)
+	}
+
+	// The orphan itself reports not-exists through recovery.
+	if _, ok, err := s.recoverInstance(bad); err != nil || ok {
+		t.Fatalf("recoverInstance(orphan): exists=%v err=%v, want not-exists", ok, err)
 	}
 }
 

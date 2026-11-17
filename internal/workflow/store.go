@@ -150,14 +150,11 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 		// them from empty recovers the committed state; the command then runs
 		// against it, and an ExpectedRevision it does not expect fails honestly
 		// instead of silently re-applying over the orphan.
-		replayed, recovered, err := s.replayOrphanedEvents(workflowID)
+		replayed, recovered, err := s.persistRecoveredOrphan(workflowID)
 		if err != nil {
 			return Snapshot{}, err
 		}
 		if recovered {
-			if err := s.writeSnapshot(workflowID, replayed); err != nil {
-				return Snapshot{}, err
-			}
 			snap, exists = replayed, true
 		}
 		if !exists && cmd.Kind != CommandInstantiate {
@@ -393,7 +390,8 @@ func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
 
 // replayOrphanedEvents recovers an instance whose events were appended but
 // whose snapshot was never written: it replays the log from empty, reporting
-// whether the replayed state is an existing instance.
+// whether the replayed state is an existing instance. Read-only: the caller
+// decides whether to persist (persistRecoveredOrphan) or not (loadCurrent).
 func (s *Store) replayOrphanedEvents(workflowID WorkflowID) (Snapshot, bool, error) {
 	replayed, _, _, err := replayEvents(Snapshot{}, s.eventsPath(workflowID), s.policies)
 	if err != nil {
@@ -401,6 +399,22 @@ func (s *Store) replayOrphanedEvents(workflowID WorkflowID) (Snapshot, bool, err
 	}
 	if replayed.Instance.WorkflowID == "" {
 		return Snapshot{}, false, nil
+	}
+	return replayed, true, nil
+}
+
+// persistRecoveredOrphan replays the orphaned log from empty and persists the
+// recovered snapshot, so the instance stops being a read-only orphan. It
+// reports whether the instance exists after recovery. The caller holds the
+// instance lock; callers propagate or swallow replay errors per their surface
+// (see recoverOrphanedEvents for the catalog-swallowing variant).
+func (s *Store) persistRecoveredOrphan(workflowID WorkflowID) (Snapshot, bool, error) {
+	replayed, recovered, err := s.replayOrphanedEvents(workflowID)
+	if err != nil || !recovered {
+		return replayed, false, err
+	}
+	if err := s.writeSnapshot(workflowID, replayed); err != nil {
+		return Snapshot{}, false, err
 	}
 	return replayed, true, nil
 }

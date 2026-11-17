@@ -54,19 +54,11 @@ type instantiationKeyRecord struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
-// validateInstantiationKey bounds a caller-supplied key, matching
-// validateParamValue's rule for caller-supplied durable strings: keys land in
-// a durable record, so length and control characters are rejected up front.
+// validateInstantiationKey applies the shared durable-string rule to a
+// caller-supplied key; keys land in a durable record, so the same bounds as
+// instance params apply.
 func validateInstantiationKey(key string) error {
-	if len(key) > maxInstanceParamValueLength {
-		return fmt.Errorf("instantiation idempotency key exceeds %d characters", maxInstanceParamValueLength)
-	}
-	for _, r := range key {
-		if r < 0x20 || r == 0x7f {
-			return errors.New("instantiation idempotency key must not contain control characters")
-		}
-	}
-	return nil
+	return validateDurableString("instantiation idempotency key", key)
 }
 
 // lockInstantiationKeys acquires the root-scoped flock that serializes

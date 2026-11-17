@@ -84,7 +84,7 @@ func (s *Store) recoverOrphanedEvents(workflowID WorkflowID) (Snapshot, bool, er
 		return Snapshot{}, false, err
 	}
 	defer unlock()
-	snap, exists, err := s.replayOrphanedEvents(workflowID)
+	snap, exists, err := s.persistRecoveredOrphan(workflowID)
 	if err != nil {
 		// A log that cannot replay stays uncataloged: recovery must not fail
 		// the whole catalog on one unreadable instance (matches the pre-recovery
@@ -93,10 +93,7 @@ func (s *Store) recoverOrphanedEvents(workflowID WorkflowID) (Snapshot, bool, er
 		return Snapshot{}, false, nil
 	}
 	if !exists {
-		return snap, exists, err
-	}
-	if err := s.writeSnapshot(workflowID, snap); err != nil {
-		return Snapshot{}, false, err
+		return snap, false, nil
 	}
 	exp, err := s.appendExpiredLeases(workflowID, &snap)
 	if err != nil {
@@ -126,11 +123,11 @@ func (s *Store) materializeRecoveredSnapshot(workflowID WorkflowID) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	snap, recovered, err := s.replayOrphanedEvents(workflowID)
+	_, recovered, err := s.persistRecoveredOrphan(workflowID)
 	if err != nil || !recovered {
 		return err
 	}
-	return s.writeSnapshot(workflowID, snap)
+	return nil
 }
 
 // collectExpiredLeaseEvents builds lease-expired events for every stale lease
@@ -226,15 +223,12 @@ func (s *Store) sweepStaleLeases(workflowID WorkflowID, reason string, now time.
 		return 0, 0, err
 	}
 	if !exists {
-		replayed, recovered, rerr := s.replayOrphanedEvents(workflowID)
+		replayed, recovered, rerr := s.persistRecoveredOrphan(workflowID)
 		if rerr != nil {
 			return 0, 0, rerr
 		}
 		if !recovered {
 			return 0, 0, nil
-		}
-		if err := s.writeSnapshot(workflowID, replayed); err != nil {
-			return 0, 0, err
 		}
 		snap = replayed
 	}
