@@ -1135,3 +1135,58 @@ func TestResumeCarriesParkChoice(t *testing.T) {
 		}
 	})
 }
+
+// TestResumeDuringTeardownRefusesUntilTeardownJoins pins the cold-arm gate:
+// resume admission closes before provider teardown, so a resume arriving while
+// the prior run's teardown is still holding is refused as retryable, and the
+// retry after teardown completes succeeds.
+func TestResumeDuringTeardownRefusesUntilTeardownJoins(t *testing.T) {
+	t.Parallel()
+	owner := messaging.Caller{Kind: messaging.CallerOwner, RunID: "supervisor"}
+	provider := &countingCloseProvider{stableScriptedProvider: newParkedScriptedProvider("ses_resume_teardown", 2)}
+	gate := make(chan struct{})
+	provider.closeGate = gate
+	dir := t.TempDir()
+	sup := newResumeTurnSupervisor(t, "resume-teardown-gate", provider)
+	park := false
+	prior, err := sup.spawn(SpawnParams{Prompt: "start", Dir: dir, Label: "prior", Park: &park, SentinelFile: filepath.Join(dir, "prior.env")})
+	if err != nil {
+		t.Fatalf("spawn prior: %v", err)
+	}
+	priorChild := fetchChild(t, sup, prior.RuntimeID)
+	// The completion publication runs after provider teardown, so the hold is
+	// observable only through the provider's own Close count: once it reads 1,
+	// the run goroutine is parked inside teardown and runDone is still open.
+	deadline := time.Now().Add(5 * time.Second)
+	for provider.closeCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if provider.closeCount() == 0 {
+		t.Fatal("prior teardown never entered provider close")
+	}
+	// Teardown holds inside the provider's blocked Close, so the resume must
+	// refuse as retryable instead of opening the session in a second provider.
+	_, err = sup.Resume(owner, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+		SentinelFile: filepath.Join(dir, "next.env"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "teardown is still in progress") {
+		t.Fatalf("resume during teardown error = %v, want a retryable refusal", err)
+	}
+	close(gate)
+	select {
+	case <-priorChild.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prior teardown did not finish after release")
+	}
+	resumed, err := sup.Resume(owner, messaging.ResumeRequest{
+		RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
+		SentinelFile: filepath.Join(dir, "next.env"),
+	})
+	if err != nil {
+		t.Fatalf("resume after teardown: %v", err)
+	}
+	if resumed.RuntimeID == prior.RuntimeID {
+		t.Fatal("a park:false prior must resume cold; it has no parked runtime to continue")
+	}
+}
