@@ -1003,16 +1003,11 @@ func TestControllerPollFailedGateCommandDiscardsEvidence(t *testing.T) {
 	f.waitReviewStatus(t, workflow.ActivationAwaitingGate)
 	f.waitCursor(t, "pr-review")
 
-	// Break only the workflow commit: reads of the parked state succeed, but
-	// the gate command's event append fails after the evidence staged.
-	if os.Geteuid() == 0 {
-		t.Skip("file permissions do not block root; cannot force the commit failure")
-	}
-	eventsPath := filepath.Join(f.root, "instances", f.wf, "events.ndjson")
-	if err := os.Chmod(eventsPath, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(eventsPath, 0o644) })
+	// Break only the workflow commit: reads of the parked state succeed, but the
+	// gate command's event append fails before anything is recorded. The fault
+	// seam works for any test user, unlike a read-only file.
+	f.mgr.Store().SetAppendFault(func(string) error { return errors.New("injected append failure") })
+	t.Cleanup(func() { f.mgr.Store().SetAppendFault(nil) })
 
 	// The runner keeps polling: each cycle stages the adapter stdout, fails
 	// the gate command, and discards the evidence.
