@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Workflow state is private by default: a workflow root this version creates uses `0700` directories and `0600` files for templates, instances, snapshots, event logs, projections, and staged evidence, and the controller's adapter staging directory is owner-only. The root holds prompts, outputs, and evidence, so other local users must not read it. An existing root keeps its directory modes; this version tightens a snapshot, event log, template, or projection when it rewrites that file, and tightening the rest of a deployed root stays the operator's decision. Documented in [docs/workflow.md](docs/workflow.md).
+
 ### Added
 
 - `--workflow-controller-dir` on `avenor stable` and `WorkflowControllerDir` on the supervisor config: a host-owned directory of controller definition files (`{"controller_id", "max_inflight", "desired_state"}`) that the startup barrier reconciles into the controller store, so a controller's settings stay editable in a definition file instead of store state behind a running supervisor. A new definition creates the controller, a changed one updates `max_inflight` (new `max_inflight_changed` controller event) or reconciles `desired_state` with a recorded enable/disable, and a controller whose file was removed is left alone, never deleted. Per-file failures skip only their own controller; duplicate IDs across files reject every file declaring the ID. Default: `$XDG_CONFIG_HOME/avenor/workflow-controllers`, else `~/.config/avenor/workflow-controllers`. Documented in [docs/stable.md](docs/stable.md) and [docs/workflow-controller.md](docs/workflow-controller.md).

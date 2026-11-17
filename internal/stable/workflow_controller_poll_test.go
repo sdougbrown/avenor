@@ -457,6 +457,15 @@ func TestControllerPollAutoParkPassesWithEvidence(t *testing.T) {
 	if err := json.Unmarshal(raw, &parsed); err != nil || parsed["result"] != "passed" {
 		t.Fatalf("staged evidence = %s (%v), want the adapter stdout", raw, err)
 	}
+	// Adapter stdout is external data, so the staging directory production
+	// creates is owner-only.
+	stagingInfo, err := os.Stat(adapterStagingDir(f.root))
+	if err != nil {
+		t.Fatalf("stat adapter staging dir: %v", err)
+	}
+	if got := stagingInfo.Mode().Perm(); got != workflow.StateDirPerm {
+		t.Fatalf("adapter staging dir mode = %o, want %o", got, workflow.StateDirPerm)
+	}
 	// The merge node stays pending behind its human gate: no attempt, no
 	// gate decision, no merge.
 	merge := f.activationByNode(t, "merge")

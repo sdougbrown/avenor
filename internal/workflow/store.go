@@ -98,6 +98,20 @@ func (s *Store) eventsPath(workflowID WorkflowID) string {
 	return filepath.Join(s.instanceDir(workflowID), "events.ndjson")
 }
 
+// Workflow state is private by default: prompts, outputs, and staged evidence
+// can contain sensitive data, so the store creates its directories 0700 and its
+// files 0600. Exported so the packages that stage data under the same root use
+// the one policy instead of restating the numbers.
+//
+// A root created by an earlier version keeps its directories as they are, and
+// everything already staged keeps the mode it was written with. Files this
+// version replaces or chmods while rewriting them — snapshots, event logs, and
+// projections — end up owner-only.
+const (
+	StateDirPerm  os.FileMode = 0o700
+	StateFilePerm os.FileMode = 0o600
+)
+
 func (s *Store) lockPath(workflowID WorkflowID) string {
 	return filepath.Join(s.instanceDir(workflowID), string(workflowID)+".lock")
 }
@@ -106,7 +120,7 @@ func (s *Store) lockPath(workflowID WorkflowID) string {
 // workflow root, the templates directory, and the instances directory.
 func (s *Store) CreateRoot() error {
 	for _, dir := range []string{s.root, filepath.Join(s.root, "templates"), filepath.Join(s.root, "instances")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, StateDirPerm); err != nil {
 			return err
 		}
 	}
@@ -135,7 +149,7 @@ func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, erro
 }
 
 func (s *Store) ensureInstanceDir(workflowID WorkflowID) error {
-	return os.MkdirAll(s.instanceDir(workflowID), 0o755)
+	return os.MkdirAll(s.instanceDir(workflowID), StateDirPerm)
 }
 
 func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error) {
@@ -222,11 +236,17 @@ func (s *Store) loadSnapshot(workflowID WorkflowID) (Snapshot, bool, error) {
 
 // appendEvents durably appends complete JSON events to the NDJSON log.
 func (s *Store) appendEvents(workflowID WorkflowID, events []Event) error {
-	f, err := os.OpenFile(s.eventsPath(workflowID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(s.eventsPath(workflowID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, StateFilePerm)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	// A log an earlier version created keeps its mode through O_APPEND, while
+	// the snapshot beside it is rewritten owner-only. Tighten both, so one
+	// instance's files never end up with different access.
+	if err := f.Chmod(StateFilePerm); err != nil {
+		return err
+	}
 	var firstErr error
 	for _, e := range events {
 		data, err := json.Marshal(e)
@@ -257,7 +277,7 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	}
 	dir := s.instanceDir(workflowID)
 	path := s.workflowPath(workflowID)
-	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, StateFilePerm); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(dir)
@@ -272,7 +292,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	// serialized with a root-scoped file lock rather than a mutex so
 	// supervisors sharing a workflow root — the default multi-process setup
 	// — are mutually excluded too.
-	if err := os.MkdirAll(s.root, 0o755); err != nil {
+	if err := os.MkdirAll(s.root, StateDirPerm); err != nil {
 		return err
 	}
 	unlock, err := durablefile.Lock(filepath.Join(s.root, "templates.lock"))
@@ -281,7 +301,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	}
 	defer unlock()
 	dir := filepath.Join(s.root, "templates", string(templateID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, StateDirPerm); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, string(templateVersion)+".json")
@@ -318,13 +338,15 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 			}
 		}
 		if identical {
-			return nil
+			// Registration is a no-op, so nothing rewrites the file: tighten a
+			// template an earlier version stored readable.
+			return os.Chmod(path, StateFilePerm)
 		}
 		return &TemplateConflictError{TemplateID: templateID, TemplateVersion: templateVersion}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, StateFilePerm); err != nil {
 		return err
 	}
 	return durablefile.FsyncDir(dir)
@@ -370,7 +392,7 @@ func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
 			return Snapshot{}, false, nil
 		}
 	}
-	if err := os.MkdirAll(s.instanceDir(workflowID), 0o755); err != nil {
+	if err := os.MkdirAll(s.instanceDir(workflowID), StateDirPerm); err != nil {
 		return Snapshot{}, false, err
 	}
 	unlock, err := durablefile.Lock(s.lockPath(workflowID))

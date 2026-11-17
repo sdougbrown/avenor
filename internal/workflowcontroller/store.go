@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // ControllerStore applies commands to controller records under a single POSIX
@@ -104,7 +105,7 @@ func (s *ControllerStore) Create(controllerID string, maxInflight int) (Controll
 	if maxInflight <= 0 {
 		return ControllerRecord{}, fmt.Errorf("%w: max_inflight must be positive, got %d", ErrInvalidController, maxInflight)
 	}
-	if err := os.MkdirAll(s.controllerDir(controllerID), 0o755); err != nil {
+	if err := os.MkdirAll(s.controllerDir(controllerID), workflow.StateDirPerm); err != nil {
 		return ControllerRecord{}, err
 	}
 	unlock, err := s.lockController(controllerID)
@@ -781,11 +782,16 @@ func (s *ControllerStore) notifySubscribers() {
 // a torn line anywhere before the final one, so a partial write must not reach
 // the log.
 func (s *ControllerStore) appendEvents(controllerID string, events []ControllerEvent) error {
-	f, err := os.OpenFile(s.eventsPath(controllerID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(s.eventsPath(controllerID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, workflow.StateFilePerm)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	// O_APPEND leaves an existing file's mode alone, so a log an earlier
+	// version wrote readable would stay readable beside an owner-only snapshot.
+	if err := f.Chmod(workflow.StateFilePerm); err != nil {
+		return err
+	}
 	fi, err := f.Stat()
 	if err != nil {
 		return err
@@ -829,7 +835,7 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 	}
 	dir := s.controllerDir(controllerID)
 	path := s.snapshotPath(controllerID)
-	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, workflow.StateFilePerm); err != nil {
 		return err
 	}
 	if err := durablefile.FsyncDir(dir); err != nil {

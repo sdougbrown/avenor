@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // fakeClock is a manual clock for driving lease expiry in tests.
@@ -96,6 +98,65 @@ func mustAcquire(t *testing.T, s *ControllerStore, id, owner string) ControllerR
 		t.Fatalf("acquire %s for %s: acquired=%v err=%v", id, owner, acquired, err)
 	}
 	return rec
+}
+
+// TestCreateKeepsControllerStatePrivate proves a created controller directory is
+// owner-only: it holds the controller's snapshots and event log, and creating it
+// can create the shared workflow root.
+func TestCreateKeepsControllerStatePrivate(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStore(t)
+	mustCreate(t, s, "alpha", 1)
+	info, err := os.Stat(s.controllerDir("alpha"))
+	if err != nil {
+		t.Fatalf("stat controller dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != workflow.StateDirPerm {
+		t.Fatalf("controller dir mode = %o, want %o", got, workflow.StateDirPerm)
+	}
+	// The projection is derived, but it lives beside owner-only state, so it
+	// must not be readable by other local users either.
+	projPath := filepath.Join(s.controllerDir("alpha"), "controller.md")
+	projInfo, err := os.Stat(projPath)
+	if err != nil {
+		t.Fatalf("stat controller projection: %v", err)
+	}
+	if got := projInfo.Mode().Perm(); got != workflow.StateFilePerm {
+		t.Fatalf("controller projection mode = %o, want %o", got, workflow.StateFilePerm)
+	}
+
+	// A projection an earlier version wrote readable must be tightened the next
+	// time the store re-renders it, not only when it is first created.
+	if err := os.Chmod(projPath, 0o644); err != nil {
+		t.Fatalf("chmod projection: %v", err)
+	}
+	if _, err := s.SetDesiredState("alpha", DesiredEnabled, ""); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	projInfo, err = os.Stat(projPath)
+	if err != nil {
+		t.Fatalf("stat re-rendered projection: %v", err)
+	}
+	if got := projInfo.Mode().Perm(); got != workflow.StateFilePerm {
+		t.Fatalf("re-rendered projection mode = %o, want %o", got, workflow.StateFilePerm)
+	}
+
+	// The event log carries prompts and request tokens, so a legacy readable log
+	// must be tightened on the next append.
+	logPath := s.eventsPath("alpha")
+	if err := os.Chmod(logPath, 0o644); err != nil {
+		t.Fatalf("chmod event log: %v", err)
+	}
+	if _, err := s.SetDesiredState("alpha", DesiredDisabled, "privacy test"); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	logInfo, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat event log: %v", err)
+	}
+	if got := logInfo.Mode().Perm(); got != workflow.StateFilePerm {
+		t.Fatalf("event log mode = %o, want %o", got, workflow.StateFilePerm)
+	}
 }
 
 func TestCreateIdempotentAndConflict(t *testing.T) {

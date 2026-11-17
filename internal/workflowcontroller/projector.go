@@ -2,9 +2,10 @@ package workflowcontroller
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // WriteProjection renders the controller's diagnostic Markdown projection to
@@ -29,5 +30,5 @@ func WriteProjection(dir string, rec ControllerRecord) error {
 		b = append(b, "- Leader: none\n"...)
 	}
 	b = fmt.Appendf(b, "- Updated: %s\n", rec.UpdatedAt.UTC().Format(time.RFC3339))
-	return os.WriteFile(filepath.Join(dir, "controller.md"), b, 0o644)
+	return workflow.WritePrivateFile(filepath.Join(dir, "controller.md"), b)
 }
