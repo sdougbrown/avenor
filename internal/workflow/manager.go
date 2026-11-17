@@ -276,7 +276,7 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	}
 	wf := NewWorkflowID()
 	var materialized int
-	snap, err := m.instantiateTemplate(wf, template, &materialized, req.Params)
+	snap, err := m.instantiateTemplate(wf, template, nil, &materialized, req.Params)
 	if err != nil {
 		return nil, err
 	}
@@ -349,10 +349,11 @@ func (m *Manager) instantiateIdempotent(key string, template Template, params ma
 	}
 	// Composition validation runs before the record write, so a request whose
 	// tree cannot be built — unresolvable pins, a cycle, the instance bound —
-	// never consumes the key. instantiateTemplate rebuilds the same composition
-	// from the same inputs (child IDs derive from wf), so the pre-pass is pure
-	// validation.
-	if _, _, err := BuildComposition(wf, template, m.resolveTemplate); err != nil {
+	// never consumes the key. The prebuilt composition is passed through to
+	// instantiateTemplate (child IDs derive from wf), so the tree is built
+	// exactly once.
+	built, _, err := BuildComposition(wf, template, m.resolveTemplate)
+	if err != nil {
 		return nil, err
 	}
 	if !exists {
@@ -369,7 +370,7 @@ func (m *Manager) instantiateIdempotent(key string, template Template, params ma
 		}
 	}
 	var materialized int
-	snap, err := m.instantiateTemplate(wf, template, &materialized, params)
+	snap, err := m.instantiateTemplate(wf, template, &built, &materialized, params)
 	if err != nil {
 		return nil, err
 	}
@@ -380,19 +381,23 @@ func (m *Manager) instantiateIdempotent(key string, template Template, params ma
 }
 
 // instantiateTemplate materializes one workflow instance under wf for
-// template. It validates the template's composition — BuildComposition
-// enforcing the global instance bound over the whole descendant tree —
-// idempotently ensures each declared child instance exists (recursing into
-// nested compositions), and applies the parent's instantiate command with the
-// composition manifest recorded on the instance record. materialized, when
-// non-nil, is threaded through the recursion as a running count of instances
-// this call has materialized; the path rejects should the cumulative count
-// ever exceed DefaultMaximumCompositionInstances (defense in depth on top of
+// template. comp, when non-nil, supplies the prebuilt composition (validated
+// by the caller, e.g. an idempotent instantiate's pre-pass); nil builds and
+// validates the composition here. It idempotently ensures each declared child
+// instance exists (recursing into nested compositions), and applies the
+// parent's instantiate command with the composition manifest recorded on the
+// instance record. materialized, when non-nil, is threaded through the
+// recursion as a running count of instances this call has materialized; the
+// path rejects should the cumulative count ever exceed
+// DefaultMaximumCompositionInstances (defense in depth on top of
 // BuildComposition's tree bound).
-func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, materialized *int, params map[string]string) (Snapshot, error) {
-	comp, _, err := BuildComposition(wf, template, m.resolveTemplate)
-	if err != nil {
-		return Snapshot{}, err
+func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, comp *Composition, materialized *int, params map[string]string) (Snapshot, error) {
+	if comp == nil {
+		built, _, err := BuildComposition(wf, template, m.resolveTemplate)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		comp = &built
 	}
 	if materialized != nil {
 		*materialized++
@@ -465,7 +470,7 @@ func (m *Manager) ensureChildInstance(child CompositionChild, childParams map[st
 	if _, exists, err := m.store.loadCurrent(childID); err == nil && exists {
 		return childID, nil
 	}
-	if _, err := m.instantiateTemplate(childID, child.Template, materialized, childParams); err != nil {
+	if _, err := m.instantiateTemplate(childID, child.Template, nil, materialized, childParams); err != nil {
 		return "", err
 	}
 	return childID, nil

@@ -150,15 +150,15 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 		// them from empty recovers the committed state; the command then runs
 		// against it, and an ExpectedRevision it does not expect fails honestly
 		// instead of silently re-applying over the orphan.
-		replayed, n, _, err := replayEvents(Snapshot{}, s.eventsPath(workflowID), s.policies)
+		replayed, recovered, err := s.replayOrphanedEvents(workflowID)
 		if err != nil {
 			return Snapshot{}, err
 		}
-		if n > 0 {
+		if recovered {
 			if err := s.writeSnapshot(workflowID, replayed); err != nil {
 				return Snapshot{}, err
 			}
-			snap, exists = replayed, replayed.Instance.WorkflowID != ""
+			snap, exists = replayed, true
 		}
 		if !exists && cmd.Kind != CommandInstantiate {
 			return Snapshot{}, fmt.Errorf("workflow %s does not exist", workflowID)

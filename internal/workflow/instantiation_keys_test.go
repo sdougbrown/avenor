@@ -419,6 +419,69 @@ func TestManagerInstantiateIdempotencyKeyCompletesCrashedAttempt(t *testing.T) {
 	}
 }
 
+func TestStoreOrphanedLogRecoversForSubsequentCommands(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	wf := WorkflowID("wf_orphan_cmd")
+	mustInstantiate(t, s, wf)
+
+	// Drive one command so the log holds instantiate + claim, then remove the
+	// snapshot file: the crash-between-append-and-snapshot state.
+	snap, ok, err := s.loadCurrent(wf)
+	if err != nil || !ok {
+		t.Fatalf("loadCurrent: exists=%v err=%v", ok, err)
+	}
+	actID := snap.Instance.Activations[0].ID
+	snap = mustStoreApply(t, s, wf, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "claim-1",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "start", ActivationID: actID},
+		LeaseID:          "lease-1",
+		Actor:            "alice",
+	})
+	if err := os.Remove(s.workflowPath(wf)); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
+	}
+
+	// A subsequent non-instantiate command must recover the orphaned log and
+	// apply against the replayed state: the claim's start, against the lease
+	// the replayed claim holds.
+	snap = mustStoreApply(t, s, wf, Command{
+		Kind:             CommandStart,
+		ExpectedRevision: snap.Instance.Revision,
+		IdempotencyKey:   "start-1",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "start", ActivationID: actID, AttemptID: "att-1"},
+		LeaseID:          "lease-1",
+	})
+	if snap.Instance.Revision != 3 {
+		t.Fatalf("revision after recovered claim = %d, want 3", snap.Instance.Revision)
+	}
+
+	// The recovered snapshot is on disk, so later reads replay normally.
+	if _, err := os.Stat(s.workflowPath(wf)); err != nil {
+		t.Fatalf("snapshot not materialized after recovery: %v", err)
+	}
+	if _, ok, err := s.loadCurrent(wf); err != nil || !ok {
+		t.Fatalf("loadCurrent after recovery: exists=%v err=%v", ok, err)
+	}
+
+	// A stale ExpectedRevision against the recovered state fails honestly.
+	if _, err := s.ApplyCommand(wf, Command{
+		Kind:             CommandClaim,
+		ExpectedRevision: 1,
+		IdempotencyKey:   "claim-stale",
+		Identity:         ExecutionIdentity{WorkflowID: wf, NodeID: "start", ActivationID: actID},
+		LeaseID:          "lease-3",
+		Actor:            "alice",
+	}); err == nil {
+		t.Fatal("stale-revision claim applied, want revision mismatch")
+	}
+}
+
 func TestManagerInstantiateWithoutKeyMintsFreshIDs(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
