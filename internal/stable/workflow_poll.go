@@ -186,7 +186,7 @@ func (s *Supervisor) applyPollResult(controllerID string, cursor workflowcontrol
 		}
 		// Stage the exact bounded stdout as evidence under the workflow root.
 		root := wstore.Root()
-		if err := os.MkdirAll(adapterStagingDir(root), 0o755); err != nil {
+		if err := os.MkdirAll(adapterStagingDir(root), 0o700); err != nil {
 			return err
 		}
 		tmp, err := os.CreateTemp(adapterStagingDir(root), "poll-*.json")

@@ -37,7 +37,7 @@ func mdEsc(s string) string {
 // A projection is a derived artifact: callers (the store) treat an error as
 // non-fatal, so this never blocks a committed state transition.
 func WriteProjections(dir string, snap Snapshot) error {
-	if err := os.WriteFile(filepath.Join(dir, "workflow.md"), []byte(ProjectWorkflowMD(snap)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "workflow.md"), []byte(ProjectWorkflowMD(snap)), stateFilePerm); err != nil {
 		return err
 	}
 	for _, nodeID := range distinctNodes(snap.Instance.Activations) {
@@ -45,15 +45,15 @@ func WriteProjections(dir string, snap Snapshot) error {
 			continue // never write outside the instance dir (path traversal guard)
 		}
 		nodeDir := filepath.Join(dir, "nodes", string(nodeID))
-		if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		if err := os.MkdirAll(nodeDir, stateDirPerm); err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(nodeDir, "execution.md"), []byte(ProjectExecutionMD(snap, nodeID)), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(nodeDir, "execution.md"), []byte(ProjectExecutionMD(snap, nodeID)), stateFilePerm); err != nil {
 			return err
 		}
 		for i, gi := range gatesForNode(snap, nodeID) {
 			name := fmt.Sprintf("review-%d.md", i+1)
-			if err := os.WriteFile(filepath.Join(nodeDir, name), []byte(ProjectReviewMD(snap, gi)), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(nodeDir, name), []byte(ProjectReviewMD(snap, gi)), stateFilePerm); err != nil {
 				return err
 			}
 		}

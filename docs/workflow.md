@@ -85,9 +85,16 @@ The workflow root separates reusable templates from instantiated workflows:
 ```
 
 `workflow.json` is the authoritative snapshot. `events.ndjson` is the
-append-only history and recovery source. The `.md` files are **generated
-projections**, not agent-authored inputs. The store applies each command under
-one POSIX file lock: load the snapshot, validate the command, append the event
+append-only history and recovery source.
+
+The root holds prompts, outputs, and staged evidence, so a root this version
+creates is **private to its owner**: directories are created `0700` and files
+`0600`. A root created by an earlier version keeps the modes it has —
+tightening an existing deployment (and its snapshots and evidence) is the
+operator's responsibility, never a silent migration.
+
+The `.md` files are **generated projections**, not agent-authored inputs. The
+store applies each command under one POSIX file lock: load the snapshot, validate the command, append the event
 batch (fsync), atomically replace the snapshot, and regenerate projections. A
 crash after the event append but before the snapshot replace is recovered by
 replay.
