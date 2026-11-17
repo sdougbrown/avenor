@@ -752,3 +752,40 @@ func sha256OfString(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
 }
+
+// TestStageStreamDedupeStillSyncsDirectories proves the dedupe path is not a
+// shortcut past durability. A second staging of identical content into the same
+// stored path reuses the file, and must still record the directory entries a
+// killed earlier attempt may have left unsynced.
+func TestStageStreamDedupeStillSyncsDirectories(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "workflow-root")
+	s := New(root)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	instanceDir := s.instanceDir("wf-dedupe")
+	destDir := filepath.Join(instanceDir, "evidence", "ev-same")
+	if err := os.MkdirAll(destDir, StateDirPerm); err != nil {
+		t.Fatalf("mkdir dest: %v", err)
+	}
+	content := "same bytes\n"
+	if _, _, err := stageStream(strings.NewReader(content), sha256OfString(content), destDir, "a.txt", false, "", instanceDir, nil); err != nil {
+		t.Fatalf("first staging: %v", err)
+	}
+	var synced []string
+	fsync := func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	size, digest, err := stageStream(strings.NewReader(content), sha256OfString(content), destDir, "a.txt", false, "", instanceDir, fsync)
+	if err != nil {
+		t.Fatalf("dedupe staging: %v", err)
+	}
+	if size == 0 || digest != sha256OfString(content) {
+		t.Fatalf("dedupe staging = %d/%s, want the staged file's size and digest", size, digest)
+	}
+	if len(synced) == 0 {
+		t.Fatal("dedupe staging synced no directory, want the ancestor chain recorded")
+	}
+}

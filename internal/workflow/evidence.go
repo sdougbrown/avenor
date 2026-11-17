@@ -124,7 +124,10 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 
 // stageStream is the core primitive for staging evidence. It copies src into the
 // immutable evidence directory, refusing to overwrite a different file of the same
-// name. It then re-verifies the bytes that landed on disk.
+// name. It then re-verifies the bytes that landed on disk. digest must be the
+// digest of src's bytes: it decides the dedupe comparison and is recorded as the
+// staged digest. syncRoot must contain destDir; a mismatch is refused rather than
+// silently syncing only the leaf.
 func stageStream(src io.Reader, digest, destDir, storedName string, required bool, expectedSHA string, syncRoot string, fsync func(string) error) (int64, string, error) {
 	if syncRoot != "" {
 		rel, err := filepath.Rel(syncRoot, destDir)
@@ -154,7 +157,13 @@ func stageStream(src io.Reader, digest, destDir, storedName string, required boo
 			return 0, "", err
 		}
 		if existing == digest {
-			return dstat.Size(), existing, nil // dedupe: reuse the staged file
+			// Dedupe reuses the staged file, but the directories holding it may
+			// still be unrecorded if the attempt that created them was
+			// interrupted, so they are synced here too.
+			if err := fsyncEvidenceDirs(fsync, syncRoot, destDir, created); err != nil {
+				return 0, "", err
+			}
+			return dstat.Size(), existing, nil
 		}
 		return 0, "", fmt.Errorf("evidence: stored path %q already exists with different content", storedName)
 	} else if !errors.Is(err, fs.ErrNotExist) {
