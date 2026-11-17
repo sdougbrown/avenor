@@ -13,7 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"log"
 	"time"
 )
 
@@ -153,8 +153,7 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 	for _, a := range req.Artifacts {
 		se, err := m.store.StageEvidence(wf, a.SrcPath, a.StoredPath, a.NonEmpty, a.SHA256)
 		if err != nil {
-			cleanupStaged(m, wf, staged)
-			return nil, fmt.Errorf("stage evidence: %w", err)
+			return nil, fmt.Errorf("stage evidence: %w", discardStaged(m, wf, staged, err))
 		}
 		staged = append(staged, se)
 	}
@@ -185,12 +184,10 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 	for attempt := 0; attempt < maxCompleteAttempts; attempt++ {
 		fresh, exists, err := m.store.loadCurrent(wf)
 		if err != nil {
-			cleanupStaged(m, wf, staged)
-			return nil, err
+			return nil, discardStaged(m, wf, staged, err)
 		}
 		if !exists {
-			cleanupStaged(m, wf, staged)
-			return nil, fmt.Errorf("workflow not found: %s", wf)
+			return nil, discardStaged(m, wf, staged, fmt.Errorf("workflow not found: %s", wf))
 		}
 		// When the completion is gated the branch payload is suppressed: the
 		// activation is parked awaiting_gate and NO branch may be followed
@@ -201,8 +198,7 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 		if !gated && target != "" {
 			branch, err = json.Marshal(&Transition{Outcome: req.Outcome, TargetNodeID: target, ActivationID: act.ID})
 			if err != nil {
-				cleanupStaged(m, wf, staged)
-				return nil, fmt.Errorf("encode transition: %w", err)
+				return nil, fmt.Errorf("encode transition: %w", discardStaged(m, wf, staged, err))
 			}
 		}
 		outputs := buildCompleteOutputs(node, &fresh.Instance, req, act.ID, evIDs, now)
@@ -240,7 +236,10 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 			}, nil
 		}
 		if errors.Is(err, errDuplicateIdempotency) {
-			cleanupStaged(m, wf, staged)
+			// Already recorded for this attempt, so its evidence is already on the
+			// instance: this call's freshly staged copies belong to no fact. There
+			// is no error to carry a leftover, so it is logged.
+			reportDiscardFailure(wf, cleanupStaged(m, wf, staged))
 			return map[string]any{
 				"idempotent":        true,
 				"already_completed": true,
@@ -248,13 +247,16 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 			}, nil
 		}
 		if !errors.Is(err, errRevisionMismatch) {
-			cleanupStaged(m, wf, staged)
+			// A durable command's evidence is referenced by the event log; a replay
+			// would recover the reference, so it must stay.
+			if !errors.Is(err, ErrCommandDurable) {
+				err = discardStaged(m, wf, staged, err)
+			}
 			return nil, err
 		}
 		// Optimistic-concurrency conflict; re-read under a fresh lock and retry.
 	}
-	cleanupStaged(m, wf, staged)
-	return nil, fmt.Errorf("complete attempt %s: revision kept moving under concurrent commands", req.AttemptID)
+	return nil, discardStaged(m, wf, staged, fmt.Errorf("complete attempt %s: revision kept moving under concurrent commands", req.AttemptID))
 }
 
 // validateCompleteOutputValues hardens the primitive values of a completion
@@ -422,12 +424,53 @@ func nextRevisionFor(inst *WorkflowInstance, defID OutputID) int64 {
 	return rev + 1
 }
 
-// cleanupStaged best-effort removes the evidence directories staged during a
-// failed completion so the store and filesystem never diverge. Errors are
-// ignored: the snapshot was not advanced, so a leftover directory is inert
-// (never referenced by any committed evidence record).
-func cleanupStaged(m *Manager, wf WorkflowID, staged []StagedEvidence) {
+// cleanupStaged removes the evidence directories staged during a failed call so
+// the store and filesystem do not diverge. A leftover directory is inert (no
+// committed evidence record references it), but it still holds the captured
+// content, so each removal that fails is reported with its evidence ID.
+func cleanupStaged(m *Manager, wf WorkflowID, staged []StagedEvidence) error {
+	var failures []error
 	for _, se := range staged {
-		os.RemoveAll(evidenceDir(m.store.instanceDir(wf), se.EvidenceID))
+		if err := m.store.DiscardEvidence(wf, se.EvidenceID); err != nil {
+			failures = append(failures, fmt.Errorf("evidence: discard orphaned evidence %s: %w", se.EvidenceID, err))
+		}
 	}
+	return errors.Join(failures...)
+}
+
+// discardStaged removes the copies a failed call staged and reports any it could
+// not remove alongside the failure that stopped the call, so the original error
+// keeps its identity and the orphan keeps its name. It is only for callers that
+// already return a failure: a successful or durable outcome keeps its copies, so
+// a leftover there is logged by reportDiscardFailure instead.
+func discardStaged(m *Manager, wf WorkflowID, staged []StagedEvidence, cause error) error {
+	if cleanupErr := cleanupStaged(m, wf, staged); cleanupErr != nil {
+		return errors.Join(cause, cleanupErr)
+	}
+	return cause
+}
+
+// reportDiscardFailure logs a copy a successful or durable outcome could not
+// discard. There is no error channel for it, and turning the outcome into a
+// failure would reclassify a command whose events are already recorded.
+func reportDiscardFailure(wf WorkflowID, err error) {
+	if err != nil {
+		log.Printf("workflow %s: %v", wf, err)
+	}
+}
+
+// CommandRecorded reports whether a workflow command's answer recorded a new
+// fact, rather than answering an idempotent replay. Callers that staged evidence
+// for the command use it to decide whether their copy belongs to a fact: an
+// idempotent answer means the fact was already recorded, so this call's copy is
+// the caller's to discard. It is the one place that reads the manager's
+// "idempotent" marker, so a new idempotent answer cannot be misclassified at a
+// distant call site.
+func CommandRecorded(answer any) bool {
+	result, ok := answer.(map[string]any)
+	if !ok {
+		return true
+	}
+	idempotent, _ := result["idempotent"].(bool)
+	return !idempotent
 }

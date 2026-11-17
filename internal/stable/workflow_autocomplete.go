@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sdougbrown/avenor/internal/workflow"
@@ -76,6 +77,15 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 		_, err = mgr.CompleteAuto(ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, ec.OwnerToken, plan)
 	}
 	if err != nil {
+		if errors.Is(err, workflow.ErrCommandDurable) {
+			// The completion's events are durable: a replay applies it, so the
+			// node is satisfied and the stale lease is harmless. Do not promise a
+			// replacement attempt the log already rules out.
+			fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: supervisor auto-completion is recorded durably but its snapshot could not be materialized; replay recovers it and no replacement attempt is needed: %v\n",
+				ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
+			hb.StopAndWait()
+			return
+		}
 		// Residual: the success fact is recorded but the completion (evidence
 		// staging, output recording, or the atomic command itself) failed. The
 		// heartbeat stops here, so the lease goes stale; the live lease-expiry

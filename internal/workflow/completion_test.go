@@ -835,3 +835,25 @@ func TestCommandCompleteAppendOnlyRevisionE2E(t *testing.T) {
 		t.Fatalf("workflow = %q terminal %q, want completed/ok", snap.Instance.Status, snap.Instance.TerminalOutcome)
 	}
 }
+
+// TestCommandRecordedClassifiesIdempotentAnswers proves the shared classifier
+// reads the manager's idempotent marker, so a caller that staged evidence for a
+// replayed command knows its copy belongs to no fact.
+func TestCommandRecordedClassifiesIdempotentAnswers(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		answer any
+		want   bool
+	}{
+		{"fresh apply", map[string]any{"status": "satisfied"}, true},
+		{"idempotent replay", map[string]any{"idempotent": true, "already_completed": true}, false},
+		{"typed answer", struct{ Status string }{Status: "satisfied"}, true},
+		{"nil answer", nil, true},
+	}
+	for _, tc := range cases {
+		if got := CommandRecorded(tc.answer); got != tc.want {
+			t.Fatalf("%s: CommandRecorded = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

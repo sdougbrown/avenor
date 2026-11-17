@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,13 +170,13 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 	}
 	// i) First stage
 	a := writeTestFile(t, "same content")
-	_, _, err := stageInto(a, destDir, "out.txt", false, "")
+	_, _, err := stageInto(a, destDir, "out.txt", false, "", nil)
 	if err != nil {
 		t.Fatalf("stageInto first call failed: %v", err)
 	}
 	// ii) Dedupe identical content
 	b := writeTestFile(t, "same content")
-	size, sig, err := stageInto(b, destDir, "out.txt", false, "")
+	size, sig, err := stageInto(b, destDir, "out.txt", false, "", nil)
 	if err != nil {
 		t.Fatalf("stageInto second call (dedupe) failed: %v", err)
 	}
@@ -196,7 +197,7 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 	}
 	// iii) Different content should fail
 	c := writeTestFile(t, "DIFFERENT")
-	_, _, err = stageInto(c, destDir, "out.txt", false, "")
+	_, _, err = stageInto(c, destDir, "out.txt", false, "", nil)
 	if err == nil {
 		t.Fatal("stageInto with different content should have failed")
 	}
@@ -325,7 +326,7 @@ func TestStageEvidence_CopyFailure(t *testing.T) {
 	src := writeTestFile(t, "content that cannot land")
 	// destDir sits under a path component that is a regular file, so the
 	// destination cannot be created and staging must fail with an error.
-	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, ""); err == nil {
+	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, "", nil); err == nil {
 		t.Fatal("expected copy failure for unwritable destination")
 	}
 }
@@ -357,5 +358,26 @@ func TestStageEvidence_SourceRewriteLeavesEvidenceIntact(t *testing.T) {
 	}
 	if digest := sha256Hex(string(storedData)); digest != got.SHA256 {
 		t.Fatalf("staged evidence digest = %s, want the recorded %s", digest, got.SHA256)
+	}
+}
+
+// TestStageEvidenceLeavesNoDirectoryWhenStagingFails proves a failed stage
+// removes the directory it minted, so no caller has to track a copy it never
+// received an ID for.
+func TestStageEvidenceLeavesNoDirectoryWhenStagingFails(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	src := writeTestFile(t, "captured\n")
+	injected := errors.New("injected sync failure")
+	s.evidenceFsync = func(string) error { return injected }
+	if _, err := s.StageEvidence("wf1", src, "artifact.json", false, ""); !errors.Is(err, injected) {
+		t.Fatalf("error = %v, want the staging failure", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(s.Root(), "instances", "wf1", "evidence"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("read evidence root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("evidence entries = %v, want none after a failed stage", entries)
 	}
 }
