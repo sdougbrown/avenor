@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // WriteProjection renders the controller's diagnostic Markdown projection to
@@ -29,5 +31,11 @@ func WriteProjection(dir string, rec ControllerRecord) error {
 		b = append(b, "- Leader: none\n"...)
 	}
 	b = fmt.Appendf(b, "- Updated: %s\n", rec.UpdatedAt.UTC().Format(time.RFC3339))
-	return os.WriteFile(filepath.Join(dir, "controller.md"), b, 0o644)
+	path := filepath.Join(dir, "controller.md")
+	if err := os.WriteFile(path, b, workflow.StateFilePerm); err != nil {
+		return err
+	}
+	// WriteFile keeps an existing file's mode, so a projection written by an
+	// earlier version would stay readable beside owner-only state.
+	return os.Chmod(path, workflow.StateFilePerm)
 }

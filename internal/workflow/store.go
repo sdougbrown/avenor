@@ -103,9 +103,10 @@ func (s *Store) eventsPath(workflowID WorkflowID) string {
 // files 0600. Exported so the packages that stage data under the same root use
 // the one policy instead of restating the numbers.
 //
-// A root created by an earlier version keeps its directories as they are: this
-// version tightens the files it rewrites (snapshots, event logs, projections)
-// and leaves everything already staged at the mode it was written with.
+// A root created by an earlier version keeps its directories as they are, and
+// everything already staged keeps the mode it was written with. Files this
+// version replaces or chmods while rewriting them — snapshots, event logs, and
+// projections — end up owner-only.
 const (
 	StateDirPerm  os.FileMode = 0o700
 	StateFilePerm os.FileMode = 0o600

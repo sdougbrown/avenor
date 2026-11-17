@@ -75,8 +75,12 @@ func TestNewWorkflowStateIsPrivateByDefault(t *testing.T) {
 func TestExistingWorkflowRootKeepsItsMode(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "workflow-root")
+	// Mkdir applies the umask, so pin the mode this test is about.
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatalf("chmod root: %v", err)
 	}
 	if err := New(root).CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
@@ -87,5 +91,37 @@ func TestExistingWorkflowRootKeepsItsMode(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o755 {
 		t.Fatalf("existing root mode = %o, want it left at 755", got)
+	}
+}
+
+// TestRewrittenEventLogIsTightened proves an event log an earlier version wrote
+// world-readable becomes owner-only when this version appends to it, so it never
+// diverges from the snapshot beside it.
+func TestRewrittenEventLogIsTightened(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	wf := WorkflowID("wf-legacy-log")
+	mustInstantiate(t, s, wf)
+	logPath := s.eventsPath(wf)
+	if err := os.Chmod(logPath, 0o644); err != nil {
+		t.Fatalf("chmod log: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		ID:               NewCommandID(),
+		Kind:             CommandCancel,
+		ExpectedRevision: 1,
+		IdempotencyKey:   "cancel-" + string(wf),
+		Identity:         ExecutionIdentity{WorkflowID: wf},
+		Actor:            "operator",
+		Reason:           "privacy test",
+	}); err != nil {
+		t.Fatalf("ApplyCommand: %v", err)
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat log: %v", err)
+	}
+	if got := info.Mode().Perm(); got != StateFilePerm {
+		t.Fatalf("event log mode = %o, want %o", got, StateFilePerm)
 	}
 }

@@ -114,6 +114,15 @@ func TestCreateKeepsControllerStatePrivate(t *testing.T) {
 	if got := info.Mode().Perm(); got != workflow.StateDirPerm {
 		t.Fatalf("controller dir mode = %o, want %o", got, workflow.StateDirPerm)
 	}
+	// The projection is derived, but it lives beside owner-only state, so it
+	// must not be readable by other local users either.
+	projInfo, err := os.Stat(filepath.Join(s.controllerDir("alpha"), "controller.md"))
+	if err != nil {
+		t.Fatalf("stat controller projection: %v", err)
+	}
+	if got := projInfo.Mode().Perm(); got != workflow.StateFilePerm {
+		t.Fatalf("controller projection mode = %o, want %o", got, workflow.StateFilePerm)
+	}
 }
 
 func TestCreateIdempotentAndConflict(t *testing.T) {
