@@ -190,6 +190,12 @@ func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string,
 
 	size, digest, err := stageInto(srcPath, dir, storedName, required, expectedSHA256, s.evidenceFsync)
 	if err != nil {
+		// The ID was minted for this attempt, so its directory holds nothing but
+		// this attempt's partial copy. Removing it here keeps every caller's
+		// cleanup complete: a failed stage leaves no copy to name.
+		if discardErr := s.DiscardEvidence(workflowID, evID); discardErr != nil {
+			return StagedEvidence{}, errors.Join(err, fmt.Errorf("evidence: discard orphaned evidence %s: %w", evID, discardErr))
+		}
 		return StagedEvidence{}, err
 	}
 
@@ -202,9 +208,10 @@ func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string,
 	}, nil
 }
 
-// DiscardEvidence removes one staged evidence directory. It exists for the
-// poller's failure path: a gate command that fails to land must not leave
-// freshly staged evidence orphaned in the instance. Discarding an absent
+// DiscardEvidence removes one staged evidence directory whose copy no committed
+// record names: a gate command that failed to land, or a completion whose staging
+// failed part-way. It removes that evidence ID's own directory only, never the
+// shared evidence, instance, or instances directories. Discarding an absent
 // evidence ID is a no-op.
 func (s *Store) DiscardEvidence(workflowID WorkflowID, id EvidenceID) error {
 	if !safeComponent(string(workflowID)) || !safeComponent(string(id)) {

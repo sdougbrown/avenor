@@ -1173,82 +1173,6 @@ func TestControllerPollDurableGateCommandKeepsEvidence(t *testing.T) {
 	}
 }
 
-// TestControllerPollIdempotentReplayDiscardsItsEvidence proves the other half of
-// the poll apply contract. A poll the manager answers idempotently leaves the gate
-// referencing the copy the first apply staged, because the id was already
-// recorded. The replay's own copy then belongs to no fact and is discarded instead
-// of accumulating beside the recorded one. The replay is addressed through the
-// recorded gate, so no poll cycle has to be raced to produce it.
-func TestControllerPollIdempotentReplayDiscardsItsEvidence(t *testing.T) {
-	t.Parallel()
-	f := newPollFixture(t, "poll-idempotent", "poll-idempotent-tmpl",
-		map[string]string{"gh-review": "passed.sh"},
-		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
-	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
-	f.waitReviewStatus(t, workflow.ActivationSatisfied)
-	f.sup.stopControllerLoop("c1")
-
-	gates := f.gateInstances(t)
-	if len(gates) != 1 || len(gates[0].EvidenceIDs) != 1 {
-		t.Fatalf("gate instances = %+v, want the recorded external result", gates)
-	}
-	gate := gates[0]
-	recorded := gate.EvidenceIDs[0]
-	observedAt := time.Now().UTC()
-	if gate.ObservedAt != nil {
-		observedAt = *gate.ObservedAt
-	}
-	cursor := workflowcontroller.PollCursor{
-		WorkflowID:   f.wf,
-		NodeID:       "review",
-		ActivationID: string(gate.ActivationID),
-		GateID:       string(gate.GateID),
-		AdapterID:    "gh-review",
-		SubjectHash:  workflow.SubjectHash(gate.Subject),
-		PollID:       gate.PollID,
-	}
-	replayResult := &workflowcontroller.AdapterResult{
-		Result:       "passed",
-		ObservedAt:   observedAt,
-		ResponseHash: gate.ResponseHash,
-	}
-
-	// The replay stages its own copy and then asks the manager to record the same
-	// poll again; the answer is idempotent, so this copy is the caller's to remove.
-	src := filepath.Join(t.TempDir(), "adapter-response.json")
-	if err := os.WriteFile(src, []byte(wantPollAdapterStdout), 0o600); err != nil {
-		t.Fatalf("write replay response: %v", err)
-	}
-	wf := workflow.WorkflowID(f.wf)
-	replay, err := f.mgr.Store().StageEvidence(wf, src, "adapter-response.json", true, "")
-	if err != nil {
-		t.Fatalf("stage the replay's copy: %v", err)
-	}
-	applied, err := f.sup.submitExternalResult(wf, cursor, replayResult, gate.Subject, replay.EvidenceID)
-	if err != nil {
-		t.Fatalf("replayed external result: %v", err)
-	}
-	if applied {
-		t.Fatal("a replayed poll reported that it recorded the result")
-	}
-	if discardPollEvidenceAfter(applied, err) {
-		f.sup.discardPollEvidence(wf, replay.EvidenceID)
-	}
-
-	entries, err := os.ReadDir(filepath.Join(f.root, "instances", f.wf, "evidence"))
-	if err != nil {
-		t.Fatalf("read evidence root: %v", err)
-	}
-	if len(entries) != 1 || entries[0].Name() != string(recorded) {
-		t.Fatalf("evidence entries = %v, want only the recorded result %s", entries, recorded)
-	}
-	if stored, err := os.ReadFile(filepath.Join(f.root, "instances", f.wf, "evidence", string(recorded), "adapter-response.json")); err != nil {
-		t.Fatalf("read the recorded copy: %v", err)
-	} else if strings.TrimSpace(string(stored)) != wantPollAdapterStdout {
-		t.Fatalf("recorded evidence = %q, want the adapter's exact stdout", stored)
-	}
-}
-
 // wantPollAdapterStdout is the exact stdout the passed.sh fixture adapter writes,
 // which is what a gate result stages as evidence.
 const wantPollAdapterStdout = `{"version":1,"result":"passed","subject":{"type":"pull_request","repository":"sdougbrown/avenor","pull_request":143,"revision":"cc793f7"},"observed_at":"2026-01-01T00:00:00Z","summary":"approved"}`
@@ -1275,5 +1199,99 @@ func TestDiscardPollEvidenceAfter(t *testing.T) {
 		if got := discardPollEvidenceAfter(test.applied, test.err); got != test.want {
 			t.Errorf("%s: discardPollEvidenceAfter(%v, %v) = %v, want %v", test.name, test.applied, test.err, got, test.want)
 		}
+	}
+}
+
+// TestControllerPollIdempotentReplayDiscardsItsEvidence proves a replayed poll
+// keeps the copy the first apply recorded and discards its own, through the
+// production apply path rather than a re-enactment of its steps. The replay is
+// addressed through the recorded gate, so no poll cycle has to be raced.
+func TestControllerPollIdempotentReplayDiscardsItsEvidence(t *testing.T) {
+	t.Parallel()
+	// Two required gates keep the node parked after the first result, so the
+	// replayed poll reaches the apply path instead of being obsolete.
+	f := newPollFixture(t, "poll-idempotent", "poll-idempotent-tmpl",
+		map[string]string{"gh-review": "passed.sh", "gh-pending": "pending.sh"},
+		[]map[string]any{
+			{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"},
+			{"id": "second-review", "type": "external", "required": true, "adapter_id": "gh-pending"},
+		})
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+	f.waitCursor(t, "pr-review")
+	waitFor(t, "first gate recorded", func() bool {
+		for _, gi := range f.gateInstances(t) {
+			if len(gi.EvidenceIDs) == 1 {
+				return true
+			}
+		}
+		return false
+	})
+	f.sup.stopControllerLoop("c1")
+
+	var gate workflow.GateInstance
+	found := false
+	for _, gi := range f.gateInstances(t) {
+		if len(gi.EvidenceIDs) == 1 {
+			gate, found = gi, true
+		}
+	}
+	if !found {
+		t.Fatalf("gate instances = %+v, want one with a recorded external result", f.gateInstances(t))
+	}
+	recorded := gate.EvidenceIDs[0]
+	observedAt := time.Now().UTC()
+	if gate.ObservedAt != nil {
+		observedAt = *gate.ObservedAt
+	}
+	cursor := workflowcontroller.PollCursor{
+		WorkflowID:   f.wf,
+		NodeID:       "review",
+		ActivationID: string(gate.ActivationID),
+		GateID:       string(gate.GateID),
+		AdapterID:    "gh-review",
+		SubjectHash:  workflow.SubjectHash(gate.Subject),
+		PollID:       gate.PollID,
+	}
+	rec, granted, err := f.cstore.AcquireLease("c1", "replay-owner")
+	if err != nil || !granted {
+		t.Fatalf("acquire lease: granted=%v err=%v", granted, err)
+	}
+	res := &workflowcontroller.AdapterResult{
+		Result: "passed",
+		Subject: workflowcontroller.AdapterSubject{
+			Type:        gate.Subject.Type,
+			Repository:  gate.Subject.Repository,
+			PullRequest: gate.Subject.PullRequest,
+			Revision:    gate.Subject.Revision,
+		},
+		ObservedAt:   observedAt,
+		ResponseHash: gate.ResponseHash,
+		RawStdout:    []byte(wantPollAdapterStdout),
+	}
+	outcome, applyErr := f.sup.applyPollResult("c1", cursor, res, workflowcontroller.LeaderLease{
+		LeaseID:    rec.Leader.LeaseID,
+		OwnerEpoch: rec.Leader.OwnerEpoch,
+	})
+	if applyErr != nil {
+		t.Fatalf("replayed poll apply: %v", applyErr)
+	}
+	if outcome != workflowcontroller.PollApplied {
+		t.Fatalf("replayed poll outcome = %q, want applied (idempotent no-op)", outcome)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(f.root, "instances", f.wf, "evidence"))
+	if err != nil {
+		t.Fatalf("read evidence root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != string(recorded) {
+		t.Fatalf("evidence entries = %v, want only the recorded result %s", entries, recorded)
+	}
+	if stored, err := os.ReadFile(filepath.Join(f.root, "instances", f.wf, "evidence", string(recorded), "adapter-response.json")); err != nil {
+		t.Fatalf("read recorded evidence: %v", err)
+	} else if string(stored) != wantPollAdapterStdout {
+		t.Fatalf("recorded evidence = %q, want the first apply's bytes", stored)
+	}
+	if review := f.activationByNode(t, "review"); review == nil || review.Status != workflow.ActivationAwaitingGate {
+		t.Fatalf("review activation = %+v, want still parked on its second gate", review)
 	}
 }

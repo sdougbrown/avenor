@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -357,5 +358,26 @@ func TestStageEvidence_SourceRewriteLeavesEvidenceIntact(t *testing.T) {
 	}
 	if digest := sha256Hex(string(storedData)); digest != got.SHA256 {
 		t.Fatalf("staged evidence digest = %s, want the recorded %s", digest, got.SHA256)
+	}
+}
+
+// TestStageEvidenceLeavesNoDirectoryWhenStagingFails proves a failed stage
+// removes the directory it minted, so no caller has to track a copy it never
+// received an ID for.
+func TestStageEvidenceLeavesNoDirectoryWhenStagingFails(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	src := writeTestFile(t, "captured\n")
+	injected := errors.New("injected sync failure")
+	s.evidenceFsync = func(string) error { return injected }
+	if _, err := s.StageEvidence("wf1", src, "artifact.json", false, ""); !errors.Is(err, injected) {
+		t.Fatalf("error = %v, want the staging failure", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(s.Root(), "instances", "wf1", "evidence"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("read evidence root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("evidence entries = %v, want none after a failed stage", entries)
 	}
 }
