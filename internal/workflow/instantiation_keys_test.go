@@ -482,6 +482,70 @@ func TestStoreOrphanedLogRecoversForSubsequentCommands(t *testing.T) {
 	}
 }
 
+func TestManagerInstantiateIdempotencyKeyConflictAcrossVersions(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	v1 := `{"schema_version":1,"template_id":"ver-test","template_version":"1","entry_nodes":["start"],"nodes":[{"id":"start","action":{"type":"manual"}}],"terminal_outcomes":["done"]}`
+	v2 := `{"schema_version":1,"template_id":"ver-test","template_version":"2","entry_nodes":["start"],"nodes":[{"id":"start","action":{"type":"manual"}}],"terminal_outcomes":["done"]}`
+	if _, err := m.WorkflowCreate([]byte(v1)); err != nil {
+		t.Fatalf("WorkflowCreate v1: %v", err)
+	}
+	if _, err := m.WorkflowCreate([]byte(v2)); err != nil {
+		t.Fatalf("WorkflowCreate v2: %v", err)
+	}
+
+	first, err := m.WorkflowInstantiate([]byte(`{"template_id": "ver-test", "template_version": "1", "idempotency_key": "unit-42"}`))
+	if err != nil {
+		t.Fatalf("v1 instantiate: %v", err)
+	}
+
+	// Same template ID, different version: versions coexist per
+	// <id>/<version>.json, so the request is reachable and must conflict.
+	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "ver-test", "template_version": "2", "idempotency_key": "unit-42"}`)); !errors.Is(err, ErrInstantiationKeyConflict) {
+		t.Fatalf("different version error = %v, want ErrInstantiationKeyConflict", err)
+	}
+	again, err := m.WorkflowInstantiate([]byte(`{"template_id": "ver-test", "template_version": "1", "idempotency_key": "unit-42"}`))
+	if err != nil {
+		t.Fatalf("v1 retry: %v", err)
+	}
+	if again.(map[string]any)["workflow_id"] != first.(map[string]any)["workflow_id"] {
+		t.Fatalf("workflow_id after version conflict = %v, want %v", again.(map[string]any)["workflow_id"], first.(map[string]any)["workflow_id"])
+	}
+}
+
+func TestManagerInstantiateIdempotencyKeyNotBoundByFailedComposition(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+
+	// A parent pinning a child that is never stored registers (template-level
+	// validation does not resolve cross-template pins) but fails in
+	// BuildComposition. The keyed request must fail without consuming the key.
+	pinned := `{"schema_version":1,"template_id":"idem-pinned","template_version":"1","entry_nodes":["spawn"],"nodes":[{"id":"spawn","action":{"type":"workflow","template_id":"never-stored-child","template_version":"1","child_key":"c1","outcome_map":{"done":"done"}}}],"terminal_outcomes":["done"]}`
+	if _, err := m.WorkflowCreate([]byte(pinned)); err != nil {
+		t.Fatalf("WorkflowCreate pinned: %v", err)
+	}
+	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "idem-pinned", "template_version": "1", "idempotency_key": "unit-42"}`)); err == nil {
+		t.Fatal("keyed instantiate on unresolvable pin accepted, want failure")
+	}
+
+	// The key still works for a valid request: fresh instance, revision 1.
+	result := instantiateWithKey(t, m, "unit-42", nil)
+	if got, want := fmt.Sprint(result["revision"]), "1"; got != want {
+		t.Fatalf("revision = %s, want %s (key not consumed by the failed request)", got, want)
+	}
+}
+
 func TestManagerInstantiateWithoutKeyMintsFreshIDs(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)

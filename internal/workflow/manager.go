@@ -306,8 +306,8 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 // a different request fails with ErrInstantiationKeyConflict (as an
 // InstantiationKeyConflictError, which the control server maps to -32031);
 // metadata is caller bookkeeping and outside the conflict fingerprint.
-// Composition validation runs before the record write, so a request whose
-// tree fails to build never consumes the key.
+// Composition and child-param validation run before the record write, so a
+// request whose tree fails to build or bind never consumes the key.
 func (m *Manager) instantiateIdempotent(key string, template Template, params map[string]string) (any, error) {
 	unlock, err := m.store.lockInstantiationKeys()
 	if err != nil {
@@ -347,14 +347,18 @@ func (m *Manager) instantiateIdempotent(key string, template Template, params ma
 	} else {
 		wf = NewWorkflowID()
 	}
-	// Composition validation runs before the record write, so a request whose
-	// tree cannot be built — unresolvable pins, a cycle, the instance bound —
-	// never consumes the key. The prebuilt composition is passed through to
-	// instantiateTemplate (child IDs derive from wf), so the tree is built
-	// exactly once.
+	// Composition and child-param validation run before the record write, so a
+	// request whose tree cannot be built or bound never consumes the key. The
+	// prebuilt composition is passed through to instantiateTemplate (child IDs
+	// derive from wf), so the tree is built exactly once.
 	built, _, err := BuildComposition(wf, template, m.resolveTemplate)
 	if err != nil {
 		return nil, err
+	}
+	for _, child := range built.Children {
+		if _, err := resolveAndValidateChildParams(template, child, params); err != nil {
+			return nil, err
+		}
 	}
 	if !exists {
 		rec = instantiationKeyRecord{
@@ -409,14 +413,8 @@ func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, comp *Co
 		}
 	}
 	for _, child := range comp.Children {
-		childParams, err := resolveChildParams(template, child.NodeID, params)
+		childParams, err := resolveAndValidateChildParams(template, child, params)
 		if err != nil {
-			return Snapshot{}, err
-		}
-		// Validate the resolved child params against the child template before
-		// materializing the child, so an invalid bound value fails the composing
-		// command with no partial child (mirrors top-level instantiate).
-		if err := validateInstanceParams(child.Template, childParams); err != nil {
 			return Snapshot{}, err
 		}
 		if _, err := m.ensureChildInstance(child, childParams, materialized); err != nil {
@@ -474,6 +472,22 @@ func (m *Manager) ensureChildInstance(child CompositionChild, childParams map[st
 		return "", err
 	}
 	return childID, nil
+}
+
+// resolveAndValidateChildParams resolves one composition child's declared
+// param bindings against the parent instance's params and validates the
+// resolved values against the child template, so an unresolvable binding or
+// invalid value fails before the child is materialized (mirroring top-level
+// instantiate).
+func resolveAndValidateChildParams(template Template, child CompositionChild, params map[string]string) (map[string]string, error) {
+	childParams, err := resolveChildParams(template, child.NodeID, params)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateInstanceParams(child.Template, childParams); err != nil {
+		return nil, err
+	}
+	return childParams, nil
 }
 
 // resolveChildParams resolves one workflow-action node's declared child
