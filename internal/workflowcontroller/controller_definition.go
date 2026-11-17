@@ -66,7 +66,7 @@ func LoadControllerDefinitions(dir string) (ControllerDefinitions, error) {
 	// file declaring the ID instead of silently keeping one of them.
 	byID := map[string][]ControllerDefinition{}
 	for _, entry := range entries {
-		if entry.IsDir() || !isControllerDefinitionFile(entry.Name()) {
+		if entry.IsDir() || !isConfigFormatFile(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -104,9 +104,9 @@ func LoadControllerDefinitions(dir string) (ControllerDefinitions, error) {
 	return loaded, nil
 }
 
-// isControllerDefinitionFile reports whether name has an extension the
-// definition loader parses.
-func isControllerDefinitionFile(name string) bool {
+// isConfigFormatFile reports whether name has an extension configfile
+// parses (.json, .yaml, .yml, or .toml).
+func isConfigFormatFile(name string) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".json", ".yaml", ".yml", ".toml":
 		return true
