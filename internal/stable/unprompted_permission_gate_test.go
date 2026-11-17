@@ -275,6 +275,17 @@ func attachControlClient(t *testing.T, sup *Supervisor, socket string) {
 		t.Fatal(err)
 	}
 	attachOwnerForTest(t, conn, socket)
+	// The accept loop registers the connection in its own goroutine, so the
+	// handshake completing does not mean the server counts the client yet. A
+	// claim prepared before that registration is signalled as disconnected, so
+	// every claim test here depends on the count being live.
+	deadline := time.Now().Add(5 * time.Second)
+	for !sup.control.HasClients() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !sup.control.HasClients() {
+		t.Fatal("attached control client was never registered")
+	}
 }
 
 // stubProvider satisfies the provider a file handler requires at entry. A
