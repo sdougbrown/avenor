@@ -197,9 +197,10 @@ func TestUncommittedAppendRemovesStagedEvidence(t *testing.T) {
 	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
 	plan, actID, attemptID, leaseID, ownerToken := artifactCompletionPlan(t, m, s, wf)
 
-	restore := readOnlyFile(t, s.eventsPath(wf))
+	injected := errors.New("injected append failure")
+	s.SetAppendFault(func(string) error { return injected })
+	t.Cleanup(func() { s.SetAppendFault(nil) })
 	_, err := m.CompleteAuto(wf, "start", actID, attemptID, leaseID, ownerToken, plan)
-	restore()
 	if err == nil {
 		t.Fatal("a completion with an unwritable event log was accepted")
 	}
@@ -296,7 +297,7 @@ func TestDiscardStagedNamesTheOrphanItCouldNotRemove(t *testing.T) {
 	if err := os.MkdirAll(evidenceDir(s.instanceDir(wf), evID), StateDirPerm); err != nil {
 		t.Fatalf("create evidence dir: %v", err)
 	}
-	blockEvidenceRemoval(t, filepath.Join(s.instanceDir(wf), "evidence"))
+	blockEvidenceRemoval(t, s)
 
 	cause := errors.New("stage evidence failed")
 	err := discardStaged(m, wf, []StagedEvidence{{EvidenceID: evID}}, cause)
@@ -374,18 +375,10 @@ func TestConcurrentDuplicateCompletionDiscardsItsCopy(t *testing.T) {
 	}
 }
 
-// blockEvidenceRemoval makes the parent of a staged copy read-only, so removing
-// the copy inside it fails. It skips when the test user can remove it anyway.
-func blockEvidenceRemoval(t *testing.T, parent string) {
+// blockEvidenceRemoval forces DiscardEvidence to fail, whatever user runs the
+// test, so the cleanup path is verified in a privileged environment too.
+func blockEvidenceRemoval(t *testing.T, s *Store) {
 	t.Helper()
-	if err := os.Chmod(parent, 0o500); err != nil {
-		t.Fatalf("make %s read-only: %v", parent, err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(parent, StateDirPerm) })
-	probe := filepath.Join(parent, "probe")
-	if err := os.Mkdir(probe, StateDirPerm); err == nil {
-		os.Remove(probe)
-		_ = os.Chmod(parent, StateDirPerm)
-		t.Skip("directory permissions do not block this user (e.g. root); cannot force a discard failure")
-	}
+	s.SetDiscardFault(func(EvidenceID) error { return errors.New("injected discard failure") })
+	t.Cleanup(func() { s.SetDiscardFault(nil) })
 }

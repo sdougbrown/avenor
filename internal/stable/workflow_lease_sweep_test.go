@@ -546,3 +546,66 @@ func TestLeaseSweepSurvivesSweepErrors(t *testing.T) {
 		return inst.Status == workflow.WorkflowCompleted
 	})
 }
+
+// TestLeaseSweepDoesNotRedispatchADurableCompletion proves the durable half of
+// the residual case: when a completion's events are durable but its snapshot
+// replace fails, the supervisor stops the heartbeat and reports the durable
+// commit instead of a failed attempt. Sweeping the now-dead lease must not start
+// a replacement attempt, because replay already satisfies the node.
+func TestLeaseSweepDoesNotRedispatchADurableCompletion(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider := &stableScriptedProvider{attempt: -1}
+	_ = produceWorkerDeclaredResult(t, provider, "ses_produce1", "result.md", "the declared summary")
+	_ = produceWorkerDeclaredResult(t, provider, "ses_consume", "", "")
+	clock := newSweepClock()
+	sweeps := newLeaseSweepDriver()
+	f := newAutoHandoffFixture(t, "lease-sweep-durable", provider, func(f *autoHandoffFixture) {
+		f.sup.config.WorkflowLeaseSweepInterval = 200 * time.Millisecond
+		f.sup.testHooks.leaseSweepTick = sweeps.tick
+		f.sup.testHooks.leaseSweepPost = sweeps.hook
+		f.sup.testHooks.workflowNow = clock.Now
+	})
+	wf := f.addWorkflow(t, "tmpl-lease-sweep-durable", autoHandoffChainTemplate(t, "tmpl-lease-sweep-durable", 2))
+
+	// Fail exactly one snapshot replace: the completion's events land durably,
+	// so the command reports ErrCommandDurable instead of failing.
+	// The completion is the only command that records evidence before it
+	// applies, so failing that snapshot write targets the completion exactly.
+	var failed atomic.Bool
+	f.mgr.Store().SetSnapshotWriteFault(func(_ workflow.WorkflowID, snap workflow.Snapshot) error {
+		if len(snap.Instance.Evidence) > 0 && failed.CompareAndSwap(false, true) {
+			return errors.New("injected snapshot replace failure")
+		}
+		return nil
+	})
+	t.Cleanup(func() { f.mgr.Store().SetSnapshotWriteFault(nil) })
+
+	f.enableController(t, 2)
+	f.waitForInstance(t, wf, "produce's first attempt to succeed", func(inst *workflow.WorkflowInstance) bool {
+		attempts := attemptsForNode(inst, "produce")
+		return len(attempts) == 1 && attempts[0].Status == workflow.AttemptSucceeded
+	})
+	f.waitForNoHeartbeats(t, "produce's heartbeat to stop after the durable completion")
+
+	clock.Advance(3 * time.Second)
+	sweeps.step(t)
+	// The durable completion satisfied the activation, so no lease is left to
+	// expire: the sweep has nothing to re-dispatch.
+	if expired := sweeps.lastExpired(); expired != 0 {
+		inst := f.instance(t, wf)
+		t.Fatalf("sweep after the TTL advance expired %d leases, want none (the durable completion left no dead lease); observed %s", expired, describeInstance(&inst, f.providerCalls.Load()))
+	}
+	// The durable completion satisfies the node, so the expired lease is not
+	// replaced by a second attempt.
+	f.waitForInstance(t, wf, "the workflow to finish from the durable completion", func(inst *workflow.WorkflowInstance) bool {
+		return inst.Status == workflow.WorkflowCompleted
+	})
+	inst := f.instance(t, wf)
+	if attempts := attemptsForNode(&inst, "produce"); len(attempts) != 1 {
+		t.Fatalf("produce recorded %d attempts, want exactly 1 (a durable completion is never re-dispatched); observed %s",
+			len(attempts), describeInstance(&inst, f.providerCalls.Load()))
+	}
+	if calls := f.providerCalls.Load(); calls != 2 {
+		t.Fatalf("provider invoked %d times, want exactly 2 (produce + consume); observed %s", calls, describeInstance(&inst, calls))
+	}
+}

@@ -269,12 +269,7 @@ func (s *Supervisor) submitExternalResult(wf workflow.WorkflowID, cursor workflo
 	if err != nil {
 		return false, err
 	}
-	if result, ok := out.(map[string]any); ok {
-		if idempotent, _ := result["idempotent"].(bool); idempotent {
-			return false, nil
-		}
-	}
-	return true, nil
+	return workflow.CommandRecorded(out), nil
 }
 
 // discardPollEvidence removes one poll cycle's staged adapter response. It logs

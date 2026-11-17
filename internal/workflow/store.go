@@ -49,6 +49,10 @@ type Store struct {
 	// are applying commands, so snapshotFaultMu guards every access.
 	snapshotFaultMu    sync.Mutex
 	snapshotWriteFault func(WorkflowID, Snapshot) error
+	// appendFault and discardFault, when non-nil, force one failure that file
+	// permissions cannot express portably (a privileged test user ignores them).
+	appendFault  func(path string) error
+	discardFault func(EvidenceID) error
 }
 
 // readinessCommandKinds are the command kinds whose event batch can create a
@@ -107,6 +111,16 @@ func (s *Store) snapshotFault() func(WorkflowID, Snapshot) error {
 	defer s.snapshotFaultMu.Unlock()
 	return s.snapshotWriteFault
 }
+
+// SetAppendFault installs a fault consulted before an event batch is appended.
+// Tests use it to force a non-durable append failure, which file permissions
+// cannot express when the test user is privileged. Production leaves it unset.
+func (s *Store) SetAppendFault(fault func(path string) error) { s.appendFault = fault }
+
+// SetDiscardFault installs a fault consulted by DiscardEvidence. Tests use it to
+// force a removal failure, which file permissions cannot express when the test
+// user is privileged. Production leaves it unset.
+func (s *Store) SetDiscardFault(fault func(EvidenceID) error) { s.discardFault = fault }
 
 // notifyCommit invokes the registered commit observer, isolating the command
 // path from observer failures.
@@ -274,6 +288,11 @@ func (s *Store) loadSnapshot(workflowID WorkflowID) (Snapshot, bool, error) {
 // then hold a prefix of the batch, and a replay would recover it.
 func (s *Store) appendEvents(workflowID WorkflowID, events []Event) error {
 	path := s.eventsPath(workflowID)
+	if s.appendFault != nil {
+		if faultErr := s.appendFault(path); faultErr != nil {
+			return faultErr
+		}
+	}
 	before, statErr := os.Stat(path)
 	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
 		return statErr

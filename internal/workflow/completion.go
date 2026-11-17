@@ -458,3 +458,19 @@ func reportDiscardFailure(wf WorkflowID, err error) {
 		log.Printf("workflow %s: %v", wf, err)
 	}
 }
+
+// CommandRecorded reports whether a workflow command's answer recorded a new
+// fact, rather than answering an idempotent replay. Callers that staged evidence
+// for the command use it to decide whether their copy belongs to a fact: an
+// idempotent answer means the fact was already recorded, so this call's copy is
+// the caller's to discard. It is the one place that reads the manager's
+// "idempotent" marker, so a new idempotent answer cannot be misclassified at a
+// distant call site.
+func CommandRecorded(answer any) bool {
+	result, ok := answer.(map[string]any)
+	if !ok {
+		return true
+	}
+	idempotent, _ := result["idempotent"].(bool)
+	return !idempotent
+}

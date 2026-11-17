@@ -217,6 +217,11 @@ func (s *Store) DiscardEvidence(workflowID WorkflowID, id EvidenceID) error {
 	if !safeComponent(string(workflowID)) || !safeComponent(string(id)) {
 		return errors.New("invalid evidence id")
 	}
+	if s.discardFault != nil {
+		if faultErr := s.discardFault(id); faultErr != nil {
+			return faultErr
+		}
+	}
 	dir := evidenceDir(s.instanceDir(workflowID), id)
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 		return nil
