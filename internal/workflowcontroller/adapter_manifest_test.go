@@ -186,7 +186,7 @@ func TestLoadAdapterRegistryMissingDir(t *testing.T) {
 	}
 }
 
-func TestLoadAdapterRegistryIgnoresNonJSONAndSubdirs(t *testing.T) {
+func TestLoadAdapterRegistryIgnoresUnrecognizedExtensionsAndSubdirs(t *testing.T) {
 	dir := stageAdapterDir(t)
 	exe := stageFixture(t, dir, "passed.sh")
 	writeManifest(t, dir, "review.json", "review", exe, nil, 5000)
