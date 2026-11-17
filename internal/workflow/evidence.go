@@ -10,8 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // StagedEvidence describes one artifact copied into an immutable evidence
@@ -128,7 +126,7 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 // digest of src's bytes: it decides the dedupe comparison and is recorded as the
 // staged digest. syncRoot must contain destDir; a mismatch is refused rather than
 // silently syncing only the leaf.
-func stageStream(src io.Reader, digest, destDir, storedName string, required bool, expectedSHA string, syncRoot string, fsync func(string) error) (int64, string, error) {
+func stageStream(src io.Reader, sourceDigest, destDir, storedName string, required bool, expectedSHA string, syncRoot string, fsync func(string) error) (int64, string, error) {
 	if syncRoot != "" {
 		rel, err := filepath.Rel(syncRoot, destDir)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -144,10 +142,6 @@ func stageStream(src io.Reader, digest, destDir, storedName string, required boo
 	if err != nil {
 		return 0, "", err
 	}
-	if fsync == nil {
-		fsync = durablefile.FsyncDir
-	}
-
 	// Immutability: never overwrite an already-staged file. If the exact
 	// destination already exists, dedupe when its content matches the source,
 	// otherwise fail.
@@ -156,7 +150,7 @@ func stageStream(src io.Reader, digest, destDir, storedName string, required boo
 		if err != nil {
 			return 0, "", err
 		}
-		if existing == digest {
+		if existing == sourceDigest {
 			// Dedupe reuses the staged file, but the directories holding it may
 			// still be unrecorded if the attempt that created them was
 			// interrupted, so they are synced here too.
@@ -273,8 +267,11 @@ func fsyncEvidenceDirs(fsync func(string) error, syncRoot, leafDir string, creat
 
 // StageEvidence — public Store method (no workflow state transition).
 func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string, required bool, expectedSHA256 string) (StagedEvidence, error) {
+	if err := s.ensureInstanceDir(workflowID); err != nil {
+		return StagedEvidence{}, err
+	}
 	evID, size, digest, err := s.stageIntoFreshDir(workflowID, storedName, func(dir string) (int64, string, error) {
-		return stageInto(srcPath, dir, storedName, required, expectedSHA256, s.instanceDir(workflowID), s.fsyncDir)
+		return stageInto(srcPath, dir, storedName, required, expectedSHA256, s.instanceDir(workflowID), s.syncDir)
 	})
 	if err != nil {
 		// stageIntoFreshDir already removed the directory it minted.

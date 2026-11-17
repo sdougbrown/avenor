@@ -232,10 +232,6 @@ func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, erro
 	return snap, nil
 }
 
-// ensureInstanceDir creates the instance directory and records its entry in the
-// instances directory. Every command path passes through here, so an instance
-// whose files are durable can always be found again after a crash, whether this
-// call or an earlier one created the directory.
 // syncDir makes one directory entry durable, through the test seam when set.
 func (s *Store) syncDir(dir string) error {
 	fsync := s.fsyncDir
@@ -245,6 +241,10 @@ func (s *Store) syncDir(dir string) error {
 	return fsync(dir)
 }
 
+// ensureInstanceDir creates the instance directory and records its entry in the
+// instances directory. Every command path passes through here, so an instance
+// whose files are durable can always be found again after a crash, whether this
+// call or an earlier one created the directory.
 func (s *Store) ensureInstanceDir(workflowID WorkflowID) error {
 	if err := os.MkdirAll(s.instanceDir(workflowID), StateDirPerm); err != nil {
 		return err

@@ -170,13 +170,13 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 	}
 	// i) First stage
 	a := writeTestFile(t, "same content")
-	_, _, err := stageInto(a, destDir, "out.txt", false, "", "", nil)
+	_, _, err := stageInto(a, destDir, "out.txt", false, "", "", noSync)
 	if err != nil {
 		t.Fatalf("stageInto first call failed: %v", err)
 	}
 	// ii) Dedupe identical content
 	b := writeTestFile(t, "same content")
-	size, sig, err := stageInto(b, destDir, "out.txt", false, "", "", nil)
+	size, sig, err := stageInto(b, destDir, "out.txt", false, "", "", noSync)
 	if err != nil {
 		t.Fatalf("stageInto second call (dedupe) failed: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 	}
 	// iii) Different content should fail
 	c := writeTestFile(t, "DIFFERENT")
-	_, _, err = stageInto(c, destDir, "out.txt", false, "", "", nil)
+	_, _, err = stageInto(c, destDir, "out.txt", false, "", "", noSync)
 	if err == nil {
 		t.Fatal("stageInto with different content should have failed")
 	}
@@ -326,7 +326,7 @@ func TestStageEvidence_CopyFailure(t *testing.T) {
 	src := writeTestFile(t, "content that cannot land")
 	// destDir sits under a path component that is a regular file, so the
 	// destination cannot be created and staging must fail with an error.
-	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, "", "", nil); err == nil {
+	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, "", "", noSync); err == nil {
 		t.Fatal("expected copy failure for unwritable destination")
 	}
 }
@@ -376,7 +376,7 @@ func TestStageEvidenceFsyncsEveryCreatedDirectoryEntry(t *testing.T) {
 	// The first staging into a fresh root creates the instance and its evidence
 	// directory. All three entries are then made durable, deepest first, ending at
 	// the pre-existing instances directory that holds them.
-	want := []string{leafDir, filepath.Join(instanceDir, "evidence"), instanceDir}
+	want := []string{filepath.Join(root, "instances"), leafDir, filepath.Join(instanceDir, "evidence"), instanceDir}
 	if len(synced) != len(want) {
 		t.Fatalf("synced directories = %v, want %v", synced, want)
 	}
@@ -409,11 +409,10 @@ func TestStageEvidenceFsyncsAncestorsWhenParentsExist(t *testing.T) {
 	}
 	leafDir := filepath.Join(s.Root(), "instances", "wf-fsync", "evidence", string(staged.EvidenceID))
 	instanceDir := filepath.Join(s.Root(), "instances", "wf-fsync")
-	// The new leaf, its evidence parent, the instance directory, and the
-	// instances directory that holds it: every ancestor is synced on every
-	// staging, because an earlier attempt — or a version that never synced the
-	// parent — can leave an entry unrecorded.
-	want := []string{leafDir, filepath.Join(instanceDir, "evidence"), instanceDir}
+	// The instance entry is recorded first (ensureInstanceDir owns creation), then
+	// the new leaf and its evidence parent. Every ancestor is synced on every
+	// staging, because an earlier attempt can leave an entry unrecorded.
+	want := []string{filepath.Join(s.Root(), "instances"), leafDir, filepath.Join(instanceDir, "evidence"), instanceDir}
 	if len(synced) != len(want) {
 		t.Fatalf("synced directories = %v, want %v", synced, want)
 	}
@@ -436,8 +435,15 @@ func TestStageEvidenceSyncsAncestorsAfterAFailedAttempt(t *testing.T) {
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
 	}
+	var fsyncCalls int
 	s.fsyncDir = func(string) error {
-		return errors.New("injected fsync failure")
+		fsyncCalls++
+		// Fail after the instance entry is recorded, so the evidence chain exists
+		// while its own entries do not: the interrupted-creation shape.
+		if fsyncCalls > 1 {
+			return errors.New("injected fsync failure")
+		}
+		return nil
 	}
 	if _, err := s.StageEvidence("wf-retry-fsync", writeTestFile(t, "first\n"), "a.txt", false, ""); err == nil {
 		t.Fatal("staging with a failing fsync succeeded")
@@ -465,9 +471,9 @@ func TestStageEvidenceSyncsAncestorsAfterAFailedAttempt(t *testing.T) {
 	instanceDir := filepath.Join(s.Root(), "instances", "wf-retry-fsync")
 	leafDir := filepath.Join(evidenceRoot, string(staged.EvidenceID))
 	// The instance directory existed before this staging (the interrupted attempt
-	// created it). Its entry in instances/ is recorded by ensureInstanceDir, the
-	// one path every command takes, so staging syncs only its own leaf chain.
-	want := []string{leafDir, evidenceRoot, instanceDir}
+	// created it). ensureInstanceDir also records its entry every time, so the
+	// chain opens with instances/ and then records the leaf's ancestors.
+	want := []string{filepath.Join(s.Root(), "instances"), leafDir, evidenceRoot, instanceDir}
 	if len(synced) != len(want) {
 		t.Fatalf("synced directories = %v, want %v", synced, want)
 	}
@@ -545,7 +551,12 @@ func TestStageEvidence_RemovesNestedFreshDirsWhenFsyncFails(t *testing.T) {
 	if got := stagedEvidenceNames(t, s, "wf-rollback"); len(got) != 0 {
 		t.Fatalf("evidence directories after the failed staging = %v, want none", got)
 	}
-	if _, err := os.Stat(filepath.Join(s.Root(), "instances", "wf-rollback", "evidence")); err != nil {
+	// The shared evidence parent is a staging artifact: it may not exist yet if
+	// the failure landed before the chain was created, and it must be empty when
+	// it does.
+	if entries, err := os.ReadDir(filepath.Join(s.Root(), "instances", "wf-rollback", "evidence")); err == nil && len(entries) != 0 {
+		t.Fatalf("shared evidence parent holds %v, want none", entries)
+	} else if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("shared evidence parent: %v", err)
 	}
 	if got := stagedEvidenceNames(t, s, "wf-sibling"); len(got) != 1 || got[0] != string(sibling.EvidenceID) {
@@ -608,7 +619,14 @@ func TestStageEvidence_ReportsDiscardFailureWithEvidenceID(t *testing.T) {
 		t.Fatalf("CreateRoot: %v", err)
 	}
 	injected := errors.New("injected fsync failure")
-	s.fsyncDir = func(string) error { return injected }
+	var calls int
+	s.fsyncDir = func(string) error {
+		calls++
+		if calls > 1 {
+			return injected
+		}
+		return nil
+	}
 	var discarded []EvidenceID
 	s.SetDiscardFault(func(id EvidenceID) error {
 		discarded = append(discarded, id)
@@ -741,11 +759,15 @@ func TestStageEvidenceRejectsASyncRootOutsideTheDestination(t *testing.T) {
 		t.Fatalf("mkdir dest: %v", err)
 	}
 	elsewhere := filepath.Join(root, "elsewhere")
-	_, _, err := stageStream(strings.NewReader("x"), sha256OfString("x"), destDir, "a.txt", false, "", elsewhere, nil)
+	_, _, err := stageStream(strings.NewReader("x"), sha256OfString("x"), destDir, "a.txt", false, "", elsewhere, noSync)
 	if err == nil || !strings.Contains(err.Error(), "is not inside") {
 		t.Fatalf("error = %v, want a rejected sync root", err)
 	}
 }
+
+// sha256OfString returns the hex digest stageStream expects for content.
+// noSync is the sync a test passes when it does not observe directory durability.
+func noSync(string) error { return nil }
 
 // sha256OfString returns the hex digest stageStream expects for content.
 func sha256OfString(content string) string {
@@ -770,7 +792,7 @@ func TestStageStreamDedupeStillSyncsDirectories(t *testing.T) {
 		t.Fatalf("mkdir dest: %v", err)
 	}
 	content := "same bytes\n"
-	if _, _, err := stageStream(strings.NewReader(content), sha256OfString(content), destDir, "a.txt", false, "", instanceDir, nil); err != nil {
+	if _, _, err := stageStream(strings.NewReader(content), sha256OfString(content), destDir, "a.txt", false, "", instanceDir, noSync); err != nil {
 		t.Fatalf("first staging: %v", err)
 	}
 	var synced []string
