@@ -2,7 +2,6 @@ package workflowcontroller
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -31,11 +30,5 @@ func WriteProjection(dir string, rec ControllerRecord) error {
 		b = append(b, "- Leader: none\n"...)
 	}
 	b = fmt.Appendf(b, "- Updated: %s\n", rec.UpdatedAt.UTC().Format(time.RFC3339))
-	path := filepath.Join(dir, "controller.md")
-	if err := os.WriteFile(path, b, workflow.StateFilePerm); err != nil {
-		return err
-	}
-	// WriteFile keeps an existing file's mode, so a projection written by an
-	// earlier version would stay readable beside owner-only state.
-	return os.Chmod(path, workflow.StateFilePerm)
+	return workflow.WritePrivateFile(filepath.Join(dir, "controller.md"), b)
 }

@@ -782,7 +782,7 @@ func (s *ControllerStore) notifySubscribers() {
 // a torn line anywhere before the final one, so a partial write must not reach
 // the log.
 func (s *ControllerStore) appendEvents(controllerID string, events []ControllerEvent) error {
-	f, err := os.OpenFile(s.eventsPath(controllerID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(s.eventsPath(controllerID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, workflow.StateFilePerm)
 	if err != nil {
 		return err
 	}
@@ -830,7 +830,7 @@ func (s *ControllerStore) writeSnapshot(controllerID string, rec ControllerRecor
 	}
 	dir := s.controllerDir(controllerID)
 	path := s.snapshotPath(controllerID)
-	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, 0o600); err != nil {
+	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, workflow.StateFilePerm); err != nil {
 		return err
 	}
 	if err := durablefile.FsyncDir(dir); err != nil {

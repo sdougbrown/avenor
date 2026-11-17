@@ -116,12 +116,29 @@ func TestCreateKeepsControllerStatePrivate(t *testing.T) {
 	}
 	// The projection is derived, but it lives beside owner-only state, so it
 	// must not be readable by other local users either.
-	projInfo, err := os.Stat(filepath.Join(s.controllerDir("alpha"), "controller.md"))
+	projPath := filepath.Join(s.controllerDir("alpha"), "controller.md")
+	projInfo, err := os.Stat(projPath)
 	if err != nil {
 		t.Fatalf("stat controller projection: %v", err)
 	}
 	if got := projInfo.Mode().Perm(); got != workflow.StateFilePerm {
 		t.Fatalf("controller projection mode = %o, want %o", got, workflow.StateFilePerm)
+	}
+
+	// A projection an earlier version wrote readable must be tightened the next
+	// time the store re-renders it, not only when it is first created.
+	if err := os.Chmod(projPath, 0o644); err != nil {
+		t.Fatalf("chmod projection: %v", err)
+	}
+	if _, err := s.SetDesiredState("alpha", DesiredEnabled, ""); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	projInfo, err = os.Stat(projPath)
+	if err != nil {
+		t.Fatalf("stat re-rendered projection: %v", err)
+	}
+	if got := projInfo.Mode().Perm(); got != workflow.StateFilePerm {
+		t.Fatalf("re-rendered projection mode = %o, want %o", got, workflow.StateFilePerm)
 	}
 }
 
