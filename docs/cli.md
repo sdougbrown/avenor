@@ -714,7 +714,7 @@ avenor workflow <command> [args] [flags]
 | Command | Purpose |
 |------|---------|
 | `create --request-file FILE` | Register a versioned template. |
-| `instantiate --template-id ID --template-version V --request-file FILE` | Create an instance of a template version. |
+| `instantiate --template-id ID --template-version V --request-file FILE [--idempotency-key KEY]` | Create an instance of a template version. With a key, a retried same-key request returns the original workflow; reuse for a different request is a conflict. |
 | `status <workflow-id>` | Current workflow snapshot summary. |
 | `wait <workflow-id> [--timeout 30s]` | Block until terminal or timeout. |
 | `inspect <workflow-id>` | Full instance detail. |
@@ -736,7 +736,7 @@ avenor workflow create --socket /tmp/avenor.sock \
 echo '{"metadata":{"issue":"115"}}' > /tmp/instance.json
 avenor workflow instantiate --socket /tmp/avenor.sock \
   --template-id software-factory-work --template-version 1.0.0 \
-  --request-file /tmp/instance.json
+  --request-file /tmp/instance.json --idempotency-key umpire-115
 ```
 
 Observe the workflow:

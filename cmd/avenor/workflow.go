@@ -69,6 +69,7 @@ func handleWorkflowInstantiate(ctx context.Context, inv clicontract.Invocation, 
 	templateID := inv.Flags["template-id"]
 	templateVersion := inv.Flags["template-version"]
 	requestFile := inv.Flags["request-file"]
+	idempotencyKey := inv.Flags["idempotency-key"]
 	c, err := workflowClient(inv)
 	if err != nil {
 		return nil, err
@@ -93,7 +94,7 @@ func handleWorkflowInstantiate(ctx context.Context, inv clicontract.Invocation, 
 	if len(instance.Params) > 0 {
 		params = instance.Params
 	}
-	result, err := c.WorkflowInstantiate(templateID, templateVersion, metadata, params)
+	result, err := c.WorkflowInstantiate(templateID, templateVersion, metadata, params, idempotencyKey)
 	if err != nil {
 		return nil, fmt.Errorf("avenor workflow: instantiate: %w", err)
 	}

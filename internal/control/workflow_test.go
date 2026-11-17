@@ -15,6 +15,7 @@ type fakeWorkflowHandler struct {
 	createCalled      bool
 	createErr         error
 	instantiateCalled bool
+	instantiateErr    error
 	statusID          string
 	statusResult      any
 	statusErr         error
@@ -40,7 +41,7 @@ func (f *fakeWorkflowHandler) WorkflowCreate(params json.RawMessage) (any, error
 
 func (f *fakeWorkflowHandler) WorkflowInstantiate(params json.RawMessage) (any, error) {
 	f.instantiateCalled = true
-	return map[string]any{"workflow_id": "wf_inst"}, nil
+	return map[string]any{"workflow_id": "wf_inst"}, f.instantiateErr
 }
 
 func (f *fakeWorkflowHandler) WorkflowStatus(id string) (any, error) {
@@ -104,6 +105,29 @@ func TestWorkflowCreateConflictMappedToIdempotencyCode(t *testing.T) {
 	want := `template "software-factory-work" version "1" already registered with different content`
 	if resp.Error.Message != want {
 		t.Fatalf("conflict message = %q, want %q", resp.Error.Message, want)
+	}
+}
+
+func TestWorkflowInstantiateConflictMappedToIdempotencyCode(t *testing.T) {
+	s, fake := newWorkflowTestServer(t)
+	fake.instantiateErr = &workflow.InstantiationKeyConflictError{
+		Key: "unit-42", TemplateID: "verify-674", TemplateVersion: "1",
+	}
+
+	resp := s.dispatch(nil, Request{JSONRPC: "2.0", ID: 1, Method: "workflow.instantiate", Params: json.RawMessage(`{}`)})
+	if resp.Error == nil || resp.Error.Code != -32031 {
+		t.Fatalf("expected -32031 idempotency conflict, got: %+v", resp.Error)
+	}
+	want := `workflow: instantiation idempotency key conflict: key "unit-42" is bound to template verify-674@1 with a different request`
+	if resp.Error.Message != want {
+		t.Fatalf("conflict message = %q, want %q", resp.Error.Message, want)
+	}
+
+	// A non-conflict instantiate error keeps the generic code.
+	fake.instantiateErr = errors.New("boom")
+	resp = s.dispatch(nil, Request{JSONRPC: "2.0", ID: 2, Method: "workflow.instantiate", Params: json.RawMessage(`{}`)})
+	if resp.Error == nil || resp.Error.Code != -32000 {
+		t.Fatalf("expected -32000 for generic instantiate error, got: %+v", resp.Error)
 	}
 }
 

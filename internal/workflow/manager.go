@@ -237,12 +237,17 @@ func (m *Manager) WorkflowCreate(payload json.RawMessage) (any, error) {
 // cleanup is out of scope for this stage. The composition manifest rides on
 // the instantiate event record and is applied into the instance by the
 // reducer.
+//
+// When the request carries idempotency_key, the instantiation is retry-safe:
+// see instantiateIdempotent for the dedup, conflict, and crash-recovery
+// behavior. Requests without a key mint a fresh workflow ID every time.
 func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	var req struct {
 		TemplateID      TemplateID        `json:"template_id"`
 		TemplateVersion TemplateVersion   `json:"template_version"`
 		Metadata        map[string]any    `json:"metadata,omitempty"`
 		Params          map[string]string `json:"params,omitempty"`
+		IdempotencyKey  string            `json:"idempotency_key,omitempty"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, fmt.Errorf("instantiate payload: %w", err)
@@ -263,9 +268,123 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 	if err := validateInstanceParams(template, req.Params); err != nil {
 		return nil, err
 	}
+	if req.IdempotencyKey != "" {
+		if err := validateInstantiationKey(req.IdempotencyKey); err != nil {
+			return nil, err
+		}
+		return m.instantiateIdempotent(req.IdempotencyKey, template, req.Params)
+	}
 	wf := NewWorkflowID()
 	var materialized int
-	snap, err := m.instantiateTemplate(wf, template, &materialized, req.Params)
+	snap, err := m.instantiateTemplate(wf, template, nil, &materialized, req.Params)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"workflow_id": string(wf),
+		"revision":    snap.Instance.Revision,
+	}, nil
+}
+
+// instantiateIdempotent makes a retried instantiation converge on the first
+// attempt's workflow instead of minting a duplicate. The caller-supplied key
+// resolves against a durable record under <root>/instantiation-keys/, read
+// and written under the root-scoped keys flock, which the call holds across
+// the whole materialization (not just the record-or-resume decision) so
+// concurrent same-key callers — including separate supervisor processes
+// sharing the workflow root — serialize and observe one outcome. The cost is
+// that keyed instantiations serialize behind one flock even for unrelated
+// templates; acceptable for low-concurrency instantiation, since releasing
+// earlier would expose mid-tree child-creation races between same-key
+// callers (a concurrent creator surfaces as a revision mismatch).
+//
+// A record binding the same template, version, and params returns that
+// record's workflow ID. The binding is written before the instance is
+// created, so a crash between record and commit leaves a retry that completes
+// the interrupted instantiation under the recorded ID: ensureChildInstance
+// resumes the children the crashed attempt already materialized (their IDs
+// derive from the recorded parent), and no controller-eligible duplicate
+// appears. Once the instance is committed, a retry returns its current
+// revision, including when the instance is already terminal — a key never
+// silently becomes reusable while a caller may still retry. A record bound to
+// a different request fails with ErrInstantiationKeyConflict (as an
+// InstantiationKeyConflictError, which the control server maps to -32031);
+// metadata is caller bookkeeping and outside the conflict fingerprint.
+// Composition and child-param validation run before the record write, so a
+// request whose tree fails to build or bind never consumes the key.
+func (m *Manager) instantiateIdempotent(key string, template Template, params map[string]string) (any, error) {
+	unlock, err := m.store.lockInstantiationKeys()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	hash := instantiationRequestHash(template.TemplateID, template.TemplateVersion, params)
+	rec, exists, err := m.store.loadInstantiationKey(key)
+	if err != nil {
+		return nil, err
+	}
+	var wf WorkflowID
+	if exists {
+		if rec.RequestHash != hash {
+			return nil, &InstantiationKeyConflictError{
+				Key:             key,
+				TemplateID:      rec.TemplateID,
+				TemplateVersion: rec.TemplateVersion,
+			}
+		}
+		wf = WorkflowID(rec.WorkflowID)
+		// A prior attempt already committed the instance: return its current
+		// state as the original response would have. No re-instantiation.
+		snap, ok, err := m.store.loadCurrent(wf)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			// Persist the recovered snapshot when this retry resolved through the
+			// orphaned-log replay, so the instance stops being a read-only orphan
+			// invisible to recovery and candidate scans.
+			if err := m.store.materializeRecoveredSnapshot(wf); err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"workflow_id": string(wf),
+				"revision":    snap.Instance.Revision,
+			}, nil
+		}
+		// Record present, instance absent: a crash between record and commit.
+		// Fall through and complete the instantiation under the recorded ID.
+	} else {
+		wf = NewWorkflowID()
+	}
+	// Composition and child-param validation run before the record write, so a
+	// request whose tree cannot be built or bound never consumes the key. The
+	// prebuilt composition is passed through to instantiateTemplate (child IDs
+	// derive from wf), so the tree is built exactly once.
+	built, _, err := BuildComposition(wf, template, m.resolveTemplate)
+	if err != nil {
+		return nil, err
+	}
+	for _, child := range built.Children {
+		if _, err := resolveAndValidateChildParams(template, child, params); err != nil {
+			return nil, err
+		}
+	}
+	if !exists {
+		rec = instantiationKeyRecord{
+			Key:             key,
+			TemplateID:      string(template.TemplateID),
+			TemplateVersion: string(template.TemplateVersion),
+			RequestHash:     hash,
+			WorkflowID:      string(wf),
+			CreatedAt:       m.now().UTC(),
+		}
+		if err := m.store.writeInstantiationKeyRecord(rec); err != nil {
+			return nil, err
+		}
+	}
+	var materialized int
+	snap, err := m.instantiateTemplate(wf, template, &built, &materialized, params)
 	if err != nil {
 		return nil, err
 	}
@@ -276,19 +395,23 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 }
 
 // instantiateTemplate materializes one workflow instance under wf for
-// template. It validates the template's composition — BuildComposition
-// enforcing the global instance bound over the whole descendant tree —
-// idempotently ensures each declared child instance exists (recursing into
-// nested compositions), and applies the parent's instantiate command with the
-// composition manifest recorded on the instance record. materialized, when
-// non-nil, is threaded through the recursion as a running count of instances
-// this call has materialized; the path rejects should the cumulative count
-// ever exceed DefaultMaximumCompositionInstances (defense in depth on top of
+// template. comp, when non-nil, supplies the prebuilt composition (validated
+// by the caller, e.g. an idempotent instantiate's pre-pass); nil builds and
+// validates the composition here. It idempotently ensures each declared child
+// instance exists (recursing into nested compositions), and applies the
+// parent's instantiate command with the composition manifest recorded on the
+// instance record. materialized, when non-nil, is threaded through the
+// recursion as a running count of instances this call has materialized; the
+// path rejects should the cumulative count ever exceed
+// DefaultMaximumCompositionInstances (defense in depth on top of
 // BuildComposition's tree bound).
-func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, materialized *int, params map[string]string) (Snapshot, error) {
-	comp, _, err := BuildComposition(wf, template, m.resolveTemplate)
-	if err != nil {
-		return Snapshot{}, err
+func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, comp *Composition, materialized *int, params map[string]string) (Snapshot, error) {
+	if comp == nil {
+		built, _, err := BuildComposition(wf, template, m.resolveTemplate)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		comp = &built
 	}
 	if materialized != nil {
 		*materialized++
@@ -300,14 +423,8 @@ func (m *Manager) instantiateTemplate(wf WorkflowID, template Template, material
 		}
 	}
 	for _, child := range comp.Children {
-		childParams, err := resolveChildParams(template, child.NodeID, params)
+		childParams, err := resolveAndValidateChildParams(template, child, params)
 		if err != nil {
-			return Snapshot{}, err
-		}
-		// Validate the resolved child params against the child template before
-		// materializing the child, so an invalid bound value fails the composing
-		// command with no partial child (mirrors top-level instantiate).
-		if err := validateInstanceParams(child.Template, childParams); err != nil {
 			return Snapshot{}, err
 		}
 		if _, err := m.ensureChildInstance(child, childParams, materialized); err != nil {
@@ -361,10 +478,26 @@ func (m *Manager) ensureChildInstance(child CompositionChild, childParams map[st
 	if _, exists, err := m.store.loadCurrent(childID); err == nil && exists {
 		return childID, nil
 	}
-	if _, err := m.instantiateTemplate(childID, child.Template, materialized, childParams); err != nil {
+	if _, err := m.instantiateTemplate(childID, child.Template, nil, materialized, childParams); err != nil {
 		return "", err
 	}
 	return childID, nil
+}
+
+// resolveAndValidateChildParams resolves one composition child's declared
+// param bindings against the parent instance's params and validates the
+// resolved values against the child template, so an unresolvable binding or
+// invalid value fails before the child is materialized (mirroring top-level
+// instantiate).
+func resolveAndValidateChildParams(template Template, child CompositionChild, params map[string]string) (map[string]string, error) {
+	childParams, err := resolveChildParams(template, child.NodeID, params)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateInstanceParams(child.Template, childParams); err != nil {
+		return nil, err
+	}
+	return childParams, nil
 }
 
 // resolveChildParams resolves one workflow-action node's declared child

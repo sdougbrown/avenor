@@ -100,7 +100,7 @@ Error codes:
 | -32014 | Control server stopped (`control server stopped`): refused because the server is shutting down |
 | -32020 | Backend prompt unsupported |
 | -32030 | Idempotency store capacity exceeded |
-| -32031 | Idempotency conflict (reused spawn key or re-registered template id+version with different content) |
+| -32031 | Idempotency conflict (reused spawn key, re-registered template id+version with different content, or reused workflow instantiate key with a different request) |
 
 ## Notifications (Server → Client)
 
@@ -480,7 +480,7 @@ The `workflow.controller.create`, `workflow.controller.enable`, `workflow.contro
 | Method | Params | Purpose |
 |------|------|---------|
 | `workflow.create` | template JSON | Register a versioned template. |
-| `workflow.instantiate` | `{template_id, template_version, params?, metadata?}` | Create an instance. `params` must satisfy the template's declared `params`. |
+| `workflow.instantiate` | `{template_id, template_version, params?, metadata?, idempotency_key?}` | Create an instance. `params` must satisfy the template's declared `params`. With `idempotency_key`, a retried request with the same key, template, version, and params returns the original workflow ID (even after the instance went terminal); a different request under the same key is a conflict error (-32031). |
 | `workflow.status` | `{workflow_id}` | Snapshot summary. |
 | `workflow.wait` | `{workflow_id, timeout_ms?}` | Block until terminal or timeout (default 5000ms). |
 | `workflow.inspect` | `{workflow_id}` | Full instance detail. |
