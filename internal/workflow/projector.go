@@ -34,10 +34,20 @@ func mdEsc(s string) string {
 
 // WriteProjections renders every projection for snap and writes the files
 // under dir (the instance directory). It creates node directories as needed.
+// writeProjection writes one projection owner-only. WriteFile keeps an existing
+// file's mode, so a projection an earlier version wrote stays readable unless it
+// is chmodded here too.
+func writeProjection(path, content string) error {
+	if err := os.WriteFile(path, []byte(content), StateFilePerm); err != nil {
+		return err
+	}
+	return os.Chmod(path, StateFilePerm)
+}
+
 // A projection is a derived artifact: callers (the store) treat an error as
 // non-fatal, so this never blocks a committed state transition.
 func WriteProjections(dir string, snap Snapshot) error {
-	if err := os.WriteFile(filepath.Join(dir, "workflow.md"), []byte(ProjectWorkflowMD(snap)), StateFilePerm); err != nil {
+	if err := writeProjection(filepath.Join(dir, "workflow.md"), ProjectWorkflowMD(snap)); err != nil {
 		return err
 	}
 	for _, nodeID := range distinctNodes(snap.Instance.Activations) {
@@ -48,12 +58,12 @@ func WriteProjections(dir string, snap Snapshot) error {
 		if err := os.MkdirAll(nodeDir, StateDirPerm); err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(nodeDir, "execution.md"), []byte(ProjectExecutionMD(snap, nodeID)), StateFilePerm); err != nil {
+		if err := writeProjection(filepath.Join(nodeDir, "execution.md"), ProjectExecutionMD(snap, nodeID)); err != nil {
 			return err
 		}
 		for i, gi := range gatesForNode(snap, nodeID) {
 			name := fmt.Sprintf("review-%d.md", i+1)
-			if err := os.WriteFile(filepath.Join(nodeDir, name), []byte(ProjectReviewMD(snap, gi)), StateFilePerm); err != nil {
+			if err := writeProjection(filepath.Join(nodeDir, name), ProjectReviewMD(snap, gi)); err != nil {
 				return err
 			}
 		}

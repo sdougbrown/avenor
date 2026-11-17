@@ -125,3 +125,34 @@ func TestRewrittenEventLogIsTightened(t *testing.T) {
 		t.Fatalf("event log mode = %o, want %o", got, StateFilePerm)
 	}
 }
+
+// TestRewrittenProjectionIsTightened proves a projection an earlier version wrote
+// world-readable becomes owner-only the next time the store regenerates it.
+func TestRewrittenProjectionIsTightened(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	wf := WorkflowID("wf-legacy-projection")
+	mustInstantiate(t, s, wf)
+	projPath := filepath.Join(s.instanceDir(wf), "workflow.md")
+	if err := os.Chmod(projPath, 0o644); err != nil {
+		t.Fatalf("chmod projection: %v", err)
+	}
+	if _, err := s.ApplyCommand(wf, Command{
+		ID:               NewCommandID(),
+		Kind:             CommandCancel,
+		ExpectedRevision: 1,
+		IdempotencyKey:   "cancel-" + string(wf),
+		Identity:         ExecutionIdentity{WorkflowID: wf},
+		Actor:            "operator",
+		Reason:           "privacy test",
+	}); err != nil {
+		t.Fatalf("ApplyCommand: %v", err)
+	}
+	info, err := os.Stat(projPath)
+	if err != nil {
+		t.Fatalf("stat projection: %v", err)
+	}
+	if got := info.Mode().Perm(); got != StateFilePerm {
+		t.Fatalf("projection mode = %o, want %o", got, StateFilePerm)
+	}
+}
