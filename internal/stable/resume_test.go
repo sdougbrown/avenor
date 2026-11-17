@@ -1066,6 +1066,13 @@ func TestResumeCarriesParkChoice(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("park:false prior did not end after its turn")
 		}
+		// Resume admission closes before provider teardown, so the prior's run
+		// goroutine must have finished before the resume opens the session.
+		select {
+		case <-priorChild.runDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("park:false prior teardown did not finish")
+		}
 
 		resumed, err := sup.Resume(owner, messaging.ResumeRequest{
 			RunID: resumeUUID1, Target: prior.RuntimeID, Message: "continue",
