@@ -442,20 +442,28 @@ func validateInstanceParams(template Template, params map[string]string) error {
 	return nil
 }
 
-// validateParamValue enforces the value rules for one instance parameter.
-func validateParamValue(name, value string) error {
+// validateDurableString applies the caller-supplied durable-string rule
+// shared by every caller-supplied string persisted under the workflow root:
+// non-empty, bounded length, no control characters. label names the input in
+// error messages.
+func validateDurableString(label, value string) error {
 	if value == "" {
-		return fmt.Errorf("instance params: %q must not be empty", name)
+		return fmt.Errorf("%s must not be empty", label)
 	}
 	if len(value) > maxInstanceParamValueLength {
-		return fmt.Errorf("instance params: %q exceeds %d characters", name, maxInstanceParamValueLength)
+		return fmt.Errorf("%s exceeds %d characters", label, maxInstanceParamValueLength)
 	}
 	for _, r := range value {
 		if r < 0x20 || r == 0x7f {
-			return fmt.Errorf("instance params: %q must not contain control characters", name)
+			return fmt.Errorf("%s must not contain control characters", label)
 		}
 	}
 	return nil
+}
+
+// validateParamValue enforces the value rules for one instance parameter.
+func validateParamValue(name, value string) error {
+	return validateDurableString(fmt.Sprintf("instance params: %q", name), value)
 }
 
 // isValidParamID reports whether name is a path-safe identifier: letters,
