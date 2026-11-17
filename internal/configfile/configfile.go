@@ -7,6 +7,10 @@
 // DisallowUnknownFields semantics and json struct tags are applied uniformly
 // across all formats. This keeps deferred or misspelled fields from silently
 // becoming no-ops regardless of how the author chose to write the file.
+//
+// Numeric strictness is JSON-shaped too: non-JSON numbers pass through
+// json.Marshal first. An integer-valued literal such as 3.0 or 1e2 therefore
+// decodes into an int field, though JSON rejects it directly.
 package configfile
 
 import (
