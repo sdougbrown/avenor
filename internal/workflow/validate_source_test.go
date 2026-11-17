@@ -35,7 +35,7 @@ func TestValidateOutputSourceShape(t *testing.T) {
 		{
 			name:    "artifact and git together",
 			source:  map[string]any{"artifact": "result.md", "git": "head"},
-			wantErr: `output "summary" declares both artifact and git source`,
+			wantErr: `output "summary" declares more than one of artifact, git, or command source`,
 		},
 		{
 			name:    "empty source",

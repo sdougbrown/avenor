@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -68,6 +69,11 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+func sha256Bytes(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 // copyStream copies src to destPath with O_CREATE|O_EXCL so it never
 // overwrites an existing file, and fsyncs the result.
 func copyStream(src io.Reader, destPath string) error {
@@ -118,6 +124,19 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 	}
 	defer in.Close()
 	return stageStream(in, digest, destDir, storedName, required, expectedSHA, syncRoot, fsync)
+}
+
+// stageBytes stages in-memory bytes as evidence, with the same immutability,
+// digest, and non-empty guarantees as a staged file.
+func stageBytes(destDir, storedName string, data []byte, required bool, expectedSHA string, syncRoot string, fsync func(string) error) (int64, string, error) {
+	if required && len(data) == 0 {
+		return 0, "", errors.New("evidence: required content is empty")
+	}
+	digest := sha256Bytes(data)
+	if expectedSHA != "" && !strings.EqualFold(digest, expectedSHA) {
+		return 0, "", fmt.Errorf("evidence: sha256 mismatch for %q", storedName)
+	}
+	return stageStream(bytes.NewReader(data), digest, destDir, storedName, required, expectedSHA, syncRoot, fsync)
 }
 
 // stageStream is the core primitive for staging evidence. It copies src into the
@@ -284,6 +303,26 @@ func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string,
 	}, nil
 }
 
+// stageEvidenceBytes stages in-memory bytes as immutable evidence, so a
+// supervisor-captured document never exists as a scratch file on the way into
+// the store. It is package-private: the only bytes it may stage are ones the
+// supervisor captured itself, never a caller-supplied payload.
+func (s *Store) stageEvidenceBytes(workflowID WorkflowID, data []byte, storedName string, required bool, expectedSHA256 string) (StagedEvidence, error) {
+	evID, size, digest, err := s.stageIntoFreshDir(workflowID, storedName, func(dir string) (int64, string, error) {
+		return stageBytes(dir, storedName, data, required, expectedSHA256, s.instanceDir(workflowID), s.syncDir)
+	})
+	if err != nil {
+		return StagedEvidence{}, err
+	}
+
+	return StagedEvidence{
+		EvidenceID: evID,
+		StoredPath: filepath.Join("evidence", string(evID), storedName),
+		Size:       size,
+		SHA256:     digest,
+	}, nil
+}
+
 // stageIntoFreshDir stages under a fresh evidence ID. On failure, it attempts
 // to remove that ID's directory without touching shared ancestors.
 func (s *Store) stageIntoFreshDir(workflowID WorkflowID, storedName string, stage func(dir string) (int64, string, error)) (EvidenceID, int64, string, error) {
@@ -313,8 +352,8 @@ func (s *Store) stageIntoFreshDir(workflowID WorkflowID, storedName string, stag
 // prepareEvidenceDir validates one staging request and returns a fresh evidence
 // ID with its directory.
 func (s *Store) prepareEvidenceDir(workflowID WorkflowID, storedName string) (EvidenceID, string, error) {
-	if !safeComponent(string(workflowID)) {
-		return "", "", errors.New("invalid workflow id")
+	if err := validateWorkflowID(string(workflowID)); err != nil {
+		return "", "", err
 	}
 	if err := validateStoredPath(storedName); err != nil {
 		return "", "", err

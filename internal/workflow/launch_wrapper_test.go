@@ -317,42 +317,42 @@ func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
 		{
 			name: "empty literal value",
 			mutate: func(w *LaunchWrapperDefinition) {
-				w.Argv = []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"}, {Type: LaunchWrapperArgKindLiteral}}
+				w.Argv = []ArgvElement{{Type: ArgvElementKindLiteral, Value: "/usr/local/bin/claude"}, {Type: ArgvElementKindLiteral}}
 			},
 			wantErr: "literal value must not be empty",
 		},
 		{
 			name: "wrong discriminator",
 			mutate: func(w *LaunchWrapperDefinition) {
-				w.Argv = []LaunchWrapperArg{{Type: LaunchWrapperArgKind("env"), Value: absolute}}
+				w.Argv = []ArgvElement{{Type: ArgvElementKind("env"), Value: absolute}}
 			},
-			wantErr: `type "env" is not a launch_wrapper_arg type`,
+			wantErr: `type "env" is not an argv element type`,
 		},
 		{
 			name: "missing discriminator",
 			mutate: func(w *LaunchWrapperDefinition) {
-				w.Argv = []LaunchWrapperArg{{Value: absolute}}
+				w.Argv = []ArgvElement{{Value: absolute}}
 			},
-			wantErr: `type "" is not a launch_wrapper_arg type`,
+			wantErr: `type "" is not an argv element type`,
 		},
 		{
 			name: "literal with the instance-param field also set",
 			mutate: func(w *LaunchWrapperDefinition) {
-				w.Argv = []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: absolute, FromInstanceParam: "worktree"}}
+				w.Argv = []ArgvElement{{Type: ArgvElementKindLiteral, Value: absolute, FromInstanceParam: "worktree"}}
 			},
 			wantErr: "must not declare from_instance_param",
 		},
 		{
 			name: "instance param with the literal value also set",
 			mutate: func(w *LaunchWrapperDefinition) {
-				w.Argv = []LaunchWrapperArg{{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree", Value: absolute}}
+				w.Argv = []ArgvElement{{Type: ArgvElementKindInstanceParam, FromInstanceParam: "worktree", Value: absolute}}
 			},
 			wantErr: "must not declare value",
 		},
 		{
 			name: "first element is an instance param",
 			mutate: func(w *LaunchWrapperDefinition) {
-				w.Argv = []LaunchWrapperArg{{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree"}}
+				w.Argv = []ArgvElement{{Type: ArgvElementKindInstanceParam, FromInstanceParam: "worktree"}}
 			},
 			wantErr: "argv[0] must be a literal absolute executable path",
 		},
@@ -367,7 +367,7 @@ func TestValidateLaunchWrapperInMemoryCrossFields(t *testing.T) {
 				Nodes:            []NodeDefinition{{ID: "start", Action: Action{Kind: ActionRun, Run: &RunAction{Prompt: "p"}}, LaunchWrapper: "claude"}},
 				TerminalOutcomes: []OutcomeName{"done"},
 				Params:           []TemplateParam{{ID: "worktree", Type: "string", Required: true}},
-				LaunchWrappers:   []LaunchWrapperDefinition{{ID: "claude", Argv: []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: absolute}}}},
+				LaunchWrappers:   []LaunchWrapperDefinition{{ID: "claude", Argv: []ArgvElement{{Type: ArgvElementKindLiteral, Value: absolute}}}},
 			}
 			tc.mutate(&template.LaunchWrappers[0])
 			err := ValidateTemplate(template)
@@ -420,13 +420,13 @@ func TestLaunchWrapperRoundTripPreservesExactArguments(t *testing.T) {
 	if len(wrapper.Argv) != 3 {
 		t.Fatalf("argv length = %d, want 3", len(wrapper.Argv))
 	}
-	if wrapper.Argv[0] != (LaunchWrapperArg{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"}) {
+	if wrapper.Argv[0] != (ArgvElement{Type: ArgvElementKindLiteral, Value: "/usr/local/bin/claude"}) {
 		t.Fatalf("argv[0] = %+v", wrapper.Argv[0])
 	}
 	if wrapper.Argv[1].Value != spaces {
 		t.Fatalf("argv[1].value = %q, want %q", wrapper.Argv[1].Value, spaces)
 	}
-	if wrapper.Argv[2] != (LaunchWrapperArg{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree"}) {
+	if wrapper.Argv[2] != (ArgvElement{Type: ArgvElementKindInstanceParam, FromInstanceParam: "worktree"}) {
 		t.Fatalf("argv[2] = %+v", wrapper.Argv[2])
 	}
 	encoded, err := json.Marshal(template)
@@ -450,10 +450,10 @@ func TestResolveNodeLaunchWrapper(t *testing.T) {
 	template := Template{
 		LaunchWrappers: []LaunchWrapperDefinition{{
 			ID: "claude",
-			Argv: []LaunchWrapperArg{
-				{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"},
-				{Type: LaunchWrapperArgKindLiteral, Value: "--workdir with spaces and $dollar"},
-				{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree"},
+			Argv: []ArgvElement{
+				{Type: ArgvElementKindLiteral, Value: "/usr/local/bin/claude"},
+				{Type: ArgvElementKindLiteral, Value: "--workdir with spaces and $dollar"},
+				{Type: ArgvElementKindInstanceParam, FromInstanceParam: "worktree"},
 			},
 		}},
 	}
@@ -517,14 +517,14 @@ func TestResolveNodeLaunchWrapper(t *testing.T) {
 	// Fail closed on unvalidated argv, even when the caller skipped validation.
 	unvalidated := []struct {
 		name string
-		argv []LaunchWrapperArg
+		argv []ArgvElement
 	}{
-		{"empty literal value", []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"}, {Type: LaunchWrapperArgKindLiteral}}},
-		{"NUL in a literal value", []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: "/usr/local/bin/claude"}, {Type: LaunchWrapperArgKindLiteral, Value: "a\x00b"}}},
-		{"non-literal executable", []LaunchWrapperArg{{Type: LaunchWrapperArgKind("env"), Value: "/usr/local/bin/claude"}}},
+		{"empty literal value", []ArgvElement{{Type: ArgvElementKindLiteral, Value: "/usr/local/bin/claude"}, {Type: ArgvElementKindLiteral}}},
+		{"NUL in a literal value", []ArgvElement{{Type: ArgvElementKindLiteral, Value: "/usr/local/bin/claude"}, {Type: ArgvElementKindLiteral, Value: "a\x00b"}}},
+		{"non-literal executable", []ArgvElement{{Type: ArgvElementKind("env"), Value: "/usr/local/bin/claude"}}},
 		{"empty argv", nil},
-		{"relative executable", []LaunchWrapperArg{{Type: LaunchWrapperArgKindLiteral, Value: "bin/wrapper"}}},
-		{"instance-param executable", []LaunchWrapperArg{{Type: LaunchWrapperArgKindInstanceParam, FromInstanceParam: "worktree"}}},
+		{"relative executable", []ArgvElement{{Type: ArgvElementKindLiteral, Value: "bin/wrapper"}}},
+		{"instance-param executable", []ArgvElement{{Type: ArgvElementKindInstanceParam, FromInstanceParam: "worktree"}}},
 	}
 	for _, tc := range unvalidated {
 		t.Run(tc.name, func(t *testing.T) {

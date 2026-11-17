@@ -116,6 +116,9 @@ const (
 	CompletionExplicit CompletionContractKind = "explicit"
 	CompletionFiles    CompletionContractKind = "files"
 	CompletionGit      CompletionContractKind = "git"
+	// CompletionCommand runs a supervisor-side external-state check after the
+	// worker exits successfully.
+	CompletionCommand CompletionContractKind = "command"
 )
 
 // OutputType is the portable type of a declared workflow output.

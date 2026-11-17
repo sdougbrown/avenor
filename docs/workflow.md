@@ -87,12 +87,12 @@ The workflow root separates reusable templates from instantiated workflows:
 `workflow.json` is the authoritative snapshot. `events.ndjson` is the
 append-only history and recovery source.
 
-The root holds prompts, outputs, and staged evidence, so a root this version
-creates is **private to its owner**: directories are created `0700` and files
-`0600`. A root created by an earlier version keeps its directory modes, and this
-version tightens a snapshot, event log, template, or projection when it next
-rewrites that file. Tightening the rest of a deployed root is the operator's
-decision.
+The root holds prompts, outputs, a completion check's captured streams, and
+staged evidence, so a root this version creates is **private to its owner**:
+directories are created `0700` and files `0600`. A root created by an earlier
+version keeps its directory modes, and this version tightens a snapshot, event
+log, template, or projection when it next rewrites that file. Tightening the rest
+of a deployed root is the operator's decision.
 
 The `.md` files are **generated projections**, not agent-authored inputs. The
 store applies each command under one POSIX file lock: load the snapshot, validate the command, append the event
@@ -203,27 +203,118 @@ A node's `completion` contract selects a safe machine evaluator:
 | `explicit` | no | An explicit worker handoff; may precede the attempt's termination. |
 | `files` | yes | Declares artifact requirements; completion waits for the attempt's terminal fact. |
 | `git` | yes | Declares a git requirement (`clean`, `head`, `changed_from_base`); waits for the terminal fact. |
+| `command` | yes | Runs a declared check command against external state after the attempt's terminal fact; exit 0 meets the contract. |
 
-The contract's `artifacts` and `git` fields are **declarations** of what the
-controller should supply and verify; the `workflow.complete` command stages and
-hashes the supplied artifacts and validates the declared outputs and outcome.
-A `files` or `git` contract cannot complete before the attempt reaches a
-terminal status.
+The contract's `artifacts`, `git`, and `command` fields are **declarations** of
+what the controller should supply and verify; the `workflow.complete` command
+stages and hashes the supplied artifacts and validates the declared outputs and
+outcome. A `files`, `git`, or `command` contract cannot complete before the
+attempt reaches a terminal status.
 
 An auto-dispatched `run`, `loop`, or `team` node is completed by the
 supervisor itself when its attempt exits successfully — the worker never
 sees the owner token and files no completion. The supervisor evaluates the
 declared contract against the attempt's working directory: the outcome comes
 from the node's declared outcome vocabulary when it has exactly one
-candidate, otherwise from the loop/team terminal marker label; the files/git
-requirements and the declared output sources are checked against the work
-product. A contract that is not met is recorded as a failed attempt with the
-`contract_unmet` marker, so the node's retry policy and exhaustion apply.
+candidate, otherwise from the loop/team terminal marker label; the files/git/
+command requirements and the declared output sources are checked against the
+work product. A contract that is not met is recorded as a failed attempt with
+the `contract_unmet` marker, so the node's retry policy and exhaustion apply.
 For that reason an auto provider node must not declare `completion.kind:
 explicit`, and must not declare `completion.git.changed_from_base` (no base
 commit is recorded for the supervisor to compare against) — such templates
 are rejected. Manual nodes and external nodes keep explicit worker/operator
 handoff.
+
+#### Completion command
+
+A `command` contract checks state the work product alone cannot show, such as
+whether a push landed or a service reports healthy:
+
+```json
+"completion": {
+  "kind": "command",
+  "command": {
+    "argv": [
+      {"type": "literal", "value": "/usr/local/bin/check-branch"},
+      {"type": "literal", "value": "--porcelain"},
+      {"type": "instance_param", "from_instance_param": "repository"}
+    ],
+    "timeout_seconds": 30
+  }
+},
+"outputs": [{
+  "id": "head", "name": "Head", "type": "string", "required": true,
+  "source": {"command": "stdout", "pointer": "/head_sha"}
+}]
+```
+
+- `argv` uses the same element vocabulary as a
+  [launch wrapper](#launch-wrappers): each element is either a literal passed
+  through verbatim or a required instance parameter's recorded value. Elements
+  are never split, joined, or shell-expanded, `argv[0]` must be a literal
+  absolute executable path, and there is no `PATH` lookup.
+- The check runs directly — no shell — in the attempt's working directory,
+  with an **empty environment**. It does not inherit the supervisor's or the
+  worker's environment variables. It runs as the supervisor's user, so it is
+  bounded and contained, not sandboxed.
+- `timeout_seconds` (1–300) bounds the check. Its process group is killed on
+  the deadline, on cancellation (a canceled attempt or a torn-down runtime
+  kills the check with its group), and when a captured stream passes its limit.
+  The supervisor also kills remaining group members after the check exits.
+- Exit 0 meets the contract. A non-zero exit, a deadline, an over-limit
+  stream, or a check that cannot be started leaves it unmet: the attempt is
+  recorded `contract_unmet` with a bounded diagnostic, and the node's
+  `retry_policy` applies. A check killed by the attempt's own cancellation
+  records the attempt `canceled` instead, matching every other canceled
+  terminal path.
+- **A check's argv (including any instance parameter substituted into it) and
+  its output can hold sensitive data.** The captured streams
+  are persisted as owner-only evidence (`0600` files in `0700` directories for a
+  root this version creates), and the supervisor's log line names only the exit
+  status or the deadline — the check's own output is never quoted into the log,
+  so read it from the evidence. Securing an existing workflow root and its
+  previously staged evidence is the operator's call. The check runs as the
+  supervisor's own user, which is not isolation from the worker.
+- **Either way the run is evidenced.** The check's stdout is capped at 64 KiB
+  and its stderr at 16 KiB; the streams are staged as immutable evidence
+  (`completion-command.stdout`, and `completion-command.stderr` when the check
+  wrote any) with their size and SHA-256. The stdout entry also carries a run
+  summary in its `result`: the resolved `argv`, the `termination`
+  (`exited`, `timed_out`, `canceled`, `output_too_large`, `start_failed`,
+  `signaled`), the `exit_code` when the check exited on its own (a check that
+  dies on a signal reports `signaled` and records no exit code), `duration_ms`,
+  both streams' byte counts and digests, `streams_truncated` when a descendant
+  that left the check's process group kept the streams open past the runner's
+  drain bound, and the bounded `diagnostic`. `workflow inspect` lists every
+  entry with its `stored_path`, `sha256`, and `result`, so a passing check and
+  a failed one are inspected the same way. The runner kills the check's process
+  group on the deadline, on cancellation, on an over-limit stream, and after
+  the check exits. A descendant that established its own session is beyond that group, so it is
+  never killed — the runner bounds its own wait instead and the captured
+  streams stop where that bound falls, keeping every byte written before it. Because that cuts the capture short, a
+  check whose streams were held cannot satisfy a node that declares an output
+  read from its stdout (`{"command": "stdout", ...}`): the contract is unmet and
+  the capture is still recorded, flagged `streams_truncated`. A node with no
+  stdout-derived output is unaffected — its contract is the exit status, and the
+  truncated capture is recorded as evidence rather than silently trusted.
+- A check may run again for a replacement attempt after a recovery, so it must
+  be read-only and idempotent.
+- A command contract requires `dispatch.mode: "auto"` on a `run`, `loop`, or
+  `team` node: the supervisor is its only evaluator. It declares no
+  `artifacts` and no `git` requirement.
+
+**Trust boundary.** A command contract's verdict is the supervisor's own check
+execution. The public `workflow.complete` command cannot satisfy such a node,
+even presented with the attempt's lease token: a completion for a
+`completion.kind: "command"` node that does not come from the supervisor's
+evaluation is rejected before any evidence is staged and before the attempt's
+completion idempotency key (`complete-<attempt>`) is touched, so a caller can
+neither skip the check nor win the completion ahead of it. `files`, `git`, and
+`explicit` contracts keep their ordinary handoff — a worker or operator declares
+artifacts and an outcome, and the command stages and validates them. The
+guarantee is that the check cannot be *skipped*; same-UID execution is still not
+isolation, so a compromised worker process is not contained by this.
 
 ### Outputs
 
@@ -239,15 +330,17 @@ resolves against the attempt's working directory:
 | Source | Resolves to |
 |---|---|
 | `{"artifact": "path"}` | The whole declared artifact (file outputs): the output value is the artifact path, bound to the staged evidence. |
-| `{"artifact": "path", "pointer": "/json/pointer"}` | One RFC 6901 pointer location inside a JSON artifact; the resolved value must match the declared output type. |
+| `{"artifact": "path", "pointer": "/json/pointer"}` | One RFC 6901 pointer location inside a JSON artifact; the resolved value must match the declared output type. The document must be exactly one JSON value — trailing content after it is rejected, trailing whitespace is not. |
+| `{"command": "stdout", "pointer": "/json/pointer"}` | One RFC 6901 pointer location inside the completion command's capped stdout; requires the node's `command` contract. |
 | `{"git": "head"}` | `git rev-parse HEAD` in the attempt's working directory (string outputs). |
 
 An `artifact` source path must be one of the node's `files` contract
-artifacts, a `pointer` requires an `artifact`, and exactly one of `artifact`
-or `git` may be declared. The source must fit the output type: a whole
-`artifact` source requires a `file` output, a `pointer` source requires a
-non-`file` output, and a `git` source requires a `string` output. Artifact
-and source paths must stay inside the attempt's working directory. Without a `source`, a `file` output on a node
+artifacts, a `pointer` requires an `artifact` or the `command` source, and
+exactly one of `artifact`, `git`, or `command` may be declared. The source must
+fit the output type: a whole `artifact` source requires a `file` output, a
+`pointer` source requires a non-`file` output, and a `git` source requires a
+`string` output. Artifact and source paths must stay inside the attempt's
+working directory. Without a `source`, a `file` output on a node
 whose files contract declares exactly one artifact binds to that artifact.
 Required outputs that do not resolve leave the contract unmet; optional
 ones are omitted.
@@ -270,7 +363,9 @@ started explicitly, and ordinary spawn behavior is unaffected.
 nodes that declare a `success_outcome` with at least one required external
 gate. An auto `run`, `loop`, or `team` node must not declare
 `completion.kind: explicit`: the supervisor completes it from the declared
-contract, and no worker handoff exists.
+contract, and no worker handoff exists. A
+[command contract](#completion-command) is declared only on an auto provider
+node, since the supervisor is its only evaluator.
 
 ### Messaging
 
@@ -488,7 +583,9 @@ A node selects a wrapper by ID with `launch_wrapper`, a sibling of `action`
   as one complete argv element — whole-argv substitution, with no interpolation
   or expansion. `argv[0]` must be a literal absolute path. References must name
   declared, required `string` params. Unknown or duplicate wrapper IDs and
-  invalid argv are rejected at validation.
+  invalid argv are rejected at validation. A
+  [completion command](#completion-command) declares its `argv` in the same
+  vocabulary.
 - **Selection.** Only `run`, `loop`, and `team` nodes select a wrapper. Phases
   inherit the parent's resolved argv; child workflows do not. There is no
   template default. An existing session's ownership persists the resolved argv;
@@ -643,6 +740,11 @@ A complete request file carries `owner_token`, `outcome`, `outputs`, and
   ]
 }
 ```
+
+An artifact names a file source only: `src_path`, which the store copies into
+the instance's evidence directory and verifies against `sha256` when declared.
+A supervisor's own captures (a completion check's streams) never travel on this
+request; they are staged from memory on the supervisor's side.
 
 The `outcome` must be a declared branch key or a template terminal outcome —
 undeclared outcomes are rejected. If the node declares required gates that are

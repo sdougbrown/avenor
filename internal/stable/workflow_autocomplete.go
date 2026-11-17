@@ -1,6 +1,7 @@
 package stable
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -29,31 +30,47 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	}
 	if status != workflow.AttemptSucceeded {
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, child.dir, string(status), kind, label)
+		s.recordAttemptTerminal(ec, child.dir, string(status), kind, label, nil)
 		return
 	}
 
 	mgr := s.workflowManager()
-	eligible, plan, rejection, err := mgr.DecideAutoCompletion(
-		ec.WorkflowID, ec.NodeID, ec.ActivationID, child.dir, label)
+	// The child's lifecycle context carries the attempt's cancellation, so a
+	// completion command is killed with its process group when the attempt is
+	// canceled. The same applies when the runtime is torn down mid-check.
+	ctx := child.lifecycleCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	decision, err := mgr.DecideAutoCompletion(
+		ctx, ec.WorkflowID, ec.NodeID, ec.ActivationID, child.dir, label)
 	if err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: cannot decide auto-completion, recording the plain terminal fact: %v\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, err)
 	}
-	if !eligible {
+	if !decision.Eligible {
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, child.dir, string(status), kind, label)
+		s.recordAttemptTerminal(ec, child.dir, string(status), kind, label, nil)
 		return
 	}
-	if plan == nil {
-		// Contract unmet: the node's retry policy and exhaustion apply, and
-		// the activation is never left running after the worker exited.
+	if decision.Plan == nil {
+		// Contract unmet: the node's retry policy and exhaustion apply, and the
+		// activation is never left running after the worker exited. Any evidence
+		// the declared check captured rides the failed attempt, so the rejection
+		// stays inspectable after the log line scrolls away. A rejection that is
+		// the attempt's own cancellation records a canceled attempt, matching
+		// every other canceled terminal path.
+		status, marker := workflow.AttemptFailed, "contract_unmet"
+		if decision.Canceled {
+			status, marker = workflow.AttemptCanceled, "canceled"
+		}
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: auto-completion contract unmet: %s\n",
-			ec.WorkflowID, ec.NodeID, ec.AttemptID, rejection)
+			ec.WorkflowID, ec.NodeID, ec.AttemptID, decision.Rejection)
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, child.dir, string(workflow.AttemptFailed), kind, "contract_unmet")
+		s.recordAttemptTerminal(ec, child.dir, string(status), kind, marker, decision.FailureEvidence)
 		return
 	}
+	plan := decision.Plan
 
 	// The terminal fact precedes the complete command because files/git
 	// completion contracts require it; the heartbeat still runs and keeps the
@@ -101,17 +118,18 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	hb.StopAndWait()
 }
 
-// recordAttemptTerminal records the plain terminal fact for an attempt the
-// supervisor does not auto-complete (manual nodes, external nodes,
-// non-success exits), carrying the working directory the attempt's runtime
-// ran in.
-func (s *Supervisor) recordAttemptTerminal(ec workflow.ExecutorContext, dir, status string, kind, label string) {
+// recordAttemptTerminal records the terminal fact for an attempt the supervisor
+// does not auto-complete: manual nodes, external nodes, non-success exits, and an
+// unmet contract. It carries the working directory the attempt's runtime ran in
+// and any inspection evidence captured for it.
+func (s *Supervisor) recordAttemptTerminal(ec workflow.ExecutorContext, dir, status string, kind, label string, evidence []workflow.CommandCapture) {
 	if err := s.workflowManager().RecordAttemptTermination(
 		ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptTermination{
 			Status:           workflow.AttemptStatus(status),
 			MarkerKind:       kind,
 			MarkerLabel:      label,
 			WorkingDirectory: dir,
+			Evidence:         evidence,
 		}); err != nil {
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: record %s terminal fact: %v\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, status, err)

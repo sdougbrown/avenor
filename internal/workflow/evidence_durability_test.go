@@ -7,6 +7,7 @@ package workflow
 // file, and an uncommitted command's staged copies are still removed.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -164,6 +165,72 @@ func TestCompleteEvidenceRetryAfterSnapshotWriteFailureIsIdempotent(t *testing.T
 	}
 	if staged := stagedEvidenceCopies(t, s, wf); len(staged) != 1 {
 		t.Fatalf("staged evidence = %d copies, want the retry's copy discarded", len(staged))
+	}
+}
+
+// TestFailedAttemptEvidenceSurvivesSnapshotWriteFailure proves the terminate path
+// keeps its evidence when its events are durable but the snapshot replace failed.
+// A replay then recovers the attempt fact with the exact captured bytes, and
+// repeating the fact is an idempotent no-op.
+func TestFailedAttemptEvidenceSurvivesSnapshotWriteFailure(t *testing.T) {
+	t.Parallel()
+	m, s, wf := newManualFixture(t)
+	actID, attemptID, leaseID, _ := startedNodeAttempt(t, m, s, wf, "start")
+	captures := failedCheckCaptures(t)
+	want := string(captures[0].Data)
+
+	failNextSnapshotReplace(t, s)
+	err := m.RecordAttemptTermination(wf, "start", actID, attemptID, leaseID, AttemptTermination{
+		Status:      AttemptFailed,
+		MarkerKind:  "manual",
+		MarkerLabel: "contract_unmet",
+		Evidence:    captures,
+	})
+	s.SetSnapshotWriteFault(nil)
+	if !errors.Is(err, ErrCommandDurable) {
+		t.Fatalf("error = %v, want ErrCommandDurable", err)
+	}
+	staged := stagedEvidenceCopies(t, s, wf)
+	if len(staged) != 1 {
+		t.Fatalf("staged evidence = %d copies, want the durable fact's one", len(staged))
+	}
+
+	replayed, exists, err := s.recoverInstance(wf)
+	if err != nil || !exists {
+		t.Fatalf("recoverInstance: %v (exists %v)", err, exists)
+	}
+	attempt := findAttempt(&replayed, activationByNode(&replayed.Instance, "start"), attemptID)
+	if attempt == nil || attempt.Status != AttemptFailed || attempt.MarkerLabel != "contract_unmet" {
+		t.Fatalf("replayed attempt = %+v, want failed/contract_unmet", attempt)
+	}
+	if len(replayed.Instance.Evidence) != 1 {
+		t.Fatalf("replayed evidence = %+v, want the attempt's capture", replayed.Instance.Evidence)
+	}
+	evidence := replayed.Instance.Evidence[0]
+	stored, err := os.ReadFile(filepath.Join(s.Root(), "instances", string(wf), evidence.StoredPath))
+	if err != nil {
+		t.Fatalf("read replayed evidence: %v", err)
+	}
+	if string(stored) != want || sha256Hex(string(stored)) != evidence.SHA256 {
+		t.Fatalf("replayed copy = %q (digest %s), want the exact captured bytes", stored, evidence.SHA256)
+	}
+	if evidence.AttemptID != attemptID {
+		t.Fatalf("replayed evidence attempt = %s, want %s", evidence.AttemptID, attemptID)
+	}
+
+	if err := m.RecordAttemptTermination(wf, "start", actID, attemptID, leaseID, AttemptTermination{
+		Status:   AttemptFailed,
+		Evidence: captures,
+	}); err != nil {
+		t.Fatalf("repeat RecordAttemptTermination: %v", err)
+	}
+	fresh, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if len(fresh.Instance.Evidence) != 1 || len(stagedEvidenceCopies(t, s, wf)) != 1 {
+		t.Fatalf("repeat recorded %d entries / %d copies, want the one committed capture",
+			len(fresh.Instance.Evidence), len(stagedEvidenceCopies(t, s, wf)))
 	}
 }
 
@@ -414,3 +481,268 @@ func blockEvidenceRemoval(t *testing.T, s *Store) {
 	s.SetDiscardFault(func(EvidenceID) error { return errors.New("injected discard failure") })
 	t.Cleanup(func() { s.SetDiscardFault(nil) })
 }
+
+func commandContractFixture(t *testing.T) (m *Manager, s *Store, wf WorkflowID, attemptDir, checkPath string) {
+	t.Helper()
+	attemptDir = t.TempDir()
+	checkPath = commandScript(t, attemptDir, "check.sh", ": > check.sh.ran\nprintf '{\"state\":\"ready\"}\n'\n")
+	s = newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m = NewManager(s)
+	m.RegisterExecutor(ActionRun, &fakeExecutor{})
+	template := map[string]any{
+		"schema_version":       1,
+		"template_id":          "cmd-forge",
+		"template_version":     "1",
+		"entry_nodes":          []string{"produce"},
+		"terminal_outcomes":    []string{"done"},
+		"default_lease_policy": map[string]any{"ttl_seconds": 900},
+		"nodes": []any{map[string]any{
+			"id":       "produce",
+			"action":   map[string]any{"type": "run", "prompt": "work"},
+			"dispatch": map[string]any{"mode": "auto", "controller_id": "c1"},
+			"completion": map[string]any{"kind": "command", "command": map[string]any{
+				"argv":            []any{map[string]any{"type": "literal", "value": checkPath}},
+				"timeout_seconds": 10,
+			}},
+			"outputs": []any{map[string]any{
+				"id": "state", "name": "State", "type": "string", "required": true,
+				"source": map[string]any{"command": "stdout", "pointer": "/state"},
+			}},
+			"outcomes":     []any{map[string]any{"name": "done", "terminal": true}},
+			"retry_policy": map[string]any{"max_attempts": 2, "exhaustion": "block"},
+		}},
+	}
+	if _, err := m.WorkflowCreate(mustMarshal(t, template)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	wf = mustInstantiateTemplate(t, m, "cmd-forge", "1")
+	return m, s, wf, attemptDir, checkPath
+}
+
+// TestPublicCompleteCannotForgeACommandContract proves a command contract is
+// only reachable through the supervisor's own evaluation. A public
+// workflow.complete request is rejected, even with the attempt's lease token and
+// after the worker's terminal fact. The check therefore cannot be skipped, and the
+// completion idempotency key stays free for the supervisor's real completion.
+func TestPublicCompleteCannotForgeACommandContract(t *testing.T) {
+	t.Parallel()
+	m, s, wf, attemptDir, _ := commandContractFixture(t)
+	actID, attemptID, leaseID, ownerToken := startedNodeAttempt(t, m, s, wf, "produce")
+
+	// The worker exits successfully: the attempt's terminal fact is recorded.
+	if err := m.RecordAttemptTermination(wf, "produce", actID, attemptID, leaseID, AttemptTermination{
+		Status:     AttemptSucceeded,
+		MarkerKind: "run",
+	}); err != nil {
+		t.Fatalf("record success fact: %v", err)
+	}
+
+	// A lease-token holder forges the completion through the public command,
+	// supplying output values and no captured stdout. The payload also claims the
+	// supervisor's own authority in raw JSON: the marker is unexported, so the wire
+	// cannot supply it, and the attempt to try keeps the rejection identical.
+	forged := mustMarshal(t, map[string]any{
+		"op":            "complete",
+		"node_id":       "produce",
+		"activation_id": string(actID),
+		"attempt_id":    string(attemptID),
+		"lease_id":      string(leaseID),
+		"owner_token":   ownerToken,
+		"outcome":       "done",
+		"outputs":       []any{map[string]any{"definition_id": "state", "value": "ready"}},
+		"supervised":    true,
+		"captures": []any{map[string]any{
+			"StoredPath": completionCommandStdoutStoredPath,
+			"Data":       "eyJzdGF0ZSI6InJlYWR5In0K",
+		}},
+	})
+	if _, err := m.WorkflowCommand(string(wf), forged); err == nil {
+		t.Fatal("a public workflow.complete satisfied a command-contract node without running the check")
+	} else if !strings.Contains(err.Error(), "supervisor") {
+		t.Fatalf("error = %v, want the supervisor-only rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(attemptDir, "check.sh.ran")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the check ran for the forged completion: %v", err)
+	}
+
+	// The forged attempt left no evidence and no completion idempotency key.
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if len(snap.Instance.Evidence) != 0 {
+		t.Fatalf("instance evidence = %+v, want none", snap.Instance.Evidence)
+	}
+	if _, done := snap.Idempotency["complete-"+string(attemptID)]; done {
+		t.Fatal("the forged completion consumed the attempt's completion idempotency key")
+	}
+	if act := activationByNode(&snap.Instance, "produce"); act == nil || act.Status != ActivationRunning {
+		t.Fatalf("activation = %+v, want still running after the rejected completion", act)
+	}
+
+	// The genuine supervisor path runs the check, then completes the node.
+	decision, err := m.DecideAutoCompletion(context.Background(), wf, "produce", actID, attemptDir, "")
+	if err != nil {
+		t.Fatalf("DecideAutoCompletion: %v", err)
+	}
+	if !decision.Eligible || decision.Plan == nil {
+		t.Fatalf("decision = %+v, want an eligible plan", decision)
+	}
+	if _, err := os.Stat(filepath.Join(attemptDir, "check.sh.ran")); err != nil {
+		t.Fatalf("the check did not run on the supervisor path: %v", err)
+	}
+	if _, err := m.CompleteAuto(wf, "produce", actID, attemptID, leaseID, ownerToken, decision.Plan); err != nil {
+		t.Fatalf("CompleteAuto after the rejected forgery: %v", err)
+	}
+	final, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if final.Instance.Status != WorkflowCompleted {
+		t.Fatalf("workflow status = %s, want completed by the supervisor's check", final.Instance.Status)
+	}
+	if len(final.Instance.Evidence) == 0 {
+		t.Fatal("the supervisor completion recorded no evidence")
+	}
+	for _, evidence := range final.Instance.Evidence {
+		if evidence.AttemptID != attemptID {
+			t.Fatalf("evidence attempt = %s, want %s", evidence.AttemptID, attemptID)
+		}
+	}
+}
+
+// TestCompleteAutoMidStagingFailureRemovesEarlierCaptures proves the completion
+// path's staging cleanup, separately from the termination path. When a later
+// capture cannot be staged, the copies that already landed are removed and no
+// evidence is recorded.
+func TestCompleteAutoMidStagingFailureRemovesEarlierCaptures(t *testing.T) {
+	t.Parallel()
+	m, s, wf := newManualFixture(t)
+	actID, attemptID, leaseID, ownerToken := startedNodeAttempt(t, m, s, wf, "start")
+
+	captures := append(passedCheckCaptures(t, "{\"state\":\"ready\"}\n"),
+		CommandCapture{StoredPath: "../escape.stdout", Data: []byte("x")})
+	_, err := m.CompleteAuto(wf, "start", actID, attemptID, leaseID, ownerToken, &AutoCompletion{
+		Outcome:  "done",
+		Captures: captures,
+	})
+	if err == nil || !strings.Contains(err.Error(), "stage evidence") {
+		t.Fatalf("error = %v, want the staging failure", err)
+	}
+	if staged := stagedEvidenceCopies(t, s, wf); len(staged) != 0 {
+		t.Fatalf("staged evidence = %+v, want the earlier copy removed", staged)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if len(snap.Instance.Evidence) != 0 {
+		t.Fatalf("instance evidence = %+v, want none after a failed completion staging", snap.Instance.Evidence)
+	}
+}
+
+// TestConcurrentDuplicateCompletionRemainsSuccessfulWhenCleanupFails proves a
+// duplicate completion still succeeds when it cannot remove the copy it staged.
+// The recorded evidence belongs to the first completion, and the undiscardable
+// duplicate stays visible instead of failing the call.
+func TestConcurrentDuplicateCompletionRemainsSuccessfulWhenCleanupFails(t *testing.T) {
+	t.Parallel()
+	m, s, wf := newManualFixture(t)
+	actID, attemptID, leaseID, ownerToken := startedNodeAttempt(t, m, s, wf, "start")
+	plan := &AutoCompletion{Outcome: "done", Captures: passedCheckCaptures(t, "checked\n")}
+	entered := make(chan string, 1)
+	release := make(chan struct{})
+	var first atomic.Bool
+	s.fsyncDir = func(dir string) error {
+		if first.CompareAndSwap(false, true) {
+			entered <- dir
+			<-release
+		}
+		return nil
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := m.CompleteAuto(wf, "start", actID, attemptID, leaseID, ownerToken, plan)
+		result <- err
+	}()
+	var dir string
+	select {
+	case dir = <-entered:
+	case err := <-result:
+		t.Fatalf("first completion failed before staging: %v", err)
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("first completion did not stage evidence")
+	}
+	_ = dir
+	// The duplicate's copy cannot be removed, and the call still succeeds because
+	// the recorded evidence belongs to the first completion.
+	s.SetDiscardFault(func(EvidenceID) error { return errors.New("injected discard failure") })
+	t.Cleanup(func() { s.SetDiscardFault(nil) })
+	_, err := m.CompleteAuto(wf, "start", actID, attemptID, leaseID, ownerToken, plan)
+	close(release)
+	if err != nil {
+		t.Fatalf("winning completion: %v", err)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("duplicate completion: %v", err)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Instance.Evidence) != len(plan.Captures) {
+		t.Fatalf("recorded evidence = %d, want %d", len(snap.Instance.Evidence), len(plan.Captures))
+	}
+	if len(stagedEvidenceNames(t, s, wf)) <= len(snap.Instance.Evidence) {
+		t.Fatal("expected an undiscardable duplicate copy")
+	}
+}
+
+// TestCompleteAutoReportsUndiscardableCapture checks staging-failure reporting.
+// The first capture stages, a later one fails, and the copy the cleanup cannot
+// remove is named in the error instead of being dropped silently.
+func TestCompleteAutoReportsUndiscardableCapture(t *testing.T) {
+	t.Parallel()
+	m, s, wf := newManualFixture(t)
+	actID, attemptID, leaseID, ownerToken := startedNodeAttempt(t, m, s, wf, "start")
+	// The first staging succeeds, then a later capture fails while the copy it
+	// left behind cannot be removed.
+	blockEvidenceRemoval(t, s)
+
+	captures := append(passedCheckCaptures(t, "{\"state\":\"ready\"}\n"), CommandCapture{
+		StoredPath: "oversized.stdout",
+		Data:       []byte("x"),
+		Result:     json.RawMessage(strings.Repeat("y", maxEvidenceResultBytes+1)),
+	})
+	_, err := m.CompleteAuto(wf, "start", actID, attemptID, leaseID, ownerToken, &AutoCompletion{
+		Outcome:  "done",
+		Captures: captures,
+	})
+	if err == nil || !strings.Contains(err.Error(), "stage evidence") {
+		t.Fatalf("error = %v, want the staging failure", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v, want the staging failure's own message preserved", err)
+	}
+	orphans := stagedEvidenceNames(t, s, wf)
+	if len(orphans) != 1 {
+		t.Fatalf("evidence directories = %v, want the one this test made undiscardable", orphans)
+	}
+	if !strings.Contains(err.Error(), orphans[0]) {
+		t.Fatalf("error = %v, want it to name the orphaned evidence ID %s", err, orphans[0])
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if len(snap.Instance.Evidence) != 0 {
+		t.Fatalf("instance evidence = %+v, want none: the completion did not commit", snap.Instance.Evidence)
+	}
+}
+
+// blockEvidenceRemoval makes the parent of a staged copy read-only, so removing
+// the copy inside it fails. It skips when the test user can remove it anyway.

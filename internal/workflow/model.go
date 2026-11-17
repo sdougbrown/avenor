@@ -36,16 +36,16 @@ type WorkingDirectoryRef struct {
 	FromInstanceParam string `json:"from_instance_param"`
 }
 
-// LaunchWrapperArgKind discriminates the two argv element forms.
-type LaunchWrapperArgKind string
+// ArgvElementKind discriminates the two argv element forms.
+type ArgvElementKind string
 
 const (
-	// LaunchWrapperArgKindLiteral is one exact argv element: the value is
+	// ArgvElementKindLiteral is one exact argv element: the value is
 	// passed verbatim, with no shell expansion or interpolation.
-	LaunchWrapperArgKindLiteral LaunchWrapperArgKind = "literal"
-	// LaunchWrapperArgKindInstanceParam resolves the element from the named
+	ArgvElementKindLiteral ArgvElementKind = "literal"
+	// ArgvElementKindInstanceParam resolves the element from the named
 	// instance parameter's recorded value.
-	LaunchWrapperArgKindInstanceParam LaunchWrapperArgKind = "instance_param"
+	ArgvElementKindInstanceParam ArgvElementKind = "instance_param"
 )
 
 // LaunchWrapperDefinition is a trusted named argv template: a wrapper
@@ -53,17 +53,17 @@ const (
 // project configuration, not untrusted input, so there is no runtime
 // allowlist.
 type LaunchWrapperDefinition struct {
-	ID   string             `json:"id"`
-	Argv []LaunchWrapperArg `json:"argv"`
+	ID   string        `json:"id"`
+	Argv []ArgvElement `json:"argv"`
 }
 
-// LaunchWrapperArg is one argv element. Exactly one variant is declared: a
+// ArgvElement is one argv element. Exactly one variant is declared: a
 // literal value or an instance-parameter reference, discriminated by Type.
 // Values are never trimmed or rewritten.
-type LaunchWrapperArg struct {
-	Type              LaunchWrapperArgKind `json:"type"`
-	Value             string               `json:"value,omitempty"`
-	FromInstanceParam string               `json:"from_instance_param,omitempty"`
+type ArgvElement struct {
+	Type              ArgvElementKind `json:"type"`
+	Value             string          `json:"value,omitempty"`
+	FromInstanceParam string          `json:"from_instance_param,omitempty"`
 }
 
 // TemplateParam declares one instance parameter a template accepts at
@@ -686,6 +686,18 @@ type CompletionContract struct {
 	Kind      CompletionContractKind `json:"kind"`
 	Artifacts []ArtifactRequirement  `json:"artifacts,omitempty"`
 	Git       *GitRequirement        `json:"git,omitempty"`
+	Command   *CommandRequirement    `json:"command,omitempty"`
+}
+
+// CommandRequirement declares the supervisor-side external-state check a
+// command completion runs after the worker exits successfully. The check gets a
+// fixed argv of literal and instance-param elements and a deadline. It runs
+// with no shell, an empty environment, and the attempt's working directory, so
+// it can only observe state. It never sees the worker's or the supervisor's
+// credentials.
+type CommandRequirement struct {
+	Argv           []ArgvElement `json:"argv"`
+	TimeoutSeconds int64         `json:"timeout_seconds"`
 }
 
 type ArtifactRequirement struct {
@@ -712,13 +724,17 @@ type OutputDefinition struct {
 	Source *OutputSource `json:"source,omitempty"`
 }
 
-// OutputSource is one declared output resolution source. Exactly one of
-// artifact or git is declared; a pointer narrows an artifact source to one
-// RFC 6901 location inside a JSON artifact.
+// OutputSource is one declared output resolution source. Exactly one of artifact,
+// git, or command is declared. A pointer narrows an artifact source, or the
+// completion command's stdout, to one RFC 6901 location inside that JSON
+// document.
 type OutputSource struct {
 	Artifact string `json:"artifact,omitempty"`
 	Pointer  string `json:"pointer,omitempty"`
 	Git      string `json:"git,omitempty"`
+	// Command selects a value inside the completion command's stdout. Its only
+	// declared value is "stdout".
+	Command string `json:"command,omitempty"`
 }
 
 type OutputValue struct {
@@ -1027,7 +1043,11 @@ type Evidence struct {
 	Result       json.RawMessage `json:"result,omitempty"`
 	CreatedAt    time.Time       `json:"created_at"`
 	ActivationID ActivationID    `json:"activation_id"`
-	Subject      *Subject        `json:"subject,omitempty"`
+	// AttemptID names the exact attempt the evidence belongs to. Evidence from
+	// different attempts of one activation, such as a check that ran on every
+	// retry, stays distinguishable.
+	AttemptID AttemptID `json:"attempt_id,omitempty"`
+	Subject   *Subject  `json:"subject,omitempty"`
 }
 
 type GateInstance struct {

@@ -291,7 +291,63 @@ func validateTemplateParams(template Template) error {
 	if err := validateWorkingDirectoryRefs(template, declared, required); err != nil {
 		return err
 	}
+	if err := validateCompletionContracts(template, declared, required); err != nil {
+		return err
+	}
 	return validateLaunchWrappers(template, declared, required)
+}
+
+// validateCompletionContracts enforces the completion-contract rules the JSON
+// Schema cannot express. The kind is one of the closed set, so an unknown kind
+// is never silently ignored at evaluation time. A command block is declared
+// exactly with kind "command", and a command contract's argv and deadline are
+// usable.
+func validateCompletionContracts(template Template, declared map[string]struct{}, required map[string]bool) error {
+	for _, node := range template.Nodes {
+		contract := node.Completion
+		if contract == nil {
+			continue
+		}
+		switch contract.Kind {
+		case CompletionExplicit, CompletionFiles, CompletionGit, CompletionCommand:
+		default:
+			return fmt.Errorf("invalid workflow template: node %q completion.kind %q is not a completion contract kind", node.ID, contract.Kind)
+		}
+		if contract.Kind != CompletionCommand {
+			if contract.Command != nil {
+				return fmt.Errorf("invalid workflow template: node %q completion.command requires completion.kind %q", node.ID, CompletionCommand)
+			}
+			continue
+		}
+		if contract.Command == nil {
+			return fmt.Errorf("invalid workflow template: node %q completion.kind %q requires a completion.command block", node.ID, CompletionCommand)
+		}
+		if len(contract.Artifacts) > 0 || contract.Git != nil {
+			return fmt.Errorf("invalid workflow template: node %q completion.kind %q cannot declare completion.artifacts or completion.git", node.ID, CompletionCommand)
+		}
+		// Only the supervisor evaluates a command contract, so the node must be
+		// auto-dispatched...
+		if node.Dispatch == nil || node.Dispatch.Mode != DispatchAuto {
+			return fmt.Errorf("invalid workflow template: node %q completion.kind %q requires dispatch.mode %q (only the supervisor runs a completion command)", node.ID, CompletionCommand, DispatchAuto)
+		}
+		// ...and it must be one of the provider-backed kinds the supervisor
+		// completes. validateDispatch admits an auto external node, which resolves
+		// from its gates, so a command contract there would be declared and never
+		// run.
+		switch node.Action.Kind {
+		case ActionRun, ActionLoop, ActionTeam:
+		default:
+			return fmt.Errorf("invalid workflow template: node %q completion.kind %q requires a run, loop, or team action (%q nodes are never evaluated as a completion command)", node.ID, CompletionCommand, node.Action.Kind)
+		}
+		command := contract.Command
+		if command.TimeoutSeconds < 1 || command.TimeoutSeconds > maxCompletionCommandTimeoutSeconds {
+			return fmt.Errorf("invalid workflow template: node %q completion.command.timeout_seconds must be in [1, %d], got %d", node.ID, maxCompletionCommandTimeoutSeconds, command.TimeoutSeconds)
+		}
+		if err := validateArgv(fmt.Sprintf("node %q completion.command", node.ID), command.Argv, declared, required); err != nil {
+			return fmt.Errorf("invalid workflow template: %w", err)
+		}
+	}
+	return nil
 }
 
 // validateLaunchWrappers checks every definition and node selection, including
@@ -306,8 +362,8 @@ func validateLaunchWrappers(template Template, declared map[string]struct{}, req
 			return fmt.Errorf("invalid workflow template: launch_wrappers declares %q twice", wrapper.ID)
 		}
 		ids[wrapper.ID] = struct{}{}
-		if err := validateLaunchWrapperArgv(wrapper.ID, wrapper.Argv, declared, required); err != nil {
-			return err
+		if err := validateArgv(fmt.Sprintf("launch wrapper %q", wrapper.ID), wrapper.Argv, declared, required); err != nil {
+			return fmt.Errorf("invalid workflow template: %w", err)
 		}
 	}
 	for _, node := range template.Nodes {
@@ -320,49 +376,6 @@ func validateLaunchWrappers(template Template, declared map[string]struct{}, req
 		if _, ok := ids[node.LaunchWrapper]; !ok {
 			return fmt.Errorf("invalid workflow template: node %q launch_wrapper names unknown launch wrapper %q", node.ID, node.LaunchWrapper)
 		}
-	}
-	return nil
-}
-
-// validateLaunchWrapperArgv checks tagged arguments and requires a literal
-// absolute executable path first. Parameter references must name required params.
-func validateLaunchWrapperArgv(id string, argv []LaunchWrapperArg, declared map[string]struct{}, required map[string]bool) error {
-	if len(argv) == 0 {
-		return fmt.Errorf("invalid workflow template: launch wrapper %q argv must not be empty", id)
-	}
-	for index, arg := range argv {
-		switch arg.Type {
-		case LaunchWrapperArgKindLiteral:
-			if arg.FromInstanceParam != "" {
-				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] must not declare from_instance_param", id, index)
-			}
-			if arg.Value == "" {
-				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] literal value must not be empty", id, index)
-			}
-			if strings.ContainsRune(arg.Value, '\x00') {
-				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] literal value must not contain NUL", id, index)
-			}
-		case LaunchWrapperArgKindInstanceParam:
-			if arg.Value != "" {
-				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] must not declare value", id, index)
-			}
-			if strings.TrimSpace(arg.FromInstanceParam) == "" {
-				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d].from_instance_param is required", id, index)
-			}
-			if _, ok := declared[arg.FromInstanceParam]; !ok {
-				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] names undeclared instance param %q", id, index, arg.FromInstanceParam)
-			}
-			// An unsupplied optional param would resolve to an empty argv
-			// element, so the named param must be declared required.
-			if !required[arg.FromInstanceParam] {
-				return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] names instance param %q, which must be declared required", id, index, arg.FromInstanceParam)
-			}
-		default:
-			return fmt.Errorf("invalid workflow template: launch wrapper %q argv[%d] type %q is not a launch_wrapper_arg type", id, index, arg.Type)
-		}
-	}
-	if argv[0].Type != LaunchWrapperArgKindLiteral || !filepath.IsAbs(argv[0].Value) {
-		return fmt.Errorf("invalid workflow template: launch wrapper %q argv[0] must be a literal absolute executable path", id)
 	}
 	return nil
 }
@@ -577,17 +590,37 @@ func preflightJSON(data []byte) error {
 	if len(data) > maxTemplateBytes {
 		return fmt.Errorf("template exceeds %d-byte limit", maxTemplateBytes)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	if err := scanJSONValue(decoder, 0); err != nil {
-		return err
+	_, err := decodeJSONDocument(data)
+	return err
+}
+
+// decodeJSONDocument parses exactly one JSON value from data. It preserves
+// numbers and bounds nesting and container sizes with scanJSONValue, and it
+// rejects any trailing content after the value. It is the one strict document
+// reader for the template wire, artifact pointers, and a completion command's
+// captured stdout. "This is a JSON document" then means the same thing
+// everywhere.
+func decodeJSONDocument(data []byte) (any, error) {
+	scanner := json.NewDecoder(bytes.NewReader(data))
+	scanner.UseNumber()
+	if err := scanJSONValue(scanner, 0); err != nil {
+		return nil, err
 	}
-	if _, err := decoder.Token(); err == io.EOF {
-		return nil
+	valueEnd := scanner.InputOffset()
+	if _, err := scanner.Token(); err == io.EOF {
+		// The document ended at the value.
 	} else if err != nil {
-		return err
+		return nil, err
+	} else {
+		return nil, fmt.Errorf("multiple JSON values")
 	}
-	return fmt.Errorf("multiple JSON values")
+	decoder := json.NewDecoder(bytes.NewReader(data[:valueEnd]))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func scanJSONValue(decoder *json.Decoder, depth int) error {
@@ -1124,11 +1157,11 @@ func validateAutoExternalDispatch(policy *DispatchPolicy, node NodeDefinition) e
 	return nil
 }
 
-// validateOutputSources enforces the output-source rules the JSON Schema
-// cannot express: exactly one of artifact or git is declared, a pointer
-// requires an artifact source, the git source can only name head, and an
-// artifact source must name an artifact declared in the node's files
-// completion contract.
+// validateOutputSources enforces the output-source rules the JSON Schema cannot
+// express. Exactly one of artifact, git, or command is declared. A pointer
+// requires an artifact source or the completion command's stdout. The git source
+// can only name head, and an artifact source must name an artifact declared in
+// the node's files completion contract.
 func validateOutputSources(node NodeDefinition) error {
 	contractArtifacts := make(map[string]bool)
 	if node.Completion != nil && node.Completion.Kind == CompletionFiles {
@@ -1136,14 +1169,35 @@ func validateOutputSources(node NodeDefinition) error {
 			contractArtifacts[artifact.Path] = true
 		}
 	}
+	commandContract := node.Completion != nil && node.Completion.Kind == CompletionCommand
 	for _, def := range node.Outputs {
 		src := def.Source
 		if src == nil {
 			continue
 		}
+		sources := 0
+		for _, declared := range []string{src.Artifact, src.Git, src.Command} {
+			if declared != "" {
+				sources++
+			}
+		}
+		if sources > 1 {
+			return fmt.Errorf("output %q declares more than one of artifact, git, or command source", def.ID)
+		}
 		switch {
-		case src.Artifact != "" && src.Git != "":
-			return fmt.Errorf("output %q declares both artifact and git source", def.ID)
+		case src.Command != "":
+			if !commandContract {
+				return fmt.Errorf("output %q: command source requires the node's %q completion contract", def.ID, CompletionCommand)
+			}
+			if src.Command != "stdout" {
+				return fmt.Errorf("output %q: command source %q must be %q", def.ID, src.Command, "stdout")
+			}
+			if src.Pointer == "" {
+				return fmt.Errorf("output %q: command source requires a pointer", def.ID)
+			}
+			if def.Type == OutputFile {
+				return fmt.Errorf("output %q: a pointer source requires a non-file output", def.ID)
+			}
 		case src.Artifact == "" && src.Git == "" && src.Pointer != "":
 			return fmt.Errorf("output %q: pointer requires an artifact source", def.ID)
 		case src.Artifact == "" && src.Git == "":

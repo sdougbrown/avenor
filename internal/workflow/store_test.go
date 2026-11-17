@@ -30,10 +30,9 @@ func newStore(t *testing.T) *Store {
 	return New(t.TempDir())
 }
 
-// mustInstantiate applies CommandInstantiate to a zero snapshot and returns the
-// resulting revision-1 snapshot with one pending "start" activation.
-func mustInstantiate(t *testing.T, s *Store, wf WorkflowID) Snapshot {
-	t.Helper()
+// instantiateCmd builds the command that creates one instance of the test
+// template with one pending "start" activation.
+func instantiateCmd(wf WorkflowID) (Command, error) {
 	payload, err := json.Marshal(InstanceRecord{
 		TemplateID:       "t1",
 		TemplateVersion:  "1",
@@ -41,15 +40,26 @@ func mustInstantiate(t *testing.T, s *Store, wf WorkflowID) Snapshot {
 		EntryNodes:       []NodeID{"start"},
 	})
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		return Command{}, err
 	}
-	snap, err := s.ApplyCommand(wf, Command{
+	return Command{
 		Kind:             CommandInstantiate,
 		ExpectedRevision: 0,
 		IdempotencyKey:   "inst-" + string(wf),
 		Identity:         ExecutionIdentity{WorkflowID: wf},
 		Payload:          payload,
-	})
+	}, nil
+}
+
+// mustInstantiate applies CommandInstantiate to a zero snapshot and returns the
+// resulting revision-1 snapshot with one pending "start" activation.
+func mustInstantiate(t *testing.T, s *Store, wf WorkflowID) Snapshot {
+	t.Helper()
+	cmd, err := instantiateCmd(wf)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	snap, err := s.ApplyCommand(wf, cmd)
 	if err != nil {
 		t.Fatalf("instantiate: %v", err)
 	}
@@ -174,7 +184,14 @@ func TestSnapshotWriteFaultIsSafeWhileCommandsApply(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 20; i++ {
-		mustInstantiate(t, s, WorkflowID(fmt.Sprintf("wf-fault-%d", i)))
+		wf := WorkflowID(fmt.Sprintf("wf-fault-%d", i))
+		cmd, err := instantiateCmd(wf)
+		if err != nil {
+			t.Fatalf("instantiate command: %v", err)
+		}
+		if _, err := s.ApplyCommand(wf, cmd); err != nil {
+			t.Fatalf("instantiate while the fault toggles: %v", err)
+		}
 	}
 	close(stop)
 	toggler.Wait()

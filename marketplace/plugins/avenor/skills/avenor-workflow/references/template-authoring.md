@@ -119,6 +119,62 @@ against the attempt's working directory. See
 - An unmet contract records the attempt as failed with marker
   `contract_unmet`. The node's `retry_policy` then applies.
 
+### Checking external state
+
+When the work product alone cannot show that the job landed — a push, a
+deployed service, a ticket state — declare a `command` contract instead:
+
+```json
+"completion": {
+  "kind": "command",
+  "command": {
+    "argv": [
+      {"type": "literal", "value": "/usr/local/bin/check-branch"},
+      {"type": "instance_param", "from_instance_param": "repository"}
+    ],
+    "timeout_seconds": 30
+  }
+},
+"outputs": [{
+  "id": "head_sha", "name": "Head", "type": "string", "required": true,
+  "source": {"command": "stdout", "pointer": "/head_sha"}
+}]
+```
+
+- `argv` elements are literals or required instance params, one argv element
+  each, with a literal absolute path first. There is no shell and no `PATH`
+  lookup, so the same elements always mean the same thing.
+- The check runs in the attempt's working directory with an empty environment:
+  it never sees the supervisor's or the worker's credentials. It runs as the
+  supervisor's user, so scope the check to observation — it is not sandboxed.
+- Exit 0 meets the contract. Any other exit, a deadline, an output that passes
+  the cap, or a check that cannot start makes the contract unmet.
+- Either way the run is evidenced: the capped stdout and stderr
+  (`completion-command.stdout`, `completion-command.stderr`) are staged with
+  their SHA-256, and the stdout entry's `result` carries the argv, the
+  termination, the exit code, the duration, both digests, and the bounded
+  diagnostic. `avenor workflow inspect` shows them on the attempt's activation
+  (each entry names its attempt), so a failed check is read the same way a
+  passing one is. `{"command": "stdout", "pointer": "..."}` outputs read values
+  out of the captured stdout.
+- A check's argv (including any instance parameter substituted into it) and its
+  output can hold sensitive data. Evidence is owner-only
+  (`0600` files, `0700` directories) for a workflow root this version creates,
+  and the supervisor's log never quotes the check's output — read the report
+  from the evidence. Tightening an existing root is your call. The check runs as
+  the supervisor's user, so keep its argv and output free of secrets you would
+  not put in that user's files, and remember that same-UID is not a sandbox. The
+  check's whole process group is killed at its deadline, on cancellation, on an
+  over-limit stream, and after the check exits. A descendant that starts its own session escapes that
+  group (it is not killed, and the captured streams stop where the runner's
+  drain bound falls, recorded as `streams_truncated`).
+- A recovery can re-dispatch the node and re-run the check, so keep it read-only
+  and idempotent.
+- A `command` contract needs `dispatch.mode: "auto"` on a `run`, `loop`, or
+  `team` node. It declares no `artifacts` and no `git` requirement.
+- A command line that only reads a file the worker wrote is simpler as a
+  `files` contract: prefer it whenever the work product itself is the proof.
+
 ## How an auto node picks its outcome
 
 The supervisor builds the node's outcome vocabulary from its `branches` keys,

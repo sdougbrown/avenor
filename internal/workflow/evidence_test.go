@@ -243,6 +243,66 @@ func TestStageEvidence_PathEscape(t *testing.T) {
 	}
 }
 
+// TestStageEvidenceBytes_StagesExactBytes proves an in-memory capture reaches
+// the immutable evidence directory as the exact bytes it was handed. It carries
+// the digest of those bytes and no source path to chase.
+func TestStageEvidenceBytes_StagesExactBytes(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	content := []byte("{\"state\":\"ready\"}\n")
+	got, err := s.stageEvidenceBytes("wf1", content, "completion-command.stdout", false, "")
+	if err != nil {
+		t.Fatalf("StageEvidenceBytes failed: %v", err)
+	}
+	if got.OriginalPath != "" {
+		t.Fatalf("OriginalPath = %q, want none for an in-memory capture", got.OriginalPath)
+	}
+	if got.SHA256 != sha256Hex(string(content)) {
+		t.Fatalf("SHA256 = %s, want the captured bytes' digest", got.SHA256)
+	}
+	if got.Size != int64(len(content)) {
+		t.Fatalf("Size = %d, want %d", got.Size, len(content))
+	}
+	stored, err := os.ReadFile(filepath.Join(s.Root(), "instances", "wf1", got.StoredPath))
+	if err != nil {
+		t.Fatalf("read staged bytes: %v", err)
+	}
+	if string(stored) != string(content) {
+		t.Fatalf("staged bytes = %q, want %q", stored, content)
+	}
+}
+
+func TestStageEvidenceBytes_RejectsEmptyRequiredContent(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if _, err := s.stageEvidenceBytes("wf1", nil, "out.txt", true, ""); err == nil ||
+		!strings.Contains(err.Error(), "required content is empty") {
+		t.Fatalf("error = %v, want the empty-required rejection", err)
+	}
+}
+
+func TestStageEvidenceBytes_KeepsAnEmptyStream(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	got, err := s.stageEvidenceBytes("wf1", nil, "out.txt", false, "")
+	if err != nil {
+		t.Fatalf("StageEvidenceBytes failed: %v", err)
+	}
+	if got.Size != 0 || got.SHA256 != sha256Hex("") {
+		t.Fatalf("staged empty capture = %+v, want size 0 with the empty digest", got)
+	}
+}
+
+func TestStageEvidenceBytes_RejectsUnsafeStoredName(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	for _, name := range []string{"", "../escape.txt", "/abs.txt", "a//b"} {
+		if _, err := s.stageEvidenceBytes("wf1", []byte("x"), name, false, ""); err == nil {
+			t.Fatalf("stored name %q was accepted", name)
+		}
+	}
+}
+
 func TestStageEvidence_DistinctDirs(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
