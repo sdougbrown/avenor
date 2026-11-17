@@ -35,10 +35,9 @@ type Store struct {
 	// child-snapshot read command-time gate pinning consults. nil reads as
 	// no template knowledge. The manager installs itself here.
 	policies Policies
-	// evidenceFsync, when non-nil, replaces durablefile.FsyncDir for the
-	// directory a staging writes its copy into, so a test can observe or fail a
-	// staging's sync. A test sets it before the staging it observes; production
-	// leaves it nil.
+	// evidenceFsync, when non-nil, replaces durablefile.FsyncDir for evidence
+	// staging so a test can assert which directories a staging makes durable.
+	// Production leaves it nil.
 	evidenceFsync func(string) error
 	// snapshotWriteFault, when non-nil, is consulted for the snapshot replace
 	// that follows a durable event append. It exists so a test can reproduce the
@@ -406,15 +405,6 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	path := s.workflowPath(workflowID)
 	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, StateFilePerm); err != nil {
 		return err
-	}
-	return durablefile.FsyncDir(dir)
-}
-
-// syncDir makes one directory entry durable, through the store's test seam when a
-// test installed one.
-func syncDir(fsync func(string) error, dir string) error {
-	if fsync != nil {
-		return fsync(dir)
 	}
 	return durablefile.FsyncDir(dir)
 }
