@@ -19,6 +19,7 @@ state named in each file is the acceptance bar for that feature.
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
 | Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |
 | Workflow launch wrappers | [workflow-launch-wrappers.md](workflow-launch-wrappers.md) | `avenor stable` + `avenor workflow` → wrapper argv + marker completion |
+| Workflow instantiate idempotency | [workflow-instantiate-idempotency.md](workflow-instantiate-idempotency.md) | `avenor stable` + `avenor workflow` → same-key retry convergence + conflict |
 | Workflow completion command | [workflow-command-completion.md](workflow-command-completion.md) | `avenor stable` + `avenor workflow` → supervisor-side check argv, stdout evidence, pointer output |
 | Workflow retry backoff | [retry-backoff.md](retry-backoff.md) | `avenor stable` + `avenor workflow` → held activation + timed second attempt |
 | Claude peer layer | [claude-peers.md](claude-peers.md) | plugin `hooks/` mods layer → `SendMessage({to:"avenor:*"})`, inbound prompt turn, blocking `ask` |

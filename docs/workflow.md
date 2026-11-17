@@ -524,6 +524,22 @@ present, and values must be non-empty strings of at most 256 characters
 without control characters. Params are recorded on the instance and are
 immutable facts of it.
 
+An instantiate request may also carry a caller-supplied `idempotency_key`.
+Each key binds durably under the workflow root to the request that first
+created it — template, version, and params — together with the returned
+`workflow_id`. Retrying the same request with the same key returns the
+original workflow ID instead of creating a second instance, including after
+a lost response, a supervisor restart, or a crash mid-instantiation (the
+retry completes the interrupted attempt rather than duplicating it, and any
+children the crashed attempt materialized are resumed, not re-created).
+Reusing a key with a different template, version, or params is a conflict
+error; the key stays bound and a fresh key is needed. The binding never
+expires: after the instance goes terminal, the same key still returns that
+workflow, so a retry can never silently start a second run. `metadata` is
+caller bookkeeping and is not part of the binding; two requests differing
+only in `metadata` share a key without conflict. Requests without a key
+behave exactly as before, minting a fresh workflow ID every time.
+
 A node's `dispatch.concurrency_key` is either a non-empty string or
 `{"prefix": "...", "from_instance_param": "..."}` naming a declared param.
 The templated form resolves at activation creation — the optional prefix

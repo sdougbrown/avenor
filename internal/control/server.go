@@ -2056,6 +2056,10 @@ func (s *ControlServer) dispatchWorkflow(c *connState, req Request) Response {
 	case "workflow.instantiate":
 		result, err := h.WorkflowInstantiate(req.Params)
 		if err != nil {
+			var ikce *workflow.InstantiationKeyConflictError
+			if errors.As(err, &ikce) {
+				return failure(req.ID, -32031, ikce.Error(), nil)
+			}
 			return failure(req.ID, -32000, err.Error(), nil)
 		}
 		return success(req.ID, result)
