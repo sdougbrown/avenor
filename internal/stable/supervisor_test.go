@@ -2419,7 +2419,7 @@ func TestWorkflowRunChildRecordsSucceededTermination(t *testing.T) {
 	}
 
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
-	go sup.runChild(ctx, child, "hello", 0, 0)
+	go sup.runChild(ctx, child, "hello", 60, 0)
 	waitForStableDone(t, child)
 
 	mu.Lock()
@@ -7612,7 +7612,7 @@ func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
 	}
 
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
+	go sup.runLoopChild(ctx, child, &looprunner.LoopConfig{MaxIterations: 1, Pre: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 60, 0, "", "", "", "", "", "")
 	waitForStableDone(t, child)
 
 	mu.Lock()
@@ -7738,7 +7738,7 @@ func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
 	}
 
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: workflowAttemptClass})
-	go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 0, 0, "", "", "", "", "", "")
+	go sup.runTeamChild(ctx, child, &teamrunner.TeamConfig{Team: []phaseconfig.Phase{{Name: "work", Prompt: "work"}}}, 60, 0, "", "", "", "", "", "")
 	waitForStableDone(t, child)
 
 	mu.Lock()

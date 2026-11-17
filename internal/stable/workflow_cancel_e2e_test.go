@@ -40,7 +40,7 @@ func TestWorkflowCancelTerminatesInFlightRuntimes(t *testing.T) {
 		"entry_nodes":      []string{"start"},
 		"nodes": []any{map[string]any{
 			"id":           "start",
-			"action":       map[string]any{"type": "run", "prompt": "do the thing"},
+			"action":       map[string]any{"type": "run", "prompt": "do the thing", "timeout": 60},
 			"dispatch":     map[string]any{"mode": "auto", "controller_id": "c1"},
 			"retry_policy": map[string]any{"max_attempts": 1, "exhaustion": "block"},
 		}},
