@@ -181,14 +181,14 @@ func TestCompleteFailedStagingLeavesNoEvidenceDirectory(t *testing.T) {
 	// the copy is written but before any entry is made durable.
 	evidenceRoot := filepath.Join(s.Root(), "instances", string(wf), "evidence")
 	injected := errors.New("injected fsync failure")
-	s.evidenceFsync = func(dir string) error {
+	s.fsyncDir = func(dir string) error {
 		if filepath.Dir(dir) == evidenceRoot {
 			return injected
 		}
 		return nil
 	}
 	_, err := m.CompleteAuto(wf, "start", actID, attemptID, leaseID, ownerToken, plan)
-	s.evidenceFsync = nil
+	s.fsyncDir = nil
 	if !errors.Is(err, injected) {
 		t.Fatalf("error = %v, want the failed staging's sync", err)
 	}
@@ -355,14 +355,14 @@ func TestConcurrentDuplicateCompletionDiscardsItsCopy(t *testing.T) {
 	staged := make(chan struct{})
 	release := make(chan struct{})
 	var first atomic.Bool
-	s.evidenceFsync = func(string) error {
+	s.fsyncDir = func(string) error {
 		if first.CompareAndSwap(false, true) {
 			close(staged)
 			<-release
 		}
 		return nil
 	}
-	t.Cleanup(func() { s.evidenceFsync = nil })
+	t.Cleanup(func() { s.fsyncDir = nil })
 
 	type outcome struct {
 		res any

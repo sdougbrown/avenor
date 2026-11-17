@@ -248,13 +248,6 @@ func fsyncEvidenceDirs(fsync func(string) error, syncRoot, leafDir string, creat
 			break
 		}
 	}
-	// Instance creation does not sync its parent. Sync it on every staging so
-	// a crash cannot lose the instance directory behind the evidence.
-	if syncRoot != "" {
-		if parent := filepath.Dir(syncRoot); parent != syncRoot {
-			add(parent)
-		}
-	}
 	for _, dir := range dirs {
 		if err := fsync(dir); err != nil {
 			return err
@@ -266,7 +259,7 @@ func fsyncEvidenceDirs(fsync func(string) error, syncRoot, leafDir string, creat
 // StageEvidence — public Store method (no workflow state transition).
 func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string, required bool, expectedSHA256 string) (StagedEvidence, error) {
 	evID, size, digest, err := s.stageIntoFreshDir(workflowID, storedName, func(dir string) (int64, string, error) {
-		return stageInto(srcPath, dir, storedName, required, expectedSHA256, s.instanceDir(workflowID), s.evidenceFsync)
+		return stageInto(srcPath, dir, storedName, required, expectedSHA256, s.instanceDir(workflowID), s.fsyncDir)
 	})
 	if err != nil {
 		// stageIntoFreshDir already removed the directory it minted.

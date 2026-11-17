@@ -35,10 +35,11 @@ type Store struct {
 	// child-snapshot read command-time gate pinning consults. nil reads as
 	// no template knowledge. The manager installs itself here.
 	policies Policies
-	// evidenceFsync, when non-nil, replaces durablefile.FsyncDir for evidence
+	// fsyncDir, when non-nil, replaces durablefile.FsyncDir for directory
+	// durability. Tests install it to observe which entries a path records.
 	// staging so a test can assert which directories a staging makes durable.
 	// Production leaves it nil.
-	evidenceFsync func(string) error
+	fsyncDir func(string) error
 	// snapshotWriteFault, when non-nil, is consulted for the snapshot replace
 	// that follows a durable event append. It exists so a test can reproduce the
 	// store's crash window (events durable, snapshot replace failed) for one
@@ -232,8 +233,19 @@ func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, erro
 	return snap, nil
 }
 
+// ensureInstanceDir creates the instance directory and records its entry in the
+// instances directory. Every command path passes through here, so an instance
+// whose files are durable can always be found again after a crash, whether this
+// call or an earlier one created the directory.
 func (s *Store) ensureInstanceDir(workflowID WorkflowID) error {
-	return os.MkdirAll(s.instanceDir(workflowID), StateDirPerm)
+	if err := os.MkdirAll(s.instanceDir(workflowID), StateDirPerm); err != nil {
+		return err
+	}
+	fsync := s.fsyncDir
+	if fsync == nil {
+		fsync = durablefile.FsyncDir
+	}
+	return fsync(filepath.Dir(s.instanceDir(workflowID)))
 }
 
 func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error) {
