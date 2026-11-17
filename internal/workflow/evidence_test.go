@@ -772,7 +772,6 @@ func TestStageEvidenceRejectsASyncRootOutsideTheDestination(t *testing.T) {
 	}
 }
 
-// sha256OfString returns the hex digest stageStream expects for content.
 // noSync is the sync a test passes when it does not observe directory durability.
 func noSync(string) error { return nil }
 
