@@ -269,12 +269,7 @@ func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string,
 		return stageInto(srcPath, dir, storedName, required, expectedSHA256, s.instanceDir(workflowID), s.evidenceFsync)
 	})
 	if err != nil {
-		// The ID was minted for this attempt, so its directory holds nothing but
-		// this attempt's partial copy. Removing it here keeps every caller's
-		// cleanup complete: a failed stage leaves no copy to name.
-		if discardErr := s.DiscardEvidence(workflowID, evID); discardErr != nil {
-			return StagedEvidence{}, errors.Join(err, fmt.Errorf("evidence: discard orphaned evidence %s: %w", evID, discardErr))
-		}
+		// stageIntoFreshDir already removed the directory it minted.
 		return StagedEvidence{}, err
 	}
 

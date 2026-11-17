@@ -597,61 +597,36 @@ func TestStageEvidence_RollsBackWhenAnAncestorSyncFails(t *testing.T) {
 	}
 }
 
-// requireDirRemovalBlocked skips a test whose premise is that a read-only
-// directory blocks removal. The mode only stops a non-privileged user, so the
-// premise is probed rather than assumed.
-func requireDirRemovalBlocked(t *testing.T) {
-	t.Helper()
-	probe := filepath.Join(t.TempDir(), "read-only-dir")
-	if err := os.MkdirAll(probe, StateDirPerm); err != nil {
-		t.Fatalf("create probe dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(probe, "f"), []byte("x"), StateFilePerm); err != nil {
-		t.Fatalf("write probe file: %v", err)
-	}
-	if err := os.Chmod(probe, 0o500); err != nil {
-		t.Fatalf("make probe dir read-only: %v", err)
-	}
-	blocked := os.RemoveAll(probe) != nil
-	os.Chmod(probe, StateDirPerm)
-	if !blocked {
-		t.Skip("directory permissions do not block removal for this user (e.g. root); cannot force the discard failure")
-	}
-}
-
 // TestStageEvidence_ReportsDiscardFailureWithEvidenceID proves a staging failure
 // that also cannot discard its fresh evidence directory reports both: the error
 // the caller has to act on keeps its identity, and the copy it could not remove
 // is named by its evidence ID instead of being dropped silently.
 func TestStageEvidence_ReportsDiscardFailureWithEvidenceID(t *testing.T) {
 	t.Parallel()
-	requireDirRemovalBlocked(t)
-
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
 	}
 	injected := errors.New("injected fsync failure")
-	// Make the evidence directory unwritable at the first sync, so the removal
-	// that follows the sync failure cannot unlink the copy inside it.
-	s.evidenceFsync = func(dir string) error {
-		if err := os.Chmod(dir, 0o500); err != nil {
-			t.Fatalf("make %s read-only: %v", dir, err)
-		}
-		t.Cleanup(func() { os.Chmod(dir, StateDirPerm) })
-		return injected
-	}
+	s.evidenceFsync = func(string) error { return injected }
+	var discarded []EvidenceID
+	s.SetDiscardFault(func(id EvidenceID) error {
+		discarded = append(discarded, id)
+		return errors.New("injected discard failure")
+	})
+	t.Cleanup(func() { s.SetDiscardFault(nil) })
 
 	_, err := s.StageEvidence("wf-discard", writeTestFile(t, "captured\n"), "lost.txt", false, "")
 	if !errors.Is(err, injected) {
 		t.Fatalf("error = %v, want the staging failure's identity preserved", err)
 	}
-	orphans := stagedEvidenceNames(t, s, "wf-discard")
-	if len(orphans) != 1 {
-		t.Fatalf("evidence directories = %v, want the one this test made undiscardable", orphans)
+	// Exactly one discard, for the ID this stage minted: a second one would mean
+	// two owners of the cleanup rule.
+	if len(discarded) != 1 || discarded[0] == "" {
+		t.Fatalf("discards = %v, want exactly one for a minted evidence ID", discarded)
 	}
-	if !strings.Contains(err.Error(), orphans[0]) {
-		t.Fatalf("error = %v, want it to name the orphaned evidence ID %s", err, orphans[0])
+	if !strings.Contains(err.Error(), string(discarded[0])) {
+		t.Fatalf("error = %v, want it to name the orphaned evidence ID %s", err, discarded[0])
 	}
 }
 
@@ -703,5 +678,20 @@ func TestStageEvidenceLeavesNoDirectoryWhenStagingFails(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("evidence entries = %v, want none after a failed stage", entries)
+	}
+}
+
+// TestStageEvidence_ValidationRejectionIsNotACleanupFailure proves a rejected
+// request returns the bare validation error: no evidence directory was minted, so
+// there is nothing to discard and nothing to report.
+func TestStageEvidence_ValidationRejectionIsNotACleanupFailure(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	_, err := s.StageEvidence("wf-validate", writeTestFile(t, "captured\n"), "../escape.txt", false, "")
+	if err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("error = %v, want the stored-path validation error", err)
+	}
+	if strings.Contains(err.Error(), "discard orphaned evidence") {
+		t.Fatalf("error = %v, want no cleanup clause on a rejected request", err)
 	}
 }
