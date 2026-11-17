@@ -524,3 +524,74 @@ func TestWorkflowCLIInstantiateParamsRoundTrip(t *testing.T) {
 		t.Fatalf("server recorded worktree = %q, want avenor-cli-130", got)
 	}
 }
+
+// TestWorkflowCLIInstantiateIdempotencyKeyConverges drives the instantiate
+// CLI with --idempotency-key end-to-end: two invocations with the same key
+// must converge on one workflow, and the same key against a different
+// template must fail.
+func TestWorkflowCLIInstantiateIdempotencyKeyConverges(t *testing.T) {
+	root := t.TempDir()
+	store := workflow.New(root)
+	mgr := workflow.NewManager(store)
+
+	srv, _ := controltest.NewServer(control.NewState("run_cli_idem", "", 0))
+	srv.SetWorkflowHandler(mgr)
+	sock := filepath.Join(t.TempDir(), "control.sock")
+	if err := srv.Start(sock); err != nil {
+		t.Fatalf("start control server: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
+
+	dir := t.TempDir()
+	tmplPath := filepath.Join(dir, "template.json")
+	if err := os.WriteFile(tmplPath, []byte(`{"schema_version":1,"template_id":"cli-idem","template_version":"1","entry_nodes":["start"],"nodes":[{"id":"start","action":{"type":"manual"}}],"terminal_outcomes":["done"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	otherPath := filepath.Join(dir, "other.json")
+	if err := os.WriteFile(otherPath, []byte(`{"schema_version":1,"template_id":"cli-idem-b","template_version":"1","entry_nodes":["start"],"nodes":[{"id":"start","action":{"type":"manual"}}],"terminal_outcomes":["done"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reqPath := filepath.Join(dir, "instance.json")
+	if err := os.WriteFile(reqPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) (string, int) {
+		var out, errBuf bytes.Buffer
+		code := runDeclared(append([]string{"workflow", "--socket", sock}, args...), &out, &errBuf)
+		return out.String(), code
+	}
+
+	if _, code := run("create", "--request-file", tmplPath); code != 0 {
+		t.Fatalf("create: exit %d", code)
+	}
+	if _, code := run("create", "--request-file", otherPath); code != 0 {
+		t.Fatalf("create other: exit %d", code)
+	}
+
+	out1, code := run("instantiate", "--template-id", "cli-idem", "--template-version", "1", "--request-file", reqPath, "--idempotency-key", "unit-42")
+	if code != 0 {
+		t.Fatalf("first instantiate: exit %d", code)
+	}
+	out2, code := run("instantiate", "--template-id", "cli-idem", "--template-version", "1", "--request-file", reqPath, "--idempotency-key", "unit-42")
+	if code != 0 {
+		t.Fatalf("retry instantiate: exit %d", code)
+	}
+	var first, retry struct {
+		WorkflowID string `json:"workflow_id"`
+	}
+	if err := json.Unmarshal([]byte(out1), &first); err != nil || first.WorkflowID == "" {
+		t.Fatalf("first instantiate output: %s", out1)
+	}
+	if err := json.Unmarshal([]byte(out2), &retry); err != nil || retry.WorkflowID == "" {
+		t.Fatalf("retry instantiate output: %s", out2)
+	}
+	if first.WorkflowID != retry.WorkflowID {
+		t.Fatalf("retry workflow_id = %q, want %q", retry.WorkflowID, first.WorkflowID)
+	}
+
+	// The same key against a different template is a conflict on the CLI.
+	if _, code := run("instantiate", "--template-id", "cli-idem-b", "--template-version", "1", "--request-file", reqPath, "--idempotency-key", "unit-42"); code == 0 {
+		t.Fatal("conflicting keyed instantiate exited 0, want failure")
+	}
+}

@@ -317,6 +317,29 @@ func TestDecodeYAMLBytes(t *testing.T) {
 
 // --- DetectFormat ---
 
+func TestHasKnownExtension(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"config.json", true},
+		{"config.JSON", true},
+		{"config.yaml", true},
+		{"config.yml", true},
+		{"config.toml", true},
+		{"config", false},     // no extension
+		{"config.txt", false}, // unknown extension
+		{"config.json.bak", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HasKnownExtension(tc.name); got != tc.want {
+				t.Fatalf("HasKnownExtension(%q) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDetectFormat(t *testing.T) {
 	tests := []struct {
 		path string

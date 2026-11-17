@@ -3,6 +3,7 @@
 package workflowcontroller
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -126,6 +127,54 @@ func TestLoadAdapterRegistryValid(t *testing.T) {
 	}
 }
 
+// TestLoadAdapterRegistryYAMLAndTOML confirms that manifests authored in YAML
+// and TOML produce the same decoded result as the JSON equivalent, with the
+// digest still computed over the raw file bytes.
+func TestLoadAdapterRegistryYAMLAndTOML(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		file string
+		body string
+		id   string
+	}{{
+		name: "yaml",
+		file: "review.yaml",
+		body: "version: 1\nid: review-yaml\nexecutable: %exe%\ntimeout_ms: 1000\nmax_stdout_bytes: 1024\nmax_stderr_bytes: 1024\n",
+		id:   "review-yaml",
+	}, {
+		name: "toml",
+		file: "review.toml",
+		body: "version = 1\nid = \"review-toml\"\nexecutable = \"%exe%\"\ntimeout_ms = 1000\nmax_stdout_bytes = 1024\nmax_stderr_bytes = 1024\n",
+		id:   "review-toml",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := stageAdapterDir(t)
+			exe := stageFixture(t, dir, "passed.sh")
+			body := strings.ReplaceAll(tc.body, "%exe%", exe)
+			writeManifestContent(t, dir, tc.file, body)
+
+			reg, err := LoadAdapterRegistry(dir)
+			if err != nil {
+				t.Fatalf("LoadAdapterRegistry: %v", err)
+			}
+			if got := reg.IDs(); len(got) != 1 || got[0] != tc.id {
+				t.Fatalf("IDs() = %v, want [%s]", got, tc.id)
+			}
+			m, ok := reg.Lookup(tc.id)
+			if !ok {
+				t.Fatal("manifest not found")
+			}
+			if m.TimeoutMS != 1000 || m.MaxStdoutBytes != 1024 || m.MaxStderrBytes != 1024 {
+				t.Fatalf("unexpected limits: %+v", m)
+			}
+			want := sha256.Sum256([]byte(body))
+			if m.digest != want {
+				t.Fatal("digest is not over the raw file bytes")
+			}
+		})
+	}
+}
+
 func TestLoadAdapterRegistryMissingDir(t *testing.T) {
 	t.Parallel()
 	reg, err := LoadAdapterRegistry(filepath.Join(t.TempDir(), "absent"))
@@ -137,7 +186,7 @@ func TestLoadAdapterRegistryMissingDir(t *testing.T) {
 	}
 }
 
-func TestLoadAdapterRegistryIgnoresNonJSONAndSubdirs(t *testing.T) {
+func TestLoadAdapterRegistryIgnoresUnrecognizedExtensionsAndSubdirs(t *testing.T) {
 	dir := stageAdapterDir(t)
 	exe := stageFixture(t, dir, "passed.sh")
 	writeManifest(t, dir, "review.json", "review", exe, nil, 5000)
@@ -347,7 +396,7 @@ func TestLoadAdapterManifestValidation(t *testing.T) {
 		},
 		{
 			name:    "trailing data",
-			content: fmt.Sprintf(`{"version":1,"id":"x","executable":%q,"timeout_ms":1000,"max_stdout_bytes":1024,"max_stderr_bytes":1024,"inherit_env":[],"inputs":{}} {}`, exe),
+			content: fmt.Sprintf(`{"version":1,"id":"x","executable":%q,"timeout_ms":1000,"max_stdout_bytes":1024,"max_stderr_bytes":1024,"inherit_env":[],"inputs":{}} trailing`, exe),
 			wantErr: "trailing data",
 		},
 	}

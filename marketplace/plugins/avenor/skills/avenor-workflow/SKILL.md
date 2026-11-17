@@ -107,7 +107,10 @@ All commands take `--socket <path>`. Each command and its flags are in
    running attempts alone.
 3. **Instantiate.** `avenor workflow instantiate --template-id <id>
    --template-version <v> --request-file <params.json>` with
-   `{"params": {...}}`. It prints `workflow_id`.
+   `{"params": {...}}`. It prints `workflow_id`. Pass
+   `--idempotency-key <unit-of-work-key>` so a retried instantiate after a
+   lost response returns the same `workflow_id` instead of starting a second
+   instance; reuse of the key for a different request is a conflict error.
 4. **Observe.**
    - `avenor workflow ready <controller-id> --limit N` shows what the
      controller can dispatch now.
