@@ -290,9 +290,13 @@ func (m *Manager) WorkflowInstantiate(payload json.RawMessage) (any, error) {
 // attempt's workflow instead of minting a duplicate. The caller-supplied key
 // resolves against a durable record under <root>/instantiation-keys/, read
 // and written under the root-scoped keys flock, which the call holds across
-// the whole decision so concurrent same-key callers — including separate
-// supervisor processes sharing the workflow root — serialize and observe one
-// outcome.
+// the whole materialization (not just the record-or-resume decision) so
+// concurrent same-key callers — including separate supervisor processes
+// sharing the workflow root — serialize and observe one outcome. The cost is
+// that keyed instantiations serialize behind one flock even for unrelated
+// templates; acceptable for low-concurrency instantiation, since releasing
+// earlier would expose mid-tree child-creation races between same-key
+// callers (a concurrent creator surfaces as a revision mismatch).
 //
 // A record binding the same template, version, and params returns that
 // record's workflow ID. The binding is written before the instance is
