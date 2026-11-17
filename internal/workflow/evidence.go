@@ -217,8 +217,8 @@ func (s *Store) DiscardEvidence(workflowID WorkflowID, id EvidenceID) error {
 	if !safeComponent(string(workflowID)) || !safeComponent(string(id)) {
 		return errors.New("invalid evidence id")
 	}
-	if s.discardFault != nil {
-		if faultErr := s.discardFault(id); faultErr != nil {
+	if fault := s.discardFaultFunc(); fault != nil {
+		if faultErr := fault(id); faultErr != nil {
 			return faultErr
 		}
 	}

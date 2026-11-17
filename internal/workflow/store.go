@@ -48,6 +48,7 @@ type Store struct {
 	// leaves it nil. A test installs and clears it while controller goroutines
 	// are applying commands, so snapshotFaultMu guards every access.
 	snapshotFaultMu    sync.Mutex
+	faultMu            sync.Mutex
 	snapshotWriteFault func(WorkflowID, Snapshot) error
 	// appendFault and discardFault, when non-nil, force one failure that file
 	// permissions cannot express portably (a privileged test user ignores them).
@@ -98,29 +99,54 @@ func (s *Store) SetCommitObserver(fn func(WorkflowID, Snapshot)) {
 // install or clear it while controllers are running, so it is safe to call at any
 // time; production leaves it unset.
 func (s *Store) SetSnapshotWriteFault(fault func(WorkflowID, Snapshot) error) {
-	s.snapshotFaultMu.Lock()
-	defer s.snapshotFaultMu.Unlock()
+	s.faultMu.Lock()
+	defer s.faultMu.Unlock()
 	s.snapshotWriteFault = fault
 }
 
-// snapshotFault returns the installed snapshot-replace fault, or nil. The callers
-// invoke it outside the lock: the fault inspects the snapshot it is handed and
-// must never run holding a lock the command path shares.
+// snapshotFault returns the installed snapshot-replace fault, or nil. The caller
+// invokes it from inside the command's locked section, so a fault must not call
+// back into store commands or acquire an instance lock.
 func (s *Store) snapshotFault() func(WorkflowID, Snapshot) error {
-	s.snapshotFaultMu.Lock()
-	defer s.snapshotFaultMu.Unlock()
+	s.faultMu.Lock()
+	defer s.faultMu.Unlock()
 	return s.snapshotWriteFault
 }
 
 // SetAppendFault installs a fault consulted before an event batch is appended.
 // Tests use it to force a non-durable append failure, which file permissions
-// cannot express when the test user is privileged. Production leaves it unset.
-func (s *Store) SetAppendFault(fault func(path string) error) { s.appendFault = fault }
+// cannot express when the test user is privileged. Like the snapshot fault it may
+// be installed or cleared while commands apply, so it is safe to call at any
+// time. Production leaves it unset.
+func (s *Store) SetAppendFault(fault func(path string) error) {
+	s.faultMu.Lock()
+	defer s.faultMu.Unlock()
+	s.appendFault = fault
+}
+
+// appendFaultFunc returns the installed append fault, or nil.
+func (s *Store) appendFaultFunc() func(path string) error {
+	s.faultMu.Lock()
+	defer s.faultMu.Unlock()
+	return s.appendFault
+}
 
 // SetDiscardFault installs a fault consulted by DiscardEvidence. Tests use it to
 // force a removal failure, which file permissions cannot express when the test
-// user is privileged. Production leaves it unset.
-func (s *Store) SetDiscardFault(fault func(EvidenceID) error) { s.discardFault = fault }
+// user is privileged. It may be installed or cleared at any time. Production
+// leaves it unset.
+func (s *Store) SetDiscardFault(fault func(EvidenceID) error) {
+	s.faultMu.Lock()
+	defer s.faultMu.Unlock()
+	s.discardFault = fault
+}
+
+// discardFaultFunc returns the installed discard fault, or nil.
+func (s *Store) discardFaultFunc() func(EvidenceID) error {
+	s.faultMu.Lock()
+	defer s.faultMu.Unlock()
+	return s.discardFault
+}
 
 // notifyCommit invokes the registered commit observer, isolating the command
 // path from observer failures.
@@ -288,8 +314,8 @@ func (s *Store) loadSnapshot(workflowID WorkflowID) (Snapshot, bool, error) {
 // then hold a prefix of the batch, and a replay would recover it.
 func (s *Store) appendEvents(workflowID WorkflowID, events []Event) error {
 	path := s.eventsPath(workflowID)
-	if s.appendFault != nil {
-		if faultErr := s.appendFault(path); faultErr != nil {
+	if fault := s.appendFaultFunc(); fault != nil {
+		if faultErr := fault(path); faultErr != nil {
 			return faultErr
 		}
 	}
