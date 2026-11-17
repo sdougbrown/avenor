@@ -1,14 +1,13 @@
 package workflowcontroller
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/configfile"
 )
 
 // ControllerDefinition is the host-owned declaration of one durable
@@ -46,9 +45,10 @@ type ControllerDefinitions struct {
 	Failures    []ControllerDefinitionFailure
 }
 
-// LoadControllerDefinitions loads every immediate *.json file in dir as one
-// controller definition. Subdirectories and non-.json files are ignored; the
-// filename is not the controller ID. A missing directory yields an empty
+// LoadControllerDefinitions loads every immediate definition file in dir as
+// one controller definition. Definition files are .json, .yaml, .yml, or
+// .toml; subdirectories and other files are ignored; the filename is not the
+// controller ID. A missing directory yields an empty
 // result, not an error. Loading is per file: an invalid definition is
 // recorded as a failure while valid definitions still load; only a failure to
 // read the directory itself fails the whole load. Duplicate controller IDs
@@ -66,7 +66,7 @@ func LoadControllerDefinitions(dir string) (ControllerDefinitions, error) {
 	// file declaring the ID instead of silently keeping one of them.
 	byID := map[string][]ControllerDefinition{}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !isControllerDefinitionFile(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -104,24 +104,24 @@ func LoadControllerDefinitions(dir string) (ControllerDefinitions, error) {
 	return loaded, nil
 }
 
+// isControllerDefinitionFile reports whether name has an extension the
+// definition loader parses.
+func isControllerDefinitionFile(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".json", ".yaml", ".yml", ".toml":
+		return true
+	default:
+		return false
+	}
+}
+
 // loadControllerDefinition reads, strictly decodes, and validates one
-// definition file.
+// definition file. configfile detects the format from the extension and
+// applies DisallowUnknownFields uniformly across all formats.
 func loadControllerDefinition(path string) (ControllerDefinition, error) {
 	var def ControllerDefinition
-	data, err := os.ReadFile(path)
-	if err != nil {
+	if err := configfile.Load(path, &def); err != nil {
 		return def, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&def); err != nil {
-		return def, fmt.Errorf("parse: %w", err)
-	}
-	// More() reports false for a trailing } or ], so a second decode is the
-	// deterministic trailing-data check: only EOF may follow the object.
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		return def, fmt.Errorf("trailing data after JSON object")
 	}
 	def.File = filepath.Base(path)
 	if err := validateControllerID(def.ControllerID); err != nil {
