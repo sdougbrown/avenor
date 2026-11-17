@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -326,7 +327,10 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 		return nil, err
 	}
 	if _, err := c.initialize(ctx, p.versions()); err != nil {
-		exited := errors.Is(err, syscall.EPIPE)
+		// Both closed-pipe shapes mean the child is gone: EPIPE because its
+		// end of the pipe closed first, ErrClosed because exec's Wait closed
+		// our stdin pipe while it reaped the child.
+		exited := errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
 		select {
 		case <-c.stdoutDone:
 			exited = true
