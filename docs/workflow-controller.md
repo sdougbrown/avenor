@@ -37,6 +37,15 @@ The registry load applies trust checks (ownership, modes, strict manifest
 shape) at startup and before every adapter execution. A failed load disables
 controller activity for that process; workflow RPCs keep serving.
 
+An adapter's stdout is a verdict, so the controller only reads it whole: the
+call is bounded by the manifest's `timeout_ms`, its process group is killed at
+that deadline, on cancellation, and when stdout or stderr passes
+`max_stdout_bytes`/`max_stderr_bytes`, and a response the adapter left open
+behind a descendant that escaped its process group is refused rather than
+parsed — the capture may be cut short, so it never becomes a gate result. A
+refused call is a transient poll failure: the gate stays parked and the next
+poll tries again.
+
 A controller can also be declared ahead of time instead of created through
 the socket: with `--workflow-controller-dir` pointing at a directory of
 controller definition files (`{"controller_id": ..., "max_inflight": ...}`,
