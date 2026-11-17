@@ -126,6 +126,12 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 // immutable evidence directory, refusing to overwrite a different file of the same
 // name. It then re-verifies the bytes that landed on disk.
 func stageStream(src io.Reader, digest, destDir, storedName string, required bool, expectedSHA string, syncRoot string, fsync func(string) error) (int64, string, error) {
+	if syncRoot != "" {
+		rel, err := filepath.Rel(syncRoot, destDir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return 0, "", fmt.Errorf("evidence: %s is not inside %s", destDir, syncRoot)
+		}
+	}
 	destPath := filepath.Join(destDir, storedName)
 	// Create the destination parent chain (the evidence dir plus any validated
 	// nested subdirectories) so a nested stored path stages correctly. Keep the

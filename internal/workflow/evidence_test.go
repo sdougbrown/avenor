@@ -724,3 +724,31 @@ func TestEnsureInstanceDirRecordsItsEntry(t *testing.T) {
 		t.Fatalf("synced directories = %v, want the instances directory %s recorded", synced, want)
 	}
 }
+
+// TestStageEvidenceRejectsASyncRootOutsideTheDestination proves the durability
+// boundary is enforced, not assumed: a syncRoot that does not contain the
+// staging directory would silently weaken the sync walk, so it is refused.
+func TestStageEvidenceRejectsASyncRootOutsideTheDestination(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "workflow-root")
+	s := New(root)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	instanceDir := s.instanceDir("wf-outside")
+	destDir := filepath.Join(instanceDir, "evidence", "ev-1")
+	if err := os.MkdirAll(destDir, StateDirPerm); err != nil {
+		t.Fatalf("mkdir dest: %v", err)
+	}
+	elsewhere := filepath.Join(root, "elsewhere")
+	_, _, err := stageStream(strings.NewReader("x"), sha256OfString("x"), destDir, "a.txt", false, "", elsewhere, nil)
+	if err == nil || !strings.Contains(err.Error(), "is not inside") {
+		t.Fatalf("error = %v, want a rejected sync root", err)
+	}
+}
+
+// sha256OfString returns the hex digest stageStream expects for content.
+func sha256OfString(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}

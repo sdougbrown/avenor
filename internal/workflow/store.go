@@ -35,9 +35,8 @@ type Store struct {
 	// child-snapshot read command-time gate pinning consults. nil reads as
 	// no template knowledge. The manager installs itself here.
 	policies Policies
-	// fsyncDir, when non-nil, replaces durablefile.FsyncDir for directory
-	// durability. Tests install it to observe which entries a path records.
-	// staging so a test can assert which directories a staging makes durable.
+	// fsyncDir, when non-nil, replaces durablefile.FsyncDir for every directory
+	// the store makes durable, so a test can observe or fail those syncs.
 	// Production leaves it nil.
 	fsyncDir func(string) error
 	// snapshotWriteFault, when non-nil, is consulted for the snapshot replace
@@ -237,15 +236,20 @@ func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, erro
 // instances directory. Every command path passes through here, so an instance
 // whose files are durable can always be found again after a crash, whether this
 // call or an earlier one created the directory.
-func (s *Store) ensureInstanceDir(workflowID WorkflowID) error {
-	if err := os.MkdirAll(s.instanceDir(workflowID), StateDirPerm); err != nil {
-		return err
-	}
+// syncDir makes one directory entry durable, through the test seam when set.
+func (s *Store) syncDir(dir string) error {
 	fsync := s.fsyncDir
 	if fsync == nil {
 		fsync = durablefile.FsyncDir
 	}
-	return fsync(filepath.Dir(s.instanceDir(workflowID)))
+	return fsync(dir)
+}
+
+func (s *Store) ensureInstanceDir(workflowID WorkflowID) error {
+	if err := os.MkdirAll(s.instanceDir(workflowID), StateDirPerm); err != nil {
+		return err
+	}
+	return s.syncDir(filepath.Dir(s.instanceDir(workflowID)))
 }
 
 func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error) {
@@ -418,7 +422,7 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, StateFilePerm); err != nil {
 		return err
 	}
-	return durablefile.FsyncDir(dir)
+	return s.syncDir(dir)
 }
 
 // StoreTemplate atomically persists a versioned template under
@@ -487,7 +491,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, StateFilePerm); err != nil {
 		return err
 	}
-	return durablefile.FsyncDir(dir)
+	return s.syncDir(dir)
 }
 
 // LoadTemplate reads a versioned template, returning a not-found error if it
