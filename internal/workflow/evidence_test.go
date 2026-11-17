@@ -169,13 +169,13 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 	}
 	// i) First stage
 	a := writeTestFile(t, "same content")
-	_, _, err := stageInto(a, destDir, "out.txt", false, "")
+	_, _, err := stageInto(a, destDir, "out.txt", false, "", nil)
 	if err != nil {
 		t.Fatalf("stageInto first call failed: %v", err)
 	}
 	// ii) Dedupe identical content
 	b := writeTestFile(t, "same content")
-	size, sig, err := stageInto(b, destDir, "out.txt", false, "")
+	size, sig, err := stageInto(b, destDir, "out.txt", false, "", nil)
 	if err != nil {
 		t.Fatalf("stageInto second call (dedupe) failed: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 	}
 	// iii) Different content should fail
 	c := writeTestFile(t, "DIFFERENT")
-	_, _, err = stageInto(c, destDir, "out.txt", false, "")
+	_, _, err = stageInto(c, destDir, "out.txt", false, "", nil)
 	if err == nil {
 		t.Fatal("stageInto with different content should have failed")
 	}
@@ -325,7 +325,7 @@ func TestStageEvidence_CopyFailure(t *testing.T) {
 	src := writeTestFile(t, "content that cannot land")
 	// destDir sits under a path component that is a regular file, so the
 	// destination cannot be created and staging must fail with an error.
-	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, ""); err == nil {
+	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, "", nil); err == nil {
 		t.Fatal("expected copy failure for unwritable destination")
 	}
 }

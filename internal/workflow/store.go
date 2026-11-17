@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
@@ -34,6 +35,20 @@ type Store struct {
 	// child-snapshot read command-time gate pinning consults. nil reads as
 	// no template knowledge. The manager installs itself here.
 	policies Policies
+	// evidenceFsync, when non-nil, replaces durablefile.FsyncDir for the
+	// directory a staging writes its copy into, so a test can observe or fail a
+	// staging's sync. A test sets it before the staging it observes; production
+	// leaves it nil.
+	evidenceFsync func(string) error
+	// snapshotWriteFault, when non-nil, is consulted for the snapshot replace
+	// that follows a durable event append. It exists so a test can reproduce the
+	// store's crash window (events durable, snapshot replace failed) for one
+	// command. No filesystem-level injection can isolate that write, because
+	// every command also repaves the snapshot from the log first. Production
+	// leaves it nil. A test installs and clears it while controller goroutines
+	// are applying commands, so snapshotFaultMu guards every access.
+	snapshotFaultMu    sync.Mutex
+	snapshotWriteFault func(WorkflowID, Snapshot) error
 }
 
 // readinessCommandKinds are the command kinds whose event batch can create a
@@ -68,6 +83,29 @@ func NewStoreWithClock(root string, now func() time.Time) *Store {
 // block the command: its errors and panics are swallowed.
 func (s *Store) SetCommitObserver(fn func(WorkflowID, Snapshot)) {
 	s.onCommit = fn
+}
+
+// SetSnapshotWriteFault installs a fault consulted for the snapshot replace that
+// follows a durable event append; nil removes it. The fault sees the snapshot it
+// would write. A test can then reproduce the store's crash window (events durable,
+// snapshot replace failed) for a command it identifies by its content. No
+// filesystem-level injection can isolate that write, because every command also
+// repaves the snapshot from the log first. Tests in other packages use it and may
+// install or clear it while controllers are running, so it is safe to call at any
+// time; production leaves it unset.
+func (s *Store) SetSnapshotWriteFault(fault func(WorkflowID, Snapshot) error) {
+	s.snapshotFaultMu.Lock()
+	defer s.snapshotFaultMu.Unlock()
+	s.snapshotWriteFault = fault
+}
+
+// snapshotFault returns the installed snapshot-replace fault, or nil. The callers
+// invoke it outside the lock: the fault inspects the snapshot it is handed and
+// must never run holding a lock the command path shares.
+func (s *Store) snapshotFault() func(WorkflowID, Snapshot) error {
+	s.snapshotFaultMu.Lock()
+	defer s.snapshotFaultMu.Unlock()
+	return s.snapshotWriteFault
 }
 
 // notifyCommit invokes the registered commit observer, isolating the command
@@ -126,6 +164,14 @@ func (s *Store) CreateRoot() error {
 	}
 	return nil
 }
+
+// ErrCommandDurable reports that a command's events are, or may be, durable in
+// the event log even though the command returned an error. Either the snapshot
+// replace failed after the whole batch was appended, or a failed append could not
+// be rolled back. A replay recovers whatever landed, so callers must not undo a
+// side effect those events already reference. Deleting staged evidence then
+// leaves the log pointing at nothing.
+var ErrCommandDurable = errors.New("command events are (or may be) durable")
 
 // ApplyCommand applies one command under the instance's exclusive flock. On
 // success the commit observer (if any) is invoked after the lock is released.
@@ -198,7 +244,7 @@ func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error
 	if err := s.appendEvents(workflowID, events); err != nil {
 		return Snapshot{}, err
 	}
-	if err := s.writeSnapshot(workflowID, next); err != nil {
+	if err := s.writeSnapshotAfterAppend(workflowID, next); err != nil {
 		return Snapshot{}, err
 	}
 	s.regenerateProjections(workflowID, next)
@@ -221,9 +267,18 @@ func (s *Store) loadSnapshot(workflowID WorkflowID) (Snapshot, bool, error) {
 	return snap, true, nil
 }
 
-// appendEvents durably appends complete JSON events to the NDJSON log.
+// appendEvents durably appends complete JSON events to the NDJSON log. A batch
+// that fails part-way is rolled back to the log's pre-append length. An append
+// error then means the batch is not durable, so its side effects may be undone.
+// When even that rollback fails the error wraps ErrCommandDurable. The log may
+// then hold a prefix of the batch, and a replay would recover it.
 func (s *Store) appendEvents(workflowID WorkflowID, events []Event) error {
-	f, err := os.OpenFile(s.eventsPath(workflowID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, StateFilePerm)
+	path := s.eventsPath(workflowID)
+	before, statErr := os.Stat(path)
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		return statErr
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, StateFilePerm)
 	if err != nil {
 		return err
 	}
@@ -253,7 +308,48 @@ func (s *Store) appendEvents(workflowID WorkflowID, events []Event) error {
 	if err := f.Sync(); err != nil && firstErr == nil {
 		firstErr = err
 	}
+	if firstErr == nil {
+		return nil
+	}
+	// Roll the batch back so "append failed" means "not durable".
+	var offset int64
+	if before != nil {
+		offset = before.Size()
+	}
+	if err := rollbackEventAppend(f, offset); err != nil {
+		return err
+	}
 	return firstErr
+}
+
+// rollbackEventAppend truncates a failed batch out of the event log and syncs the
+// rollback. When it cannot, the log may still hold a prefix of the batch. The
+// error then reports ErrCommandDurable: a replay could recover that prefix, and
+// its side effects must not be undone.
+func rollbackEventAppend(f *os.File, offset int64) error {
+	if err := f.Truncate(offset); err != nil {
+		return fmt.Errorf("%w: truncate event log back to %d: %v", ErrCommandDurable, offset, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("%w: sync rolled-back event log: %v", ErrCommandDurable, err)
+	}
+	return nil
+}
+
+// writeSnapshotAfterAppend replaces the snapshot once the command's events are
+// durable. A failure here leaves the log ahead of the materialized state, which a
+// replay repairs. It is therefore reported as ErrCommandDurable: undoing the
+// command's side effects now would strand the durable events.
+func (s *Store) writeSnapshotAfterAppend(workflowID WorkflowID, snap Snapshot) error {
+	if fault := s.snapshotFault(); fault != nil {
+		if err := fault(workflowID, snap); err != nil {
+			return fmt.Errorf("%w: write snapshot: %v", ErrCommandDurable, err)
+		}
+	}
+	if err := s.writeSnapshot(workflowID, snap); err != nil {
+		return fmt.Errorf("%w: write snapshot: %v", ErrCommandDurable, err)
+	}
+	return nil
 }
 
 // writeSnapshot atomically replaces the snapshot file and fsyncs the directory.
@@ -266,6 +362,15 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	path := s.workflowPath(workflowID)
 	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, StateFilePerm); err != nil {
 		return err
+	}
+	return durablefile.FsyncDir(dir)
+}
+
+// syncDir makes one directory entry durable, through the store's test seam when a
+// test installed one.
+func syncDir(fsync func(string) error, dir string) error {
+	if fsync != nil {
+		return fsync(dir)
 	}
 	return durablefile.FsyncDir(dir)
 }

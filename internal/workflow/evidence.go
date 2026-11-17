@@ -10,8 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/sdougbrown/avenor/internal/durablefile"
 )
 
 // StagedEvidence describes one artifact copied into an immutable evidence
@@ -99,8 +97,9 @@ func copyFile(srcPath, destPath string) error {
 	return nil
 }
 
-// stageInto is the core primitive for staging evidence.
-func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA string) (int64, string, error) {
+// stageInto is the core primitive for staging evidence. fsync, when non-nil,
+// replaces the directory sync of the copy's own directory.
+func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA string, fsync func(string) error) (int64, string, error) {
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return 0, "", err
@@ -172,7 +171,7 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 		os.Remove(destPath)
 		return 0, "", errors.New("evidence: required file is empty")
 	}
-	if err := durablefile.FsyncDir(destDir); err != nil {
+	if err := syncDir(fsync, destDir); err != nil {
 		return 0, "", err
 	}
 	return storedInfo.Size(), storedDigest, nil
@@ -189,7 +188,7 @@ func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string,
 	evID := NewEvidenceID()
 	dir := evidenceDir(s.instanceDir(workflowID), evID)
 
-	size, digest, err := stageInto(srcPath, dir, storedName, required, expectedSHA256)
+	size, digest, err := stageInto(srcPath, dir, storedName, required, expectedSHA256, s.evidenceFsync)
 	if err != nil {
 		return StagedEvidence{}, err
 	}

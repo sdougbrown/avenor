@@ -11,12 +11,14 @@ package stable
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1084,5 +1086,194 @@ func TestAdapterSubjectMatches(t *testing.T) {
 				t.Fatalf("adapterSubjectMatches() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+// TestControllerPollDurableGateCommandKeepsEvidence proves the durable half of the
+// poll apply contract end to end. The external_result gate command's events reach
+// the log but its snapshot replace fails, and the staged adapter response is kept.
+// The gate instance references it, and a fresh store over the same root recovers
+// that reference by replaying the log, with the exact bytes still on disk.
+func TestControllerPollDurableGateCommandKeepsEvidence(t *testing.T) {
+	t.Parallel()
+	f := newPollFixture(t, "poll-durable", "poll-durable-tmpl",
+		map[string]string{"gh-review": "passed.sh"},
+		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+
+	f.waitReviewStatus(t, workflow.ActivationAwaitingGate)
+	f.waitCursor(t, "pr-review")
+
+	// Fail exactly the gate command's snapshot replace: the events land durably,
+	// the materialized snapshot stays behind.
+	var once sync.Once
+	f.mgr.Store().SetSnapshotWriteFault(func(workflow.WorkflowID, workflow.Snapshot) error {
+		failed := false
+		once.Do(func() { failed = true })
+		if failed {
+			return errors.New("injected snapshot replace failure")
+		}
+		return nil
+	})
+	t.Cleanup(func() { f.mgr.Store().SetSnapshotWriteFault(nil) })
+
+	// The gate result lands (durably) and the review resolves.
+	f.waitReviewStatus(t, workflow.ActivationSatisfied)
+	f.sup.stopControllerLoop("c1")
+
+	gates := f.gateInstances(t)
+	if len(gates) != 1 {
+		t.Fatalf("gate instances = %+v, want the recorded external result", gates)
+	}
+	gate := gates[0]
+	if len(gate.EvidenceIDs) != 1 {
+		t.Fatalf("gate evidence ids = %v, want the staged adapter response", gate.EvidenceIDs)
+	}
+	evidenceID := gate.EvidenceIDs[0]
+	storedPath := filepath.Join(f.root, "instances", f.wf, "evidence", string(evidenceID), "adapter-response.json")
+	stored, err := os.ReadFile(storedPath)
+	if err != nil {
+		t.Fatalf("read the gate's evidence copy: %v (a durable command's evidence must survive)", err)
+	}
+	if strings.TrimSpace(string(stored)) != wantPollAdapterStdout {
+		t.Fatalf("staged evidence = %q, want the adapter's exact stdout", stored)
+	}
+
+	// A fresh store over the same root reads the instance back by replaying the
+	// durable event log. The recovered gate still names the evidence, and the
+	// bytes it points at are there.
+	fresh, err := workflow.NewManager(workflow.New(f.root)).WorkflowInspect(f.wf)
+	if err != nil {
+		t.Fatalf("inspect through a fresh store (replay): %v", err)
+	}
+	var replayedGate *workflow.GateInstance
+	for _, gate := range fresh.(map[string]any)["gates"].([]workflow.GateInstance) {
+		if gate.GateID == "pr-review" {
+			replayedGate = &gate
+		}
+	}
+	if replayedGate == nil || len(replayedGate.EvidenceIDs) != 1 || replayedGate.EvidenceIDs[0] != evidenceID {
+		t.Fatalf("replayed gate = %+v, want the recorded result pointing at %s", replayedGate, evidenceID)
+	}
+	if _, err := os.Stat(storedPath); err != nil {
+		t.Fatalf("replayed gate's evidence copy is gone: %v", err)
+	}
+
+	// Every redundant copy a replay staged was discarded: one evidence
+	// directory stands for the one gate result.
+	entries, err := os.ReadDir(filepath.Join(f.root, "instances", f.wf, "evidence"))
+	if err != nil {
+		t.Fatalf("read evidence root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != string(evidenceID) {
+		t.Fatalf("evidence entries = %v, want only %s", entries, evidenceID)
+	}
+	if review := f.activationByNode(t, "review"); review == nil || review.Status != workflow.ActivationSatisfied {
+		t.Fatalf("review activation = %+v, want satisfied", review)
+	}
+}
+
+// TestControllerPollIdempotentReplayDiscardsItsEvidence proves the other half of
+// the poll apply contract. A poll the manager answers idempotently leaves the gate
+// referencing the copy the first apply staged, because the id was already
+// recorded. The replay's own copy then belongs to no fact and is discarded instead
+// of accumulating beside the recorded one. The replay is addressed through the
+// recorded gate, so no poll cycle has to be raced to produce it.
+func TestControllerPollIdempotentReplayDiscardsItsEvidence(t *testing.T) {
+	t.Parallel()
+	f := newPollFixture(t, "poll-idempotent", "poll-idempotent-tmpl",
+		map[string]string{"gh-review": "passed.sh"},
+		[]map[string]any{{"id": "pr-review", "type": "external", "required": true, "adapter_id": "gh-review"}})
+	f.drivePublication(t, "sdougbrown/avenor", 143, "cc793f7")
+	f.waitReviewStatus(t, workflow.ActivationSatisfied)
+	f.sup.stopControllerLoop("c1")
+
+	gates := f.gateInstances(t)
+	if len(gates) != 1 || len(gates[0].EvidenceIDs) != 1 {
+		t.Fatalf("gate instances = %+v, want the recorded external result", gates)
+	}
+	gate := gates[0]
+	recorded := gate.EvidenceIDs[0]
+	observedAt := time.Now().UTC()
+	if gate.ObservedAt != nil {
+		observedAt = *gate.ObservedAt
+	}
+	cursor := workflowcontroller.PollCursor{
+		WorkflowID:   f.wf,
+		NodeID:       "review",
+		ActivationID: string(gate.ActivationID),
+		GateID:       string(gate.GateID),
+		AdapterID:    "gh-review",
+		SubjectHash:  workflow.SubjectHash(gate.Subject),
+		PollID:       gate.PollID,
+	}
+	replayResult := &workflowcontroller.AdapterResult{
+		Result:       "passed",
+		ObservedAt:   observedAt,
+		ResponseHash: gate.ResponseHash,
+	}
+
+	// The replay stages its own copy and then asks the manager to record the same
+	// poll again; the answer is idempotent, so this copy is the caller's to remove.
+	src := filepath.Join(t.TempDir(), "adapter-response.json")
+	if err := os.WriteFile(src, []byte(wantPollAdapterStdout), 0o600); err != nil {
+		t.Fatalf("write replay response: %v", err)
+	}
+	wf := workflow.WorkflowID(f.wf)
+	replay, err := f.mgr.Store().StageEvidence(wf, src, "adapter-response.json", true, "")
+	if err != nil {
+		t.Fatalf("stage the replay's copy: %v", err)
+	}
+	applied, err := f.sup.submitExternalResult(wf, cursor, replayResult, gate.Subject, replay.EvidenceID)
+	if err != nil {
+		t.Fatalf("replayed external result: %v", err)
+	}
+	if applied {
+		t.Fatal("a replayed poll reported that it recorded the result")
+	}
+	if discardPollEvidenceAfter(applied, err) {
+		f.sup.discardPollEvidence(wf, replay.EvidenceID)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(f.root, "instances", f.wf, "evidence"))
+	if err != nil {
+		t.Fatalf("read evidence root: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != string(recorded) {
+		t.Fatalf("evidence entries = %v, want only the recorded result %s", entries, recorded)
+	}
+	if stored, err := os.ReadFile(filepath.Join(f.root, "instances", f.wf, "evidence", string(recorded), "adapter-response.json")); err != nil {
+		t.Fatalf("read the recorded copy: %v", err)
+	} else if strings.TrimSpace(string(stored)) != wantPollAdapterStdout {
+		t.Fatalf("recorded evidence = %q, want the adapter's exact stdout", stored)
+	}
+}
+
+// wantPollAdapterStdout is the exact stdout the passed.sh fixture adapter writes,
+// which is what a gate result stages as evidence.
+const wantPollAdapterStdout = `{"version":1,"result":"passed","subject":{"type":"pull_request","repository":"sdougbrown/avenor","pull_request":143,"revision":"cc793f7"},"observed_at":"2026-01-01T00:00:00Z","summary":"approved"}`
+
+// TestDiscardPollEvidenceAfter pins the poll apply decision table: a staged
+// adapter response is removed again only when the gate command left nothing
+// durable that references it.
+func TestDiscardPollEvidenceAfter(t *testing.T) {
+	t.Parallel()
+	durable := fmt.Errorf("%w: write snapshot: injected", workflow.ErrCommandDurable)
+	preCommit := errors.New("event append failed")
+	cases := []struct {
+		name    string
+		applied bool
+		err     error
+		want    bool
+	}{
+		{name: "durable command keeps its evidence", applied: false, err: durable, want: false},
+		{name: "pre-commit failure discards", applied: false, err: preCommit, want: true},
+		{name: "applied command keeps its evidence", applied: true, err: nil, want: false},
+		{name: "idempotent replay discards its redundant copy", applied: false, err: nil, want: true},
+	}
+	for _, test := range cases {
+		if got := discardPollEvidenceAfter(test.applied, test.err); got != test.want {
+			t.Errorf("%s: discardPollEvidenceAfter(%v, %v) = %v, want %v", test.name, test.applied, test.err, got, test.want)
+		}
 	}
 }

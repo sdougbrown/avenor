@@ -100,6 +100,15 @@ batch (fsync), atomically replace the snapshot, and regenerate projections. A
 crash after the event append but before the snapshot replace is recovered by
 replay.
 
+A command whose batch is durable keeps its staged evidence even when the
+snapshot replace fails: the command reports that its events are durable
+(`ErrCommandDurable`), replay repairs the materialized state, and repeating the
+command is an idempotent no-op rather than a second evidence copy. If an append
+fails, the store restores the log's previous length. It removes staged evidence
+only when that rollback succeeds. The same rule covers the controller's adapter
+responses: a poll discards its staged response only when nothing durable names
+it, and an idempotent replay drops the redundant copy it staged.
+
 The default workflow root is `$XDG_STATE_HOME/avenor/workflows`, falling back
 to `$HOME/.avenor/workflows`. Override it with `--workflow-root` on `avenor
 stable`.

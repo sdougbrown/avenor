@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,6 +132,56 @@ func TestCommitObserverPanicIsolation(t *testing.T) {
 	if snap.Instance.Revision != 1 {
 		t.Fatalf("command did not commit: revision = %d, want 1", snap.Instance.Revision)
 	}
+}
+
+// TestSnapshotWriteFaultIsSafeWhileCommandsApply pins that a test may install or
+// clear the snapshot-replace fault while commands apply on another goroutine. The
+// fault is consulted on every command path, so installing it after controllers
+// start must be synchronized with those reads. The race detector fails this test
+// without that synchronization, and a torn read of the fault panics the command.
+func TestSnapshotWriteFaultIsSafeWhileCommandsApply(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+
+	// The installed fault is consulted by the command path.
+	var consulted atomic.Int64
+	s.SetSnapshotWriteFault(func(WorkflowID, Snapshot) error {
+		consulted.Add(1)
+		return nil
+	})
+	mustInstantiate(t, s, "wf-fault")
+	if consulted.Load() == 0 {
+		t.Fatal("the installed fault was never consulted")
+	}
+
+	// Installing and clearing it races the same read the command path makes.
+	stop := make(chan struct{})
+	var toggler sync.WaitGroup
+	toggler.Add(1)
+	go func() {
+		defer toggler.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				s.SetSnapshotWriteFault(func(WorkflowID, Snapshot) error { return nil })
+				s.SetSnapshotWriteFault(nil)
+			}
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		mustInstantiate(t, s, WorkflowID(fmt.Sprintf("wf-fault-%d", i)))
+	}
+	close(stop)
+	toggler.Wait()
+
+	// A cleared fault no longer fails the replace.
+	s.SetSnapshotWriteFault(nil)
+	mustInstantiate(t, s, "wf-fault-after")
 }
 
 func TestStore_ApplyAdvancesRevisionAndRoundTrips(t *testing.T) {

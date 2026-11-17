@@ -210,12 +210,11 @@ func (s *Supervisor) applyPollResult(controllerID string, cursor workflowcontrol
 		if err != nil {
 			return err
 		}
-		// A gate command failure must not leave freshly staged evidence.
-		commandErr := s.submitExternalResult(wf, cursor, res, subject, staged.EvidenceID)
+		applied, commandErr := s.submitExternalResult(wf, cursor, res, subject, staged.EvidenceID)
+		if discardPollEvidenceAfter(applied, commandErr) {
+			s.discardPollEvidence(wf, staged.EvidenceID)
+		}
 		if commandErr != nil {
-			if discErr := wstore.DiscardEvidence(wf, staged.EvidenceID); discErr != nil {
-				log.Printf("workflow %s: discard evidence %s after failed gate command: %v", wf, staged.EvidenceID, discErr)
-			}
 			return commandErr
 		}
 		outcome = workflowcontroller.PollApplied
@@ -243,9 +242,12 @@ func adapterSubjectMatches(observed workflowcontroller.AdapterSubject, pinned *w
 		observed.Revision == pinned.Revision
 }
 
-// submitExternalResult submits the structured external_result gate command
-// through the manager's command boundary.
-func (s *Supervisor) submitExternalResult(wf workflow.WorkflowID, cursor workflowcontroller.PollCursor, res *workflowcontroller.AdapterResult, subject *workflow.Subject, evidenceID workflow.EvidenceID) error {
+// submitExternalResult submits one adapter result as an external_result gate
+// command through the manager's command boundary, and reports whether this call
+// recorded it. applied is false when the manager answered idempotently, because
+// the poll id was already recorded or the activation resolved concurrently. The
+// caller then still owns its freshly staged evidence.
+func (s *Supervisor) submitExternalResult(wf workflow.WorkflowID, cursor workflowcontroller.PollCursor, res *workflowcontroller.AdapterResult, subject *workflow.Subject, evidenceID workflow.EvidenceID) (applied bool, err error) {
 	payload, err := json.Marshal(map[string]any{
 		"op":            "gate",
 		"node_id":       cursor.NodeID,
@@ -261,10 +263,40 @@ func (s *Supervisor) submitExternalResult(wf workflow.WorkflowID, cursor workflo
 		"evidence_ids":  []string{string(evidenceID)},
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = s.workflowManager().WorkflowCommand(string(wf), payload)
-	return err
+	out, err := s.workflowManager().WorkflowCommand(string(wf), payload)
+	if err != nil {
+		return false, err
+	}
+	if result, ok := out.(map[string]any); ok {
+		if idempotent, _ := result["idempotent"].(bool); idempotent {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// discardPollEvidence removes one poll cycle's staged adapter response. It logs
+// rather than failing the poll, because the copy is unreferenced either way.
+func (s *Supervisor) discardPollEvidence(wf workflow.WorkflowID, id workflow.EvidenceID) {
+	if err := s.workflowManager().Store().DiscardEvidence(wf, id); err != nil {
+		log.Printf("workflow %s: discard evidence %s: %v", wf, id, err)
+	}
+}
+
+// discardPollEvidenceAfter reports whether a poll cycle's staged adapter
+// response should be removed again. Only a command that left nothing durable
+// referencing it may lose its copy. A durable command's events already name it,
+// and a replay recovers that reference, so deleting it would leave the log
+// pointing at nothing. An idempotent answer references the copy the first apply
+// staged, because the poll id was already recorded or the activation resolved
+// concurrently. This cycle's copy then belongs to no fact.
+func discardPollEvidenceAfter(applied bool, commandErr error) bool {
+	if commandErr != nil {
+		return !errors.Is(commandErr, workflow.ErrCommandDurable)
+	}
+	return !applied
 }
 
 // stablePoller adapts the supervisor's park/poll/apply surface to the
