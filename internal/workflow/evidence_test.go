@@ -170,13 +170,13 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 	}
 	// i) First stage
 	a := writeTestFile(t, "same content")
-	_, _, err := stageInto(a, destDir, "out.txt", false, "", nil)
+	_, _, err := stageInto(a, destDir, "out.txt", false, "", "", noSync)
 	if err != nil {
 		t.Fatalf("stageInto first call failed: %v", err)
 	}
 	// ii) Dedupe identical content
 	b := writeTestFile(t, "same content")
-	size, sig, err := stageInto(b, destDir, "out.txt", false, "", nil)
+	size, sig, err := stageInto(b, destDir, "out.txt", false, "", "", noSync)
 	if err != nil {
 		t.Fatalf("stageInto second call (dedupe) failed: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestStageEvidence_ImmutabilityDedupeAndFails(t *testing.T) {
 	}
 	// iii) Different content should fail
 	c := writeTestFile(t, "DIFFERENT")
-	_, _, err = stageInto(c, destDir, "out.txt", false, "", nil)
+	_, _, err = stageInto(c, destDir, "out.txt", false, "", "", noSync)
 	if err == nil {
 		t.Fatal("stageInto with different content should have failed")
 	}
@@ -326,8 +326,332 @@ func TestStageEvidence_CopyFailure(t *testing.T) {
 	src := writeTestFile(t, "content that cannot land")
 	// destDir sits under a path component that is a regular file, so the
 	// destination cannot be created and staging must fail with an error.
-	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, "", nil); err == nil {
+	if _, _, err := stageInto(src, filepath.Join(blocker, "evidence"), "out.txt", false, "", "", noSync); err == nil {
 		t.Fatal("expected copy failure for unwritable destination")
+	}
+}
+
+// stagedEvidenceNames lists the evidence directories an instance holds, so a
+// test can assert that a staging attempt left nothing behind.
+func stagedEvidenceNames(t *testing.T, s *Store, wf WorkflowID) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(s.instanceDir(wf), "evidence"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		t.Fatalf("read evidence root: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+// TestStageEvidenceFsyncsEveryCreatedDirectoryEntry proves a staging makes each
+// directory entry it creates durable, not only the file's bytes. The entries are
+// the leaf holding the copy, every directory it created, and the pre-existing
+// parent that holds the shallowest one, deepest first. Without the parent sync a
+// crash could still lose the evidence directory a just-appended event references.
+func TestStageEvidenceFsyncsEveryCreatedDirectoryEntry(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "workflow-root")
+	s := New(root)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	var synced []string
+	s.fsyncDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+
+	staged, err := s.StageEvidence("wf-fsync", writeTestFile(t, "check output\n"), "completion-command.stdout", false, "")
+	if err != nil {
+		t.Fatalf("StageEvidence: %v", err)
+	}
+	instanceDir := filepath.Join(root, "instances", "wf-fsync")
+	leafDir := filepath.Join(instanceDir, "evidence", string(staged.EvidenceID))
+	// The first staging into a fresh root creates the instance and its evidence
+	// directory. All three entries are then made durable, deepest first, ending at
+	// the pre-existing instances directory that holds them.
+	want := []string{filepath.Join(root, "instances"), leafDir, filepath.Join(instanceDir, "evidence"), instanceDir}
+	if len(synced) != len(want) {
+		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+	for i := range want {
+		if synced[i] != want[i] {
+			t.Fatalf("synced directories = %v, want %v (deepest first, ending at the created root)", synced, want)
+		}
+	}
+}
+
+// TestStageEvidenceFsyncsAncestorsWhenParentsExist covers staging into an
+// existing evidence tree.
+func TestStageEvidenceFsyncsAncestorsWhenParentsExist(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	if _, err := s.StageEvidence("wf-fsync", writeTestFile(t, "first\n"), "a.txt", false, ""); err != nil {
+		t.Fatalf("first staging: %v", err)
+	}
+	var synced []string
+	s.fsyncDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	staged, err := s.StageEvidence("wf-fsync", writeTestFile(t, "second\n"), "b.txt", false, "")
+	if err != nil {
+		t.Fatalf("second staging: %v", err)
+	}
+	leafDir := filepath.Join(s.Root(), "instances", "wf-fsync", "evidence", string(staged.EvidenceID))
+	instanceDir := filepath.Join(s.Root(), "instances", "wf-fsync")
+	// The instance entry is recorded first (ensureInstanceDir owns creation), then
+	// the new leaf and its evidence parent. Every ancestor is synced on every
+	// staging, because an earlier attempt can leave an entry unrecorded.
+	want := []string{filepath.Join(s.Root(), "instances"), leafDir, filepath.Join(instanceDir, "evidence"), instanceDir}
+	if len(synced) != len(want) {
+		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+	for i := range want {
+		if synced[i] != want[i] {
+			t.Fatalf("synced directories = %v, want %v", synced, want)
+		}
+	}
+}
+
+// TestStageEvidenceSyncsAncestorsAfterAFailedAttempt proves the ancestor syncs
+// are not conditional on this call having created them. A staging that fails
+// before its own sync leaves the evidence and instance directories on disk but
+// unrecorded. The next staging into that instance creates only its own leaf, so
+// it must sync those ancestors too, or a crash could lose the directory a
+// recorded file lives in.
+func TestStageEvidenceSyncsAncestorsAfterAFailedAttempt(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	var fsyncCalls int
+	s.fsyncDir = func(string) error {
+		fsyncCalls++
+		// Fail after the instance entry is recorded, so the evidence chain exists
+		// while its own entries do not: the interrupted-creation shape.
+		if fsyncCalls > 1 {
+			return errors.New("injected fsync failure")
+		}
+		return nil
+	}
+	if _, err := s.StageEvidence("wf-retry-fsync", writeTestFile(t, "first\n"), "a.txt", false, ""); err == nil {
+		t.Fatal("staging with a failing fsync succeeded")
+	}
+	evidenceRoot := filepath.Join(s.Root(), "instances", "wf-retry-fsync", "evidence")
+	entries, err := os.ReadDir(evidenceRoot)
+	if err != nil {
+		t.Fatalf("read evidence root after the failed staging: %v (the directory must exist to exercise the retry)", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("evidence entries after the failed staging = %v, want the failed attempt's directory removed", entries)
+	}
+
+	// A later staging creates only its own leaf; the ancestors must still be
+	// synced, instance directory included.
+	var synced []string
+	s.fsyncDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	staged, err := s.StageEvidence("wf-retry-fsync", writeTestFile(t, "second\n"), "b.txt", false, "")
+	if err != nil {
+		t.Fatalf("retry staging: %v", err)
+	}
+	instanceDir := filepath.Join(s.Root(), "instances", "wf-retry-fsync")
+	leafDir := filepath.Join(evidenceRoot, string(staged.EvidenceID))
+	// The instance directory existed before this staging (the interrupted attempt
+	// created it). ensureInstanceDir also records its entry every time, so the
+	// chain opens with instances/ and then records the leaf's ancestors.
+	want := []string{filepath.Join(s.Root(), "instances"), leafDir, evidenceRoot, instanceDir}
+	if len(synced) != len(want) {
+		t.Fatalf("synced directories = %v, want %v", synced, want)
+	}
+	for i := range want {
+		if synced[i] != want[i] {
+			t.Fatalf("synced directories = %v, want %v", synced, want)
+		}
+	}
+}
+
+// TestStageEvidence_RemovesFreshDirWhenFsyncFails proves a stage that fails
+// after its copy landed leaves no orphan behind: the evidence directory it
+// minted and the copy inside it are removed, while the artifact an earlier stage
+// recorded and the shared evidence parent survive. A later attempt then stages
+// normally.
+func TestStageEvidence_RemovesFreshDirWhenFsyncFails(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	kept, err := s.StageEvidence("wf-rollback", writeTestFile(t, "kept\n"), "kept.txt", false, "")
+	if err != nil {
+		t.Fatalf("staging the artifact to keep: %v", err)
+	}
+
+	s.fsyncDir = func(string) error { return errors.New("injected fsync failure") }
+	if _, err := s.StageEvidence("wf-rollback", writeTestFile(t, "lost\n"), "lost.txt", false, ""); err == nil {
+		t.Fatal("staging with a failing fsync succeeded")
+	}
+
+	if got := stagedEvidenceNames(t, s, "wf-rollback"); len(got) != 1 || got[0] != string(kept.EvidenceID) {
+		t.Fatalf("evidence directories after the failed staging = %v, want only the kept %s", got, kept.EvidenceID)
+	}
+	if _, err := os.Stat(filepath.Join(s.Root(), "instances", "wf-rollback", kept.StoredPath)); err != nil {
+		t.Fatalf("earlier artifact's copy: %v", err)
+	}
+
+	s.fsyncDir = nil
+	retried, err := s.StageEvidence("wf-rollback", writeTestFile(t, "retried\n"), "retried.txt", false, "")
+	if err != nil {
+		t.Fatalf("retry staging: %v", err)
+	}
+	if got := stagedEvidenceNames(t, s, "wf-rollback"); len(got) != 2 {
+		t.Fatalf("evidence directories after the retry = %v, want the kept and retried ones", got)
+	}
+	stored, err := os.ReadFile(filepath.Join(s.Root(), "instances", "wf-rollback", retried.StoredPath))
+	if err != nil {
+		t.Fatalf("read retried copy: %v", err)
+	}
+	if string(stored) != "retried\n" {
+		t.Fatalf("retried copy = %q, want the retried bytes", stored)
+	}
+}
+
+// TestStageEvidence_RemovesNestedFreshDirsWhenFsyncFails covers a nested stored
+// name, so the rollback also drops the subdirectories one staging created and
+// never reaches the directories a sibling instance owns.
+func TestStageEvidence_RemovesNestedFreshDirsWhenFsyncFails(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	sibling, err := s.StageEvidence("wf-sibling", writeTestFile(t, "sibling\n"), "out.txt", false, "")
+	if err != nil {
+		t.Fatalf("sibling staging: %v", err)
+	}
+
+	// Fail only the leaf's own sync, so the nested subdirectory and the copy exist
+	// by the time cleanup runs: that is the shape this test is about.
+	s.fsyncDir = func(dir string) error {
+		if strings.Contains(dir, string(filepath.Separator)+"evidence"+string(filepath.Separator)) {
+			return errors.New("injected fsync failure")
+		}
+		return nil
+	}
+	if _, err := s.StageEvidence("wf-rollback", writeTestFile(t, "lost\n"), "logs/lost.txt", false, ""); err == nil {
+		t.Fatal("staging with a failing fsync succeeded")
+	}
+
+	if got := stagedEvidenceNames(t, s, "wf-rollback"); len(got) != 0 {
+		t.Fatalf("evidence directories after the failed staging = %v, want none", got)
+	}
+	// The shared evidence parent is a staging artifact: it may not exist yet if
+	// the failure landed before the chain was created, and it must be empty when
+	// it does.
+	if entries, err := os.ReadDir(filepath.Join(s.Root(), "instances", "wf-rollback", "evidence")); err == nil && len(entries) != 0 {
+		t.Fatalf("shared evidence parent holds %v, want none", entries)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("shared evidence parent: %v", err)
+	}
+	if got := stagedEvidenceNames(t, s, "wf-sibling"); len(got) != 1 || got[0] != string(sibling.EvidenceID) {
+		t.Fatalf("sibling instance's evidence = %v, want only %s", got, sibling.EvidenceID)
+	}
+
+	s.fsyncDir = nil
+	retried, err := s.StageEvidence("wf-rollback", writeTestFile(t, "retried\n"), "logs/lost.txt", false, "")
+	if err != nil {
+		t.Fatalf("retry staging: %v", err)
+	}
+	stored, err := os.ReadFile(filepath.Join(s.Root(), "instances", "wf-rollback", retried.StoredPath))
+	if err != nil {
+		t.Fatalf("read retried copy: %v", err)
+	}
+	if string(stored) != "retried\n" {
+		t.Fatalf("retried copy = %q, want the retried bytes", stored)
+	}
+}
+
+// TestStageEvidence_RollsBackWhenAnAncestorSyncFails proves the rollback also
+// covers a staging that made its leaf entry durable and then failed on an
+// ancestor: the evidence directory goes, and the ancestor directories it shares
+// with every other stage stay.
+func TestStageEvidence_RollsBackWhenAnAncestorSyncFails(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	instanceDir := filepath.Join(s.Root(), "instances", "wf-rollback")
+	s.fsyncDir = func(dir string) error {
+		if dir == instanceDir {
+			return errors.New("injected ancestor fsync failure")
+		}
+		return nil
+	}
+	if _, err := s.StageEvidence("wf-rollback", writeTestFile(t, "lost\n"), "lost.txt", false, ""); err == nil {
+		t.Fatal("staging with a failing ancestor fsync succeeded")
+	}
+
+	if got := stagedEvidenceNames(t, s, "wf-rollback"); len(got) != 0 {
+		t.Fatalf("evidence directories after the failed staging = %v, want none", got)
+	}
+	for _, dir := range []string{instanceDir, filepath.Join(s.Root(), "instances")} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("shared ancestor %s: %v", dir, err)
+		}
+	}
+}
+
+// TestStageEvidence_ReportsDiscardFailureWithEvidenceID proves a staging failure
+// that also cannot discard its fresh evidence directory reports both: the error
+// the caller has to act on keeps its identity, and the copy it could not remove
+// is named by its evidence ID instead of being dropped silently.
+func TestStageEvidence_ReportsDiscardFailureWithEvidenceID(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	injected := errors.New("injected fsync failure")
+	var calls int
+	s.fsyncDir = func(string) error {
+		calls++
+		if calls > 1 {
+			return injected
+		}
+		return nil
+	}
+	var discarded []EvidenceID
+	s.SetDiscardFault(func(id EvidenceID) error {
+		discarded = append(discarded, id)
+		return errors.New("injected discard failure")
+	})
+	t.Cleanup(func() { s.SetDiscardFault(nil) })
+
+	_, err := s.StageEvidence("wf-discard", writeTestFile(t, "captured\n"), "lost.txt", false, "")
+	if !errors.Is(err, injected) {
+		t.Fatalf("error = %v, want the staging failure's identity preserved", err)
+	}
+	// Exactly one discard, for the ID this stage minted: a second one would mean
+	// two owners of the cleanup rule.
+	if len(discarded) != 1 || discarded[0] == "" {
+		t.Fatalf("discards = %v, want exactly one for a minted evidence ID", discarded)
+	}
+	if !strings.Contains(err.Error(), string(discarded[0])) {
+		t.Fatalf("error = %v, want it to name the orphaned evidence ID %s", err, discarded[0])
 	}
 }
 
@@ -369,7 +693,7 @@ func TestStageEvidenceLeavesNoDirectoryWhenStagingFails(t *testing.T) {
 	s := newStore(t)
 	src := writeTestFile(t, "captured\n")
 	injected := errors.New("injected sync failure")
-	s.evidenceFsync = func(string) error { return injected }
+	s.fsyncDir = func(string) error { return injected }
 	if _, err := s.StageEvidence("wf1", src, "artifact.json", false, ""); !errors.Is(err, injected) {
 		t.Fatalf("error = %v, want the staging failure", err)
 	}
@@ -379,5 +703,142 @@ func TestStageEvidenceLeavesNoDirectoryWhenStagingFails(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("evidence entries = %v, want none after a failed stage", entries)
+	}
+}
+
+// TestStageEvidence_ValidationRejectionIsNotACleanupFailure proves a rejected
+// request returns the bare validation error: no evidence directory was minted, so
+// there is nothing to discard and nothing to report.
+func TestStageEvidence_ValidationRejectionIsNotACleanupFailure(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	_, err := s.StageEvidence("wf-validate", writeTestFile(t, "captured\n"), "../escape.txt", false, "")
+	if err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("error = %v, want the stored-path validation error", err)
+	}
+	if strings.Contains(err.Error(), "discard orphaned evidence") {
+		t.Fatalf("error = %v, want no cleanup clause on a rejected request", err)
+	}
+}
+
+// TestEnsureInstanceDirRecordsItsEntry proves the command path records an
+// instance directory's entry in the instances directory, so an instance whose
+// files are durable can be found again after a crash even when no evidence was
+// staged for it.
+func TestEnsureInstanceDirRecordsItsEntry(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "workflow-root")
+	s := New(root)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	var synced []string
+	s.fsyncDir = func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	mustInstantiate(t, s, "wf-entry")
+	want := filepath.Join(root, "instances")
+	found := false
+	for _, dir := range synced {
+		if dir == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("synced directories = %v, want the instances directory %s recorded", synced, want)
+	}
+}
+
+// TestStageEvidenceRejectsASyncRootOutsideTheDestination proves the durability
+// boundary is enforced, not assumed: a syncRoot that does not contain the
+// staging directory would silently weaken the sync walk, so it is refused.
+func TestStageEvidenceRejectsASyncRootOutsideTheDestination(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "workflow-root")
+	s := New(root)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	instanceDir := s.instanceDir("wf-outside")
+	destDir := filepath.Join(instanceDir, "evidence", "ev-1")
+	if err := os.MkdirAll(destDir, StateDirPerm); err != nil {
+		t.Fatalf("mkdir dest: %v", err)
+	}
+	elsewhere := filepath.Join(root, "elsewhere")
+	_, _, err := stageStream(strings.NewReader("x"), sha256OfString("x"), destDir, "a.txt", false, "", elsewhere, noSync)
+	if err == nil || !strings.Contains(err.Error(), "is not inside") {
+		t.Fatalf("error = %v, want a rejected sync root", err)
+	}
+}
+
+// noSync is the sync a test passes when it does not observe directory durability.
+func noSync(string) error { return nil }
+
+// sha256OfString returns the hex digest stageStream expects for content.
+func sha256OfString(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestStageStreamDedupeStillSyncsDirectories proves the dedupe path is not a
+// shortcut past durability. A second staging of identical content into the same
+// stored path reuses the file, and must still record the directory entries a
+// killed earlier attempt may have left unsynced.
+func TestStageStreamDedupeStillSyncsDirectories(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "workflow-root")
+	s := New(root)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	instanceDir := s.instanceDir("wf-dedupe")
+	destDir := filepath.Join(instanceDir, "evidence", "ev-same")
+	if err := os.MkdirAll(destDir, StateDirPerm); err != nil {
+		t.Fatalf("mkdir dest: %v", err)
+	}
+	content := "same bytes\n"
+	if _, _, err := stageStream(strings.NewReader(content), sha256OfString(content), destDir, "a.txt", false, "", instanceDir, noSync); err != nil {
+		t.Fatalf("first staging: %v", err)
+	}
+	var synced []string
+	fsync := func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	}
+	size, digest, err := stageStream(strings.NewReader(content), sha256OfString(content), destDir, "a.txt", false, "", instanceDir, fsync)
+	if err != nil {
+		t.Fatalf("dedupe staging: %v", err)
+	}
+	if size == 0 || digest != sha256OfString(content) {
+		t.Fatalf("dedupe staging = %d/%s, want the staged file's size and digest", size, digest)
+	}
+	if len(synced) == 0 {
+		t.Fatal("dedupe staging synced no directory, want the ancestor chain recorded")
+	}
+}
+
+// TestStageEvidenceRejectionTouchesNothing proves a rejected request leaves no
+// trace on disk: the id is validated before any directory is created, so a
+// traversal-bearing id cannot create a directory outside the instance namespace.
+func TestStageEvidenceRejectionTouchesNothing(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "workflow-root")
+	s := New(root)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	if _, err := s.StageEvidence(WorkflowID("../evil"), writeTestFile(t, "x\n"), "a.txt", false, ""); err == nil {
+		t.Fatal("staging with a traversal id succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "evil")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat escaped path: %v, want nothing created outside the root", err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "instances")); err == nil {
+		for _, entry := range entries {
+			if entry.Name() == "evil" {
+				t.Fatalf("instances holds %q, want the rejected id to leave nothing", entry.Name())
+			}
+		}
 	}
 }

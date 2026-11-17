@@ -35,11 +35,10 @@ type Store struct {
 	// child-snapshot read command-time gate pinning consults. nil reads as
 	// no template knowledge. The manager installs itself here.
 	policies Policies
-	// evidenceFsync, when non-nil, replaces durablefile.FsyncDir for the
-	// directory a staging writes its copy into, so a test can observe or fail a
-	// staging's sync. A test sets it before the staging it observes; production
-	// leaves it nil.
-	evidenceFsync func(string) error
+	// fsyncDir, when non-nil, replaces durablefile.FsyncDir for every directory
+	// the store makes durable, so a test can observe or fail those syncs.
+	// Production leaves it nil.
+	fsyncDir func(string) error
 	// snapshotWriteFault, when non-nil, is consulted for the snapshot replace
 	// that follows a durable event append. It exists so a test can reproduce the
 	// store's crash window (events durable, snapshot replace failed) for one
@@ -233,8 +232,24 @@ func (s *Store) ApplyCommand(workflowID WorkflowID, cmd Command) (Snapshot, erro
 	return snap, nil
 }
 
+// syncDir makes one directory entry durable, through the test seam when set.
+func (s *Store) syncDir(dir string) error {
+	fsync := s.fsyncDir
+	if fsync == nil {
+		fsync = durablefile.FsyncDir
+	}
+	return fsync(dir)
+}
+
+// ensureInstanceDir creates the instance directory and records its entry in the
+// instances directory. Every command path passes through here, so an instance
+// whose files are durable can always be found again after a crash, whether this
+// call or an earlier one created the directory.
 func (s *Store) ensureInstanceDir(workflowID WorkflowID) error {
-	return os.MkdirAll(s.instanceDir(workflowID), StateDirPerm)
+	if err := os.MkdirAll(s.instanceDir(workflowID), StateDirPerm); err != nil {
+		return err
+	}
+	return s.syncDir(filepath.Dir(s.instanceDir(workflowID)))
 }
 
 func (s *Store) applyLocked(workflowID WorkflowID, cmd Command) (Snapshot, error) {
@@ -420,16 +435,7 @@ func (s *Store) writeSnapshot(workflowID WorkflowID, snap Snapshot) error {
 	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, StateFilePerm); err != nil {
 		return err
 	}
-	return durablefile.FsyncDir(dir)
-}
-
-// syncDir makes one directory entry durable, through the store's test seam when a
-// test installed one.
-func syncDir(fsync func(string) error, dir string) error {
-	if fsync != nil {
-		return fsync(dir)
-	}
-	return durablefile.FsyncDir(dir)
+	return s.syncDir(dir)
 }
 
 // StoreTemplate atomically persists a versioned template under
@@ -498,7 +504,7 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 	if err := durablefile.WriteFileAtomic(path, durablefile.TempPattern(path), data, StateFilePerm); err != nil {
 		return err
 	}
-	return durablefile.FsyncDir(dir)
+	return s.syncDir(dir)
 }
 
 // LoadTemplate reads a versioned template, returning a not-found error if it

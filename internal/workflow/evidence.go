@@ -68,21 +68,15 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// copyFile copies srcPath to destPath with O_CREATE|O_EXCL so it never
+// copyStream copies src to destPath with O_CREATE|O_EXCL so it never
 // overwrites an existing file, and fsyncs the result.
-func copyFile(srcPath, destPath string) error {
-	in, err := os.Open(srcPath)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
+func copyStream(src io.Reader, destPath string) error {
 	out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, StateFilePerm)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
+	if _, err := io.Copy(out, src); err != nil {
 		// on failure, remove the partial file this call created
 		out.Close()
 		os.Remove(destPath)
@@ -97,9 +91,8 @@ func copyFile(srcPath, destPath string) error {
 	return nil
 }
 
-// stageInto is the core primitive for staging evidence. fsync, when non-nil,
-// replaces the directory sync of the copy's own directory.
-func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA string, fsync func(string) error) (int64, string, error) {
+// stageInto stages one source file as evidence.
+func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA string, syncRoot string, fsync func(string) error) (int64, string, error) {
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return 0, "", err
@@ -119,13 +112,36 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 		return 0, "", fmt.Errorf("evidence: sha256 mismatch for %q", storedName)
 	}
 
-	destPath := filepath.Join(destDir, storedName)
-	// Create the destination parent chain (the evidence dir plus any validated
-	// nested subdirectories) so a nested stored path stages correctly.
-	if err := os.MkdirAll(filepath.Dir(destPath), StateDirPerm); err != nil {
+	in, err := os.Open(srcPath)
+	if err != nil {
 		return 0, "", err
 	}
+	defer in.Close()
+	return stageStream(in, digest, destDir, storedName, required, expectedSHA, syncRoot, fsync)
+}
 
+// stageStream is the core primitive for staging evidence. It copies src into the
+// immutable evidence directory, refusing to overwrite a different file of the same
+// name. It then re-verifies the bytes that landed on disk. digest must be the
+// digest of src's bytes: it decides the dedupe comparison and is recorded as the
+// staged digest. syncRoot must contain destDir; a mismatch is refused rather than
+// silently syncing only the leaf.
+func stageStream(src io.Reader, sourceDigest, destDir, storedName string, required bool, expectedSHA string, syncRoot string, fsync func(string) error) (int64, string, error) {
+	if syncRoot != "" {
+		rel, err := filepath.Rel(syncRoot, destDir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return 0, "", fmt.Errorf("evidence: %s is not inside %s", destDir, syncRoot)
+		}
+	}
+	destPath := filepath.Join(destDir, storedName)
+	// Create the destination parent chain (the evidence dir plus any validated
+	// nested subdirectories) so a nested stored path stages correctly. Keep the
+	// directories this call created. Each of their entries has to be synced too,
+	// or a crash can lose the whole capture even though its bytes were durable.
+	created, err := mkdirAllTracked(filepath.Dir(destPath))
+	if err != nil {
+		return 0, "", err
+	}
 	// Immutability: never overwrite an already-staged file. If the exact
 	// destination already exists, dedupe when its content matches the source,
 	// otherwise fail.
@@ -134,8 +150,14 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 		if err != nil {
 			return 0, "", err
 		}
-		if existing == digest {
-			return dstat.Size(), existing, nil // dedupe: reuse the staged file
+		if existing == sourceDigest {
+			// Dedupe reuses the staged file, but the directories holding it may
+			// still be unrecorded if the attempt that created them was
+			// interrupted, so they are synced here too.
+			if err := fsyncEvidenceDirs(fsync, syncRoot, destDir, created); err != nil {
+				return 0, "", err
+			}
+			return dstat.Size(), existing, nil
 		}
 		return 0, "", fmt.Errorf("evidence: stored path %q already exists with different content", storedName)
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -145,7 +167,7 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 	// Always a byte copy, never a hard link: the source usually lives in a
 	// worker's working directory, and a later rewrite of it in place must not
 	// change evidence already staged.
-	if err := copyFile(srcPath, destPath); err != nil {
+	if err := copyStream(src, destPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return 0, "", fmt.Errorf("evidence: stored path %q already exists", storedName)
 		}
@@ -171,31 +193,85 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 		os.Remove(destPath)
 		return 0, "", errors.New("evidence: required file is empty")
 	}
-	if err := syncDir(fsync, destDir); err != nil {
+	// The file's bytes, then every directory entry staging created. That means the
+	// leaf's entry in its parent, each created directory, and the first
+	// pre-existing ancestor that holds the shallowest created one.
+	if err := fsyncEvidenceDirs(fsync, syncRoot, destDir, created); err != nil {
 		return 0, "", err
 	}
 	return storedInfo.Size(), storedDigest, nil
 }
 
+// mkdirAllTracked creates dir and any missing parents at the state directory
+// mode. It returns the directories it created from shallowest to deepest, or
+// nil when dir already existed.
+func mkdirAllTracked(dir string) ([]string, error) {
+	var created []string
+	for cur := dir; ; cur = filepath.Dir(cur) {
+		if _, err := os.Stat(cur); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		created = append([]string{cur}, created...)
+		if parent := filepath.Dir(cur); parent == cur {
+			break
+		}
+	}
+	if len(created) == 0 {
+		return nil, nil
+	}
+	if err := os.MkdirAll(dir, StateDirPerm); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// fsyncEvidenceDirs syncs the staged file's directory and its ancestors through
+// the instances directory, deepest first.
+//
+// Ancestors are synced on every staging, even when this call did not create
+// them. An earlier attempt that failed before its own sync can leave an unsynced
+// entry behind. A crash would then lose the evidence directory it created, even
+// though a later, synced file lives inside it.
+func fsyncEvidenceDirs(fsync func(string) error, syncRoot, leafDir string, created []string) error {
+	dirs := make([]string, 0, len(created)+4)
+	add := func(dir string) {
+		for _, existing := range dirs {
+			if existing == dir {
+				return
+			}
+		}
+		dirs = append(dirs, dir)
+	}
+	for i := len(created) - 1; i >= 0; i-- {
+		add(created[i])
+	}
+	for dir := leafDir; ; dir = filepath.Dir(dir) {
+		add(dir)
+		if syncRoot == "" || dir == syncRoot {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir || !strings.HasPrefix(dir, syncRoot+string(filepath.Separator)) {
+			break
+		}
+	}
+	for _, dir := range dirs {
+		if err := fsync(dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // StageEvidence — public Store method (no workflow state transition).
 func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string, required bool, expectedSHA256 string) (StagedEvidence, error) {
-	if !safeComponent(string(workflowID)) {
-		return StagedEvidence{}, errors.New("invalid workflow id")
-	}
-	if err := validateStoredPath(storedName); err != nil {
-		return StagedEvidence{}, err
-	}
-	evID := NewEvidenceID()
-	dir := evidenceDir(s.instanceDir(workflowID), evID)
-
-	size, digest, err := stageInto(srcPath, dir, storedName, required, expectedSHA256, s.evidenceFsync)
+	evID, size, digest, err := s.stageIntoFreshDir(workflowID, storedName, func(dir string) (int64, string, error) {
+		return stageInto(srcPath, dir, storedName, required, expectedSHA256, s.instanceDir(workflowID), s.syncDir)
+	})
 	if err != nil {
-		// The ID was minted for this attempt, so its directory holds nothing but
-		// this attempt's partial copy. Removing it here keeps every caller's
-		// cleanup complete: a failed stage leaves no copy to name.
-		if discardErr := s.DiscardEvidence(workflowID, evID); discardErr != nil {
-			return StagedEvidence{}, errors.Join(err, fmt.Errorf("evidence: discard orphaned evidence %s: %w", evID, discardErr))
-		}
+		// stageIntoFreshDir already removed the directory it minted.
 		return StagedEvidence{}, err
 	}
 
@@ -208,11 +284,50 @@ func (s *Store) StageEvidence(workflowID WorkflowID, srcPath, storedName string,
 	}, nil
 }
 
-// DiscardEvidence removes one staged evidence directory whose copy no committed
-// record names: a gate command that failed to land, or a completion whose staging
-// failed part-way. It removes that evidence ID's own directory only, never the
-// shared evidence, instance, or instances directories. Discarding an absent
-// evidence ID is a no-op.
+// stageIntoFreshDir stages under a fresh evidence ID. On failure, it attempts
+// to remove that ID's directory without touching shared ancestors.
+func (s *Store) stageIntoFreshDir(workflowID WorkflowID, storedName string, stage func(dir string) (int64, string, error)) (EvidenceID, int64, string, error) {
+	evID, dir, err := s.prepareEvidenceDir(workflowID, storedName)
+	if err != nil {
+		return "", 0, "", err
+	}
+	// The directory is created only after the request is known to be valid, so a
+	// rejected id or stored name leaves nothing on disk.
+	if err := s.ensureInstanceDir(workflowID); err != nil {
+		return "", 0, "", err
+	}
+	size, digest, err := stage(dir)
+	if err != nil {
+		if discardErr := s.DiscardEvidence(workflowID, evID); discardErr != nil {
+			// The staging error decides what the caller must do, so it keeps its
+			// identity. The copy this attempt could not remove is announced with
+			// it instead of being dropped silently: it holds the captured content
+			// and no recorded fact names it.
+			return "", 0, "", errors.Join(err, fmt.Errorf("evidence: discard orphaned evidence %s: %w", evID, discardErr))
+		}
+		return "", 0, "", err
+	}
+	return evID, size, digest, nil
+}
+
+// prepareEvidenceDir validates one staging request and returns a fresh evidence
+// ID with its directory.
+func (s *Store) prepareEvidenceDir(workflowID WorkflowID, storedName string) (EvidenceID, string, error) {
+	if !safeComponent(string(workflowID)) {
+		return "", "", errors.New("invalid workflow id")
+	}
+	if err := validateStoredPath(storedName); err != nil {
+		return "", "", err
+	}
+	evID := NewEvidenceID()
+	return evID, evidenceDir(s.instanceDir(workflowID), evID), nil
+}
+
+// DiscardEvidence removes one staged evidence directory, for every caller that
+// holds a copy no committed record names: a gate command that failed to land, a
+// completion whose staging failed part-way. It removes that evidence ID's own
+// directory only, never the shared evidence, instance, or instances directories.
+// Discarding an absent evidence ID is a no-op.
 func (s *Store) DiscardEvidence(workflowID WorkflowID, id EvidenceID) error {
 	if !safeComponent(string(workflowID)) || !safeComponent(string(id)) {
 		return errors.New("invalid evidence id")

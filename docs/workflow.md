@@ -109,6 +109,11 @@ only when that rollback succeeds. The same rule covers the controller's adapter
 responses: a poll discards its staged response only when nothing durable names
 it, and an idempotent replay drops the redundant copy it staged.
 
+Evidence staging syncs the file's directory, every directory it created, and
+each ancestor through the instances directory, so a crash cannot lose evidence a
+recorded event already names. A staging that fails removes the evidence
+directory it minted, so a retry starts clean and no partial copy accumulates.
+
 The default workflow root is `$XDG_STATE_HOME/avenor/workflows`, falling back
 to `$HOME/.avenor/workflows`. Override it with `--workflow-root` on `avenor
 stable`.

@@ -167,6 +167,60 @@ func TestCompleteEvidenceRetryAfterSnapshotWriteFailureIsIdempotent(t *testing.T
 	}
 }
 
+// TestCompleteFailedStagingLeavesNoEvidenceDirectory proves a completion whose own
+// staging fails leaves nothing behind. The attempt had already copied the artifact
+// into a fresh evidence directory when its sync failed, so only the staging
+// rollback keeps that directory out of the instance: no unreferenced copy survives
+// and no evidence is recorded. A retry then stages and records the artifact.
+func TestCompleteFailedStagingLeavesNoEvidenceDirectory(t *testing.T) {
+	t.Parallel()
+	m, s, wf := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
+	plan, actID, attemptID, leaseID, ownerToken := artifactCompletionPlan(t, m, s, wf)
+
+	// The first sync of a staging is its leaf directory; failing there lands after
+	// the copy is written but before any entry is made durable.
+	evidenceRoot := filepath.Join(s.Root(), "instances", string(wf), "evidence")
+	injected := errors.New("injected fsync failure")
+	s.fsyncDir = func(dir string) error {
+		if filepath.Dir(dir) == evidenceRoot {
+			return injected
+		}
+		return nil
+	}
+	_, err := m.CompleteAuto(wf, "start", actID, attemptID, leaseID, ownerToken, plan)
+	s.fsyncDir = nil
+	if !errors.Is(err, injected) {
+		t.Fatalf("error = %v, want the failed staging's sync", err)
+	}
+	if !strings.Contains(err.Error(), "stage evidence") {
+		t.Fatalf("error = %v, want the completion to report the staging failure", err)
+	}
+	if dirs := stagedEvidenceNames(t, s, wf); len(dirs) != 0 {
+		t.Fatalf("staged evidence directories = %v, want the failed attempt's directory removed", dirs)
+	}
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if len(snap.Instance.Evidence) != 0 {
+		t.Fatalf("instance evidence = %+v, want none from a failed staging", snap.Instance.Evidence)
+	}
+
+	if _, err := m.CompleteAuto(wf, "start", actID, attemptID, leaseID, ownerToken, plan); err != nil {
+		t.Fatalf("retried completion: %v", err)
+	}
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("load current: %v", err)
+	}
+	if len(snap.Instance.Evidence) != 1 {
+		t.Fatalf("instance evidence = %+v, want the retry's one artifact", snap.Instance.Evidence)
+	}
+	if copies := stagedEvidenceCopies(t, s, wf); len(copies) != 1 {
+		t.Fatalf("staged evidence = %d copies, want only the retry's", len(copies))
+	}
+}
+
 // TestUncommittedAppendRemovesStagedEvidence proves the other half of the rule.
 // When the event append itself fails, nothing is durable, so the staged copies are
 // removed again and an uncommitted command leaks no evidence.
@@ -301,14 +355,14 @@ func TestConcurrentDuplicateCompletionDiscardsItsCopy(t *testing.T) {
 	staged := make(chan struct{})
 	release := make(chan struct{})
 	var first atomic.Bool
-	s.evidenceFsync = func(string) error {
+	s.fsyncDir = func(string) error {
 		if first.CompareAndSwap(false, true) {
 			close(staged)
 			<-release
 		}
 		return nil
 	}
-	t.Cleanup(func() { s.evidenceFsync = nil })
+	t.Cleanup(func() { s.fsyncDir = nil })
 
 	type outcome struct {
 		res any
