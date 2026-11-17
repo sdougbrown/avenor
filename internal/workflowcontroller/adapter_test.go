@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -250,13 +251,13 @@ func TestInvokeTimeoutKillsProcessGroup(t *testing.T) {
 }
 
 // TestInvokeManifestTimeoutKillsProcessGroup covers the production timeout
-// path: Invoke always passes a nil timeout channel, so invokeWait builds the
-// real timer from the manifest. The manifest timeout fires, Invoke reports
-// ErrAdapterTimeout, and the child's process group is gone. Startup latency
-// is not part of the contract: whether child.pid was written before the
-// timeout only decides whether the pid is available for the gone-check, so
-// the pid assertion is conditional and the test never races startup against
-// the timer.
+// path: Invoke passes no timeout channel, so the runner builds the real timer
+// from the manifest. The manifest timeout fires, Invoke reports
+// ErrAdapterTimeout, and the child's process group is gone. Startup latency is
+// not part of the contract: whether child.pid was written before the timeout
+// only decides whether the pid is available for the gone-check, so the pid
+// assertion is conditional and the test never races startup against the
+// timer.
 func TestInvokeManifestTimeoutKillsProcessGroup(t *testing.T) {
 	dir := stageAdapterDir(t)
 	exe := stageFixture(t, dir, "hang.sh")
@@ -292,6 +293,61 @@ func TestInvokeManifestTimeoutKillsProcessGroup(t *testing.T) {
 			t.Fatalf("child sleeper %d still alive after group kill", pid)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestInvokeStartFailureKeepsItsCause proves an adapter that passes the trust
+// checks but cannot be exec'd reports the underlying cause. A caller can then tell
+// a missing interpreter from a policy refusal. The error chain is wrapped rather
+// than flattened into a message.
+func TestInvokeStartFailureKeepsItsCause(t *testing.T) {
+	dir := stageAdapterDir(t)
+	exe := filepath.Join(dir, "bad-interpreter.sh")
+	if err := os.WriteFile(exe, []byte("#!/nonexistent/interpreter\necho hi\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, dir, "noexec.json", "noexec", exe, nil, 5000)
+	m := loadOne(t, dir, "noexec")
+
+	_, err := Invoke(context.Background(), m, testRequest(testInputJSON))
+	if err == nil {
+		t.Fatal("an adapter with a missing interpreter was invoked")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("error = %v, want the underlying missing-executable cause in the chain", err)
+	}
+}
+
+// TestInvokeRefusesOutputHeldByAnEscapedDescendant proves a response the adapter
+// left open behind a descendant that escaped its process group is never read as
+// a verdict. The captured stdout may be cut short, so Invoke reports that rather
+// than parsing it.
+func TestInvokeRefusesOutputHeldByAnEscapedDescendant(t *testing.T) {
+	dir := stageAdapterDir(t)
+	exe := filepath.Join(dir, "leaky.sh")
+	body := `#!/bin/sh
+setsid sh -c 'echo $$ > escaped.pid; sleep 30' &
+while [ ! -f escaped.pid ]; do sleep 0.01; done
+printf '%s\n' '{"version":1,"result":"passed","subject":{"type":"pull_request","repository":"a/b","pull_request":1,"revision":"abc"},"observed_at":"2025-03-04T05:06:07Z","summary":"ok"}'
+exit 0
+`
+	if err := os.WriteFile(exe, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeManifest(t, dir, "leaky.json", "leaky", exe, nil, 5000)
+	pidPath := filepath.Join(dir, "escaped.pid")
+	t.Cleanup(func() {
+		if data, err := os.ReadFile(pidPath); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 1 {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+			}
+		}
+	})
+	m := loadOne(t, dir, "leaky")
+
+	_, err := Invoke(context.Background(), m, testRequest(testInputJSON))
+	if !errors.Is(err, ErrAdapterStreamsHeld) {
+		t.Fatalf("error = %v, want ErrAdapterStreamsHeld (a verdict was accepted from a truncated stream)", err)
 	}
 }
 
