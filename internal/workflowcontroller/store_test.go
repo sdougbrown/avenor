@@ -140,6 +140,23 @@ func TestCreateKeepsControllerStatePrivate(t *testing.T) {
 	if got := projInfo.Mode().Perm(); got != workflow.StateFilePerm {
 		t.Fatalf("re-rendered projection mode = %o, want %o", got, workflow.StateFilePerm)
 	}
+
+	// The event log carries prompts and request tokens, so a legacy readable log
+	// must be tightened on the next append.
+	logPath := s.eventsPath("alpha")
+	if err := os.Chmod(logPath, 0o644); err != nil {
+		t.Fatalf("chmod event log: %v", err)
+	}
+	if _, err := s.SetDesiredState("alpha", DesiredDisabled, "privacy test"); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	logInfo, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat event log: %v", err)
+	}
+	if got := logInfo.Mode().Perm(); got != workflow.StateFilePerm {
+		t.Fatalf("event log mode = %o, want %o", got, workflow.StateFilePerm)
+	}
 }
 
 func TestCreateIdempotentAndConflict(t *testing.T) {
