@@ -251,13 +251,13 @@ func TestInvokeTimeoutKillsProcessGroup(t *testing.T) {
 }
 
 // TestInvokeManifestTimeoutKillsProcessGroup covers the production timeout
-// path: Invoke always passes a nil timeout channel, so invokeWait builds the
-// real timer from the manifest. The manifest timeout fires, Invoke reports
-// ErrAdapterTimeout, and the child's process group is gone. Startup latency
-// is not part of the contract: whether child.pid was written before the
-// timeout only decides whether the pid is available for the gone-check, so
-// the pid assertion is conditional and the test never races startup against
-// the timer.
+// path: Invoke passes no timeout channel, so the runner builds the real timer
+// from the manifest. The manifest timeout fires, Invoke reports
+// ErrAdapterTimeout, and the child's process group is gone. Startup latency is
+// not part of the contract: whether child.pid was written before the timeout
+// only decides whether the pid is available for the gone-check, so the pid
+// assertion is conditional and the test never races startup against the
+// timer.
 func TestInvokeManifestTimeoutKillsProcessGroup(t *testing.T) {
 	dir := stageAdapterDir(t)
 	exe := stageFixture(t, dir, "hang.sh")

@@ -4,8 +4,10 @@
 // safeguards its callers share. Every run uses no shell, an explicit
 // environment, bounded stdout and stderr, and a deadline. The child's process
 // group is killed on timeout, cancellation, output overflow, or child exit.
-// Supervisor code that executes an external program goes through this runner,
-// so those safeguards cannot drift between callers.
+// Supervisor code that runs an external program under a declared contract uses
+// this runner, so its safeguards cannot drift between those callers. Other
+// supervisor code still calls git directly; this package makes no claim about
+// call sites it does not serve.
 //
 // The child runs as the caller's user with the caller's privileges. The runner
 // bounds and contains a process group. It does not isolate the child from the
