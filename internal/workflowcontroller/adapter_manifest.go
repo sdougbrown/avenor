@@ -3,15 +3,15 @@
 package workflowcontroller
 
 import (
-	"bytes"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/sdougbrown/avenor/internal/configfile"
 )
 
 // Limits and bounds for adapter manifests.
@@ -109,8 +109,10 @@ func (r *AdapterRegistry) IDs() []string {
 	return ids
 }
 
-// LoadAdapterRegistry loads every immediate *.json file in dir as one adapter
-// manifest. Subdirectories and non-.json files are ignored; the filename is
+// LoadAdapterRegistry loads every immediate manifest file in dir as one
+// adapter manifest. Manifest files are the extensions configfile parses
+// (.json, .yaml, .yml, or .toml); subdirectories and other files are
+// ignored; the filename is
 // not the adapter ID. A missing directory yields an empty registry, not an
 // error. Loading is per manifest: an invalid or untrusted file is recorded as
 // a load error on the returned registry while valid manifests still load;
@@ -129,7 +131,7 @@ func LoadAdapterRegistry(dir string) (*AdapterRegistry, error) {
 	// file declaring the ID instead of silently keeping one of them.
 	byID := map[string][]*AdapterManifest{}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !configfile.HasKnownExtension(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -168,20 +170,17 @@ func LoadAdapterRegistry(dir string) (*AdapterRegistry, error) {
 }
 
 // loadAdapterManifest reads, strictly decodes, validates, and trust-checks one
-// manifest file.
+// manifest file. configfile detects the format from the extension and applies
+// DisallowUnknownFields uniformly across all formats; the digest stays over
+// the raw file bytes.
 func loadAdapterManifest(path string) (*AdapterManifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
 	var wire AdapterManifest
-	if err := dec.Decode(&wire); err != nil {
+	if err := configfile.Decode(path, data, &wire); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAdapterManifest, err)
-	}
-	if dec.More() {
-		return nil, fmt.Errorf("%w: trailing data after JSON object", ErrAdapterManifest)
 	}
 	if err := validateAdapterManifest(&wire); err != nil {
 		return nil, err
