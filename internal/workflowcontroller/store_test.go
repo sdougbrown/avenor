@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // fakeClock is a manual clock for driving lease expiry in tests.
@@ -96,6 +98,22 @@ func mustAcquire(t *testing.T, s *ControllerStore, id, owner string) ControllerR
 		t.Fatalf("acquire %s for %s: acquired=%v err=%v", id, owner, acquired, err)
 	}
 	return rec
+}
+
+// TestCreateKeepsControllerStatePrivate proves a created controller directory is
+// owner-only: it holds the controller's snapshots and event log, and creating it
+// can create the shared workflow root.
+func TestCreateKeepsControllerStatePrivate(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStore(t)
+	mustCreate(t, s, "alpha", 1)
+	info, err := os.Stat(s.controllerDir("alpha"))
+	if err != nil {
+		t.Fatalf("stat controller dir: %v", err)
+	}
+	if got := info.Mode().Perm(); got != workflow.StateDirPerm {
+		t.Fatalf("controller dir mode = %o, want %o", got, workflow.StateDirPerm)
+	}
 }
 
 func TestCreateIdempotentAndConflict(t *testing.T) {

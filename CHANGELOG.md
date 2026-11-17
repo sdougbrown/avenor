@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Workflow state is private by default: a workflow root this version creates uses `0700` directories and `0600` files for templates, instances, snapshots, event logs, projections, and staged evidence, and the controller's adapter staging directory is owner-only. The root holds prompts, outputs, and evidence, so other local users must not read it. An existing root is never re-permissioned; tightening it is the operator's decision. Documented in [docs/workflow.md](docs/workflow.md).
+- Workflow state is private by default: a workflow root this version creates uses `0700` directories and `0600` files for templates, instances, snapshots, event logs, projections, and staged evidence, and the controller's adapter staging directory is owner-only. The root holds prompts, outputs, and evidence, so other local users must not read it. An existing root keeps its directory modes; this version tightens a snapshot or event log when it rewrites that file, and tightening the rest of a deployed root stays the operator's decision. Documented in [docs/workflow.md](docs/workflow.md).
 
 ### Added
 

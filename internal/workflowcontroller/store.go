@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/durablefile"
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // ControllerStore applies commands to controller records under a single POSIX
@@ -104,7 +105,7 @@ func (s *ControllerStore) Create(controllerID string, maxInflight int) (Controll
 	if maxInflight <= 0 {
 		return ControllerRecord{}, fmt.Errorf("%w: max_inflight must be positive, got %d", ErrInvalidController, maxInflight)
 	}
-	if err := os.MkdirAll(s.controllerDir(controllerID), 0o755); err != nil {
+	if err := os.MkdirAll(s.controllerDir(controllerID), workflow.StateDirPerm); err != nil {
 		return ControllerRecord{}, err
 	}
 	unlock, err := s.lockController(controllerID)

@@ -79,7 +79,7 @@ func copyFile(srcPath, destPath string) error {
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, stateFilePerm)
+	out, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, StateFilePerm)
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func stageInto(srcPath, destDir, storedName string, required bool, expectedSHA s
 	destPath := filepath.Join(destDir, storedName)
 	// Create the destination parent chain (the evidence dir plus any validated
 	// nested subdirectories) so a nested stored path stages correctly.
-	if err := os.MkdirAll(filepath.Dir(destPath), stateDirPerm); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destPath), StateDirPerm); err != nil {
 		return 0, "", err
 	}
 

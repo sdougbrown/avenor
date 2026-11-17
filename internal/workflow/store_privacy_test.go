@@ -21,6 +21,14 @@ func TestNewWorkflowStateIsPrivateByDefault(t *testing.T) {
 	}
 	stagedPath := filepath.Join(root, "instances", "wf1", staged.StoredPath)
 
+	templateDir := filepath.Join(root, "templates", "privacy")
+	// An instantiated instance regenerates its projection, so the projection
+	// modes are the ones production writes.
+	if err := s.StoreTemplate("privacy", "1", storeTemplateFixture(t, "privacy", "1")); err != nil {
+		t.Fatalf("StoreTemplate: %v", err)
+	}
+	mustInstantiate(t, s, "wf2")
+
 	for _, dir := range []struct {
 		what string
 		path string
@@ -30,6 +38,9 @@ func TestNewWorkflowStateIsPrivateByDefault(t *testing.T) {
 		{"instances", filepath.Join(root, "instances")},
 		{"instance", filepath.Join(root, "instances", "wf1")},
 		{"evidence", filepath.Dir(stagedPath)},
+		{"template", templateDir},
+		{"projection nodes", filepath.Join(root, "instances", "wf2", "nodes")},
+		{"projection node", filepath.Join(root, "instances", "wf2", "nodes", "start")},
 	} {
 		info, err := os.Stat(dir.path)
 		if err != nil {
@@ -39,12 +50,23 @@ func TestNewWorkflowStateIsPrivateByDefault(t *testing.T) {
 			t.Fatalf("%s mode = %o, want 700 (workflow state is owner-only)", dir.what, got)
 		}
 	}
-	info, err := os.Stat(stagedPath)
-	if err != nil {
-		t.Fatalf("stat staged evidence: %v", err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("staged evidence mode = %o, want 600 (staged content is owner-only)", got)
+	templateFile := filepath.Join(templateDir, "1.json")
+	for _, file := range []struct {
+		what string
+		path string
+	}{
+		{"staged evidence", stagedPath},
+		{"template", templateFile},
+		{"workflow projection", filepath.Join(root, "instances", "wf2", "workflow.md")},
+		{"node projection", filepath.Join(root, "instances", "wf2", "nodes", "start", "execution.md")},
+	} {
+		info, err := os.Stat(file.path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", file.what, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("%s mode = %o, want 600 (workflow state is owner-only)", file.what, got)
+		}
 	}
 }
 
