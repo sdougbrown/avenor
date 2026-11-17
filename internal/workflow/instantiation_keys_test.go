@@ -16,6 +16,21 @@ import (
 	"testing"
 )
 
+// newIdempotencyFixture builds an ephemeral store + manager with the
+// single-node test template stored under mgr-test@1.
+func newIdempotencyFixture(t *testing.T) (*Manager, *Store) {
+	t.Helper()
+	s := newStore(t)
+	if err := s.CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	m := NewManager(s)
+	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
+		t.Fatalf("WorkflowCreate: %v", err)
+	}
+	return m, s
+}
+
 // instantiateWithKey is the test helper for one idempotent instantiate call
 // over the mgr-test template fixture.
 func instantiateWithKey(t *testing.T, m *Manager, key string, params map[string]string) map[string]any {
@@ -58,14 +73,7 @@ func countInstantiatedInstances(t *testing.T, s *Store) int {
 
 func TestManagerInstantiateIdempotencyKeyRetriesConverge(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, s := newIdempotencyFixture(t)
 
 	first := instantiateWithKey(t, m, "unit-42", nil)
 	second := instantiateWithKey(t, m, "unit-42", nil)
@@ -133,14 +141,7 @@ func TestManagerInstantiateIdempotencyKeyConflict(t *testing.T) {
 
 func TestManagerInstantiateIdempotencyKeyMetadataOutsideFingerprint(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, s := newIdempotencyFixture(t)
 
 	// Same key, same request, different metadata on each call: metadata is
 	// caller bookkeeping and must not conflict or fork the workflow.
@@ -163,14 +164,7 @@ func TestManagerInstantiateIdempotencyKeyMetadataOutsideFingerprint(t *testing.T
 
 func TestManagerInstantiateIdempotencyKeyRejectsInvalidKey(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, s := newIdempotencyFixture(t)
 
 	long := strings.Repeat("k", 257)
 	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "mgr-test", "template_version": "1", "idempotency_key": "` + long + `"}`)); err == nil || !strings.Contains(err.Error(), "exceeds") {
@@ -179,21 +173,51 @@ func TestManagerInstantiateIdempotencyKeyRejectsInvalidKey(t *testing.T) {
 	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "mgr-test", "template_version": "1", "idempotency_key": "bad\u0000key"}`)); err == nil || !strings.Contains(err.Error(), "control characters") {
 		t.Fatalf("control-character key error = %v, want control-character rejection", err)
 	}
-	if got := countInstantiatedInstances(t, s); got != 0 {
-		t.Fatalf("instance count after invalid keys = %d, want 0", got)
+	// The 256-character bound itself is inclusive: a max-length key is valid.
+	max := strings.Repeat("k", 256)
+	if _, err := m.WorkflowInstantiate([]byte(`{"template_id": "mgr-test", "template_version": "1", "idempotency_key": "` + max + `"}`)); err != nil {
+		t.Fatalf("256-character key rejected: %v", err)
+	}
+	if got := countInstantiatedInstances(t, s); got != 1 {
+		t.Fatalf("instance count after invalid keys = %d, want 1 (max-length key accepted)", got)
 	}
 }
 
-func TestManagerInstantiateIdempotencyKeySurvivesSnapshotlessCrash(t *testing.T) {
+func TestStoreOrphanedEventsCatalogedOnRestart(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	if err := s.CreateRoot(); err != nil {
 		t.Fatalf("CreateRoot: %v", err)
 	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
+	wf := WorkflowID("wf_orphan_catalog")
+	mustInstantiate(t, s, wf)
+	if err := os.Remove(s.workflowPath(wf)); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
 	}
+
+	// Restart recovery must catalog the orphan: the committed events are
+	// authoritative, so recovery replays them, persists the snapshot, and
+	// reports the instance as existing.
+	snap, ok, err := s.recoverInstance(wf)
+	if err != nil || !ok {
+		t.Fatalf("recoverInstance: exists=%v err=%v, want cataloged orphan", ok, err)
+	}
+	if snap.Instance.WorkflowID != wf {
+		t.Fatalf("recovered workflow_id = %q, want %q", snap.Instance.WorkflowID, wf)
+	}
+	if _, err := os.Stat(s.workflowPath(wf)); err != nil {
+		t.Fatalf("recovered snapshot not persisted: %v", err)
+	}
+
+	// A degenerate directory (no log, no snapshot) stays uncataloged.
+	if _, ok, err := s.recoverInstance(WorkflowID("wf_absent")); err != nil || ok {
+		t.Fatalf("recoverInstance(absent): exists=%v err=%v, want not-exists", ok, err)
+	}
+}
+
+func TestManagerInstantiateIdempotencyKeySurvivesSnapshotlessCrash(t *testing.T) {
+	t.Parallel()
+	m, s := newIdempotencyFixture(t)
 
 	first := instantiateWithKey(t, m, "unit-42", nil)
 	wf := WorkflowID(first["workflow_id"].(string))
@@ -222,14 +246,7 @@ func TestManagerInstantiateIdempotencyKeySurvivesSnapshotlessCrash(t *testing.T)
 
 func TestManagerInstantiateIdempotencyKeyRejectsCorruptRecord(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, s := newIdempotencyFixture(t)
 
 	if err := os.MkdirAll(s.instantiationKeysDir(), 0o755); err != nil {
 		t.Fatalf("mkdir keys dir: %v", err)
@@ -247,14 +264,7 @@ func TestManagerInstantiateIdempotencyKeyRejectsCorruptRecord(t *testing.T) {
 
 func TestManagerInstantiateIdempotencyKeyNotBoundByFailedValidation(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, _ := newIdempotencyFixture(t)
 
 	// A keyed request that fails before key resolution — here an unknown
 	// template — must not consume the key.
@@ -269,14 +279,7 @@ func TestManagerInstantiateIdempotencyKeyNotBoundByFailedValidation(t *testing.T
 
 func TestManagerInstantiateIdempotencyKeyReturnsCurrentRevisionAfterTerminal(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, s := newIdempotencyFixture(t)
 
 	first := instantiateWithKey(t, m, "unit-42", nil)
 	wf := WorkflowID(first["workflow_id"].(string))
@@ -326,14 +329,7 @@ func TestManagerInstantiateIdempotencyKeyReturnsCurrentRevisionAfterTerminal(t *
 
 func TestManagerInstantiateIdempotencyKeyConcurrent(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, s := newIdempotencyFixture(t)
 
 	const callers = 8
 	ids := make(chan any, callers)
@@ -388,14 +384,7 @@ func TestManagerInstantiateIdempotencyKeyAfterRestart(t *testing.T) {
 
 func TestManagerInstantiateIdempotencyKeyCompletesCrashedAttempt(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, s := newIdempotencyFixture(t)
 
 	// Simulate the crash window: the key record is durably bound, but no
 	// instance was committed (nothing survived under the recorded workflow
@@ -519,14 +508,7 @@ func TestManagerInstantiateIdempotencyKeyConflictAcrossVersions(t *testing.T) {
 
 func TestManagerInstantiateIdempotencyKeyNotBoundByFailedComposition(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, _ := newIdempotencyFixture(t)
 
 	// A parent pinning a child that is never stored registers (template-level
 	// validation does not resolve cross-template pins) but fails in
@@ -548,14 +530,7 @@ func TestManagerInstantiateIdempotencyKeyNotBoundByFailedComposition(t *testing.
 
 func TestManagerInstantiateWithoutKeyMintsFreshIDs(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	if err := s.CreateRoot(); err != nil {
-		t.Fatalf("CreateRoot: %v", err)
-	}
-	m := NewManager(s)
-	if _, err := m.WorkflowCreate([]byte(managerTemplateJSON)); err != nil {
-		t.Fatalf("WorkflowCreate: %v", err)
-	}
+	m, s := newIdempotencyFixture(t)
 
 	first := instantiateWithKey(t, m, "", nil)
 	second := instantiateWithKey(t, m, "", nil)

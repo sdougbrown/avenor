@@ -3,6 +3,7 @@ package workflow
 import (
 	"errors"
 	"io/fs"
+	"log"
 	"os"
 	"time"
 
@@ -29,7 +30,11 @@ import (
 func (s *Store) recoverInstance(workflowID WorkflowID) (Snapshot, bool, error) {
 	if _, err := os.Stat(s.workflowPath(workflowID)); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return Snapshot{}, false, nil
+			// An events log without a snapshot is an orphaned write from a crash
+			// between appendEvents and writeSnapshot; the committed events are
+			// authoritative, so recovery replays and persists them like any other
+			// instance. A log that replays to no instance stays uncataloged.
+			return s.recoverOrphanedEvents(workflowID)
 		}
 		return Snapshot{}, false, err
 	}
@@ -61,6 +66,71 @@ func (s *Store) recoverInstance(workflowID WorkflowID) (Snapshot, bool, error) {
 		}
 	}
 	return sn, true, nil
+}
+
+// recoverOrphanedEvents recovers an instance whose events were appended but
+// whose snapshot was never written: it replays the log from empty, persists
+// the recovered snapshot, and runs the recovery lease sweep on it. A log that
+// is absent or replays to no instance reports not-exists (uncataloged).
+func (s *Store) recoverOrphanedEvents(workflowID WorkflowID) (Snapshot, bool, error) {
+	if _, err := os.Stat(s.eventsPath(workflowID)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Snapshot{}, false, nil
+		}
+		return Snapshot{}, false, err
+	}
+	unlock, err := durablefile.Lock(s.lockPath(workflowID))
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	defer unlock()
+	snap, exists, err := s.replayOrphanedEvents(workflowID)
+	if err != nil {
+		// A log that cannot replay stays uncataloged: recovery must not fail
+		// the whole catalog on one unreadable instance (matches the pre-recovery
+		// skip of instances without a parsable snapshot).
+		log.Printf("workflow %s: orphaned event log unreplayable, leaving uncataloged: %v", workflowID, err)
+		return Snapshot{}, false, nil
+	}
+	if !exists {
+		return snap, exists, err
+	}
+	if err := s.writeSnapshot(workflowID, snap); err != nil {
+		return Snapshot{}, false, err
+	}
+	exp, err := s.appendExpiredLeases(workflowID, &snap)
+	if err != nil {
+		return Snapshot{}, false, err
+	}
+	if exp > 0 {
+		if err := s.writeSnapshot(workflowID, snap); err != nil {
+			return Snapshot{}, false, err
+		}
+	}
+	return snap, true, nil
+}
+
+// materializeRecoveredSnapshot persists a recovered snapshot for an instance
+// whose events were appended but whose snapshot write was lost, so a retry
+// that resolved through the read-only replay leaves a fully cataloged instance
+// behind instead of a permanent orphan. A no-op when the snapshot already
+// exists or the log replays to no instance.
+func (s *Store) materializeRecoveredSnapshot(workflowID WorkflowID) error {
+	unlock, err := durablefile.Lock(s.lockPath(workflowID))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if _, err := os.Stat(s.workflowPath(workflowID)); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	snap, recovered, err := s.replayOrphanedEvents(workflowID)
+	if err != nil || !recovered {
+		return err
+	}
+	return s.writeSnapshot(workflowID, snap)
 }
 
 // collectExpiredLeaseEvents builds lease-expired events for every stale lease
@@ -130,9 +200,17 @@ func (s *Store) appendExpiredLeases(workflowID WorkflowID, snap *Snapshot) (int,
 func (s *Store) sweepStaleLeases(workflowID WorkflowID, reason string, now time.Time) (expired int, retained int, err error) {
 	if _, err := os.Stat(s.workflowPath(workflowID)); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, 0, nil
+			// A snapshot-less log is an orphaned write; recover it like restart
+			// recovery does, then sweep the recovered state below.
+			if _, err := os.Stat(s.eventsPath(workflowID)); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return 0, 0, nil
+				}
+				return 0, 0, err
+			}
+		} else {
+			return 0, 0, err
 		}
-		return 0, 0, err
 	}
 	if err := s.ensureInstanceDir(workflowID); err != nil {
 		return 0, 0, err
@@ -144,8 +222,21 @@ func (s *Store) sweepStaleLeases(workflowID WorkflowID, reason string, now time.
 	defer unlock()
 
 	snap, exists, err := s.loadSnapshot(workflowID)
-	if err != nil || !exists {
+	if err != nil {
 		return 0, 0, err
+	}
+	if !exists {
+		replayed, recovered, rerr := s.replayOrphanedEvents(workflowID)
+		if rerr != nil {
+			return 0, 0, rerr
+		}
+		if !recovered {
+			return 0, 0, nil
+		}
+		if err := s.writeSnapshot(workflowID, replayed); err != nil {
+			return 0, 0, err
+		}
+		snap = replayed
 	}
 	replayed, n, truncated, err := replayEvents(snap, s.eventsPath(workflowID), s.policies)
 	if err != nil {

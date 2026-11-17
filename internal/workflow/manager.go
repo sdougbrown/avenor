@@ -337,6 +337,12 @@ func (m *Manager) instantiateIdempotent(key string, template Template, params ma
 			return nil, err
 		}
 		if ok {
+			// Persist the recovered snapshot when this retry resolved through the
+			// orphaned-log replay, so the instance stops being a read-only orphan
+			// invisible to recovery and candidate scans.
+			if err := m.store.materializeRecoveredSnapshot(wf); err != nil {
+				return nil, err
+			}
 			return map[string]any{
 				"workflow_id": string(wf),
 				"revision":    snap.Instance.Revision,
