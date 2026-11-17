@@ -304,6 +304,9 @@ func TestRunTimeoutBoundsAnEscapedDescendant(t *testing.T) {
 	}
 }
 
+// TestRunCancellationDuringDrainDoesNotReportSuccess proves a cancellation that
+// lands after the child exited cleanly, while an escaped descendant still holds
+// the output pipes, is reported as ErrCanceled rather than as a clean result.
 func TestRunCancellationDuringDrainDoesNotReportSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := script(t, dir, "check.sh", `echo $$ > shell.pid
