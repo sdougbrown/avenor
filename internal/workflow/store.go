@@ -362,11 +362,12 @@ func (s *Store) loadCurrent(workflowID WorkflowID) (Snapshot, bool, error) {
 		// An events log without a snapshot is an orphaned write from a crash
 		// between appendEvents and writeSnapshot: the committed events remain
 		// authoritative. With no log at all, the workflow does not exist.
-		if _, err := os.Stat(s.eventsPath(workflowID)); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return Snapshot{}, false, nil
-			}
+		orphan, err := s.hasOrphanedLog(workflowID)
+		if err != nil {
 			return Snapshot{}, false, err
+		}
+		if !orphan {
+			return Snapshot{}, false, nil
 		}
 	}
 	if err := os.MkdirAll(s.instanceDir(workflowID), 0o755); err != nil {
@@ -401,6 +402,25 @@ func (s *Store) replayOrphanedEvents(workflowID WorkflowID) (Snapshot, bool, err
 		return Snapshot{}, false, nil
 	}
 	return replayed, true, nil
+}
+
+// hasOrphanedLog reports whether the instance has an orphaned write — an
+// events log without a snapshot file — the single encoding of the crash
+// between appendEvents and writeSnapshot. Absent on both counts reads as no
+// orphan (the workflow does not exist).
+func (s *Store) hasOrphanedLog(workflowID WorkflowID) (bool, error) {
+	if _, err := os.Stat(s.workflowPath(workflowID)); err == nil {
+		return false, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	if _, err := os.Stat(s.eventsPath(workflowID)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // persistRecoveredOrphan replays the orphaned log from empty and persists the

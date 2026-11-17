@@ -30,7 +30,7 @@ type InstantiationKeyConflictError struct {
 }
 
 func (e *InstantiationKeyConflictError) Error() string {
-	return fmt.Sprintf("workflow: instantiation idempotency key conflict: key %q is bound to template %s@%s with different params",
+	return fmt.Sprintf("workflow: instantiation idempotency key conflict: key %q is bound to template %s@%s with a different request",
 		e.Key, e.TemplateID, e.TemplateVersion)
 }
 

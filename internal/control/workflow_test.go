@@ -118,7 +118,7 @@ func TestWorkflowInstantiateConflictMappedToIdempotencyCode(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != -32031 {
 		t.Fatalf("expected -32031 idempotency conflict, got: %+v", resp.Error)
 	}
-	want := `workflow: instantiation idempotency key conflict: key "unit-42" is bound to template verify-674@1 with different params`
+	want := `workflow: instantiation idempotency key conflict: key "unit-42" is bound to template verify-674@1 with a different request`
 	if resp.Error.Message != want {
 		t.Fatalf("conflict message = %q, want %q", resp.Error.Message, want)
 	}

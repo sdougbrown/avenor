@@ -239,7 +239,12 @@ func TestManagerInstantiateIdempotencyKeySurvivesSnapshotlessCrash(t *testing.T)
 	}
 
 	// Every later read of the instance must still work: the orphaned event
-	// must not have bricked replay.
+	// must not have bricked replay. The retry's persisted recovery must also
+	// have left the snapshot on disk — the instance stops being a read-only
+	// orphan (a full log replay on every read).
+	if _, err := os.Stat(s.workflowPath(wf)); err != nil {
+		t.Fatalf("recovered snapshot not persisted by the retry: %v", err)
+	}
 	if _, ok, err := s.loadCurrent(wf); err != nil || !ok {
 		t.Fatalf("loadCurrent after recovery: exists=%v err=%v", ok, err)
 	}
