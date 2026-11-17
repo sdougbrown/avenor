@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // autocompletion.go implements the supervisor-side evaluation that turns a
@@ -26,8 +28,8 @@ type CompleteOutput struct {
 	Value        json.RawMessage `json:"value"`
 }
 
-// CompleteArtifact is one artifact of a completion request: the source path
-// to stage, its stored name, and the declared liveness/digest requirements.
+// CompleteArtifact is one artifact of a completion request: the source path to
+// stage, its stored name, and the declared liveness/digest requirements.
 type CompleteArtifact struct {
 	SrcPath    string `json:"src_path"`
 	StoredPath string `json:"stored_path"`
@@ -35,61 +37,128 @@ type CompleteArtifact struct {
 	SHA256     string `json:"sha256,omitempty"`
 }
 
-// AutoCompletion is a complete supervisor-side completion plan: the selected
-// outcome, the resolved output values, and the artifacts to stage as
-// evidence.
+// CommandCapture is one bounded document a supervisor captured for evidence,
+// held in memory until the manager stages it. It is in-process only: it never
+// travels on the complete command, so the public surface cannot supply inline
+// evidence bytes. The check's own stream caps bound the capture.
+type CommandCapture struct {
+	// StoredPath is the evidence name the capture is staged under.
+	StoredPath string
+	// Data is the exact captured bytes.
+	Data []byte
+	// Result is inert provenance recorded on the staged evidence entry.
+	Result json.RawMessage
+}
+
+// AutoCompletion is a complete supervisor-side completion plan. It carries the
+// selected outcome, the resolved output values, the artifacts to stage from the
+// attempt working directory, and the supervisor's own captures.
 type AutoCompletion struct {
 	Outcome   OutcomeName        `json:"outcome"`
 	Outputs   []CompleteOutput   `json:"outputs,omitempty"`
 	Artifacts []CompleteArtifact `json:"artifacts,omitempty"`
+	// Captures are the supervisor's in-memory evidence documents. They are
+	// staged by CompleteAuto and never serialized onto the complete command.
+	Captures []CommandCapture `json:"-"`
 }
 
-// EvaluateAutoCompletion is the one supervisor-side evaluation function for
-// an auto-dispatched provider node whose attempt exited successfully. It
-// returns the completion plan, or an error naming why the declared contract
-// is unmet. The checks mirror what commandComplete applies to an explicit
-// request (declared outputs, output value types, declared outcome), so a
-// passing evaluation cannot be rejected by the completion path.
-func EvaluateAutoCompletion(tmpl *Template, node *NodeDefinition, workingDir, markerLabel string) (*AutoCompletion, error) {
-	outcome, err := autoCompletionOutcome(tmpl, node, markerLabel)
+// AutoCompletionInput is the input to one supervisor-side evaluation. It names
+// the template, the node, the instance parameters an argv element may resolve
+// from, the attempt's working directory, and the terminal marker label.
+// TimeoutC supplies a completion check's deadline signal for a caller that owns
+// it.
+type AutoCompletionInput struct {
+	Template    *Template
+	Node        *NodeDefinition
+	Params      map[string]string
+	WorkingDir  string
+	MarkerLabel string
+	// TimeoutC, when non-nil, replaces a completion check's deadline timer. A
+	// caller that owns a scheduler supplies the signal itself, as does a test
+	// that must fire the deadline deterministically.
+	TimeoutC <-chan time.Time
+}
+
+// EvaluateAutoCompletion is the one supervisor-side evaluation for an
+// auto-dispatched provider node whose attempt exited successfully. It returns
+// the completion plan, or an error naming why the declared contract is unmet. A
+// rejection that ran a completion check returns a *ContractUnmetError carrying
+// that check's evidence. The checks mirror what applyComplete applies to an
+// explicit request (declared outputs, output value types, declared outcome). A
+// passing evaluation cannot then be rejected by the completion path.
+func EvaluateAutoCompletion(ctx context.Context, in AutoCompletionInput) (*AutoCompletion, error) {
+	outcome, err := autoCompletionOutcome(in.Template, in.Node, in.MarkerLabel)
 	if err != nil {
 		return nil, err
 	}
 	plan := &AutoCompletion{Outcome: outcome}
-	if node.Completion != nil {
-		switch node.Completion.Kind {
+	sources := autoOutputSources{WorkingDir: in.WorkingDir}
+	// A check that ran before a later rejection is evidence of that rejection
+	// too. The captured run rides the rejection instead of surviving only in the
+	// supervisor's log.
+	var captures []CommandCapture
+	reject := func(err error) error {
+		if len(captures) == 0 {
+			return err
+		}
+		return &ContractUnmetError{Reason: err.Error(), Evidence: captures}
+	}
+	if in.Node.Completion != nil {
+		switch in.Node.Completion.Kind {
 		case CompletionFiles:
-			artifacts, err := evalFilesContract(node.Completion.Artifacts, workingDir)
+			artifacts, err := evalFilesContract(in.Node.Completion.Artifacts, in.WorkingDir)
 			if err != nil {
 				return nil, err
 			}
 			plan.Artifacts = artifacts
+			sources.SingleArtifact = singleDeclaredArtifact(in.Node.Completion)
 		case CompletionGit:
-			if err := evalGitContract(node.Completion.Git, workingDir); err != nil {
+			if err := evalGitContract(in.Node.Completion.Git, in.WorkingDir); err != nil {
 				return nil, err
 			}
+		case CompletionCommand:
+			check, err := evalCommandContract(ctx, in.Node.Completion.Command, in.Params, in.WorkingDir, in.TimeoutC)
+			if err != nil {
+				// A failed check's captures ride the rejection, so the caller can
+				// record them with the attempt's terminal fact.
+				return nil, err
+			}
+			plan.Captures = check.captures
+			captures = check.captures
+			if check.streamsHeld && declaresCommandStdoutOutputs(in.Node) {
+				// The check exit status met the contract, but a descendant it left
+				// behind kept its output open. A declared value read from that
+				// stdout could then be a truncation artifact. The exit status alone
+				// carries no such risk, which is why this rejects only when an
+				// output depends on the truncated stream.
+				return nil, reject(fmt.Errorf("completion command %s left its output streams open, so the node's declared stdout outputs may be truncated", check.argv[0]))
+			}
+			sources.CommandStdout = check.stdout
 		case CompletionExplicit:
 			// Rejected at validation for auto provider nodes; defensive here.
 			return nil, fmt.Errorf("explicit completion cannot be evaluated by the supervisor")
+		default:
+			// Fail closed: an unknown kind is never treated as met.
+			return nil, fmt.Errorf("completion.kind %q cannot be evaluated by the supervisor", in.Node.Completion.Kind)
 		}
 	}
-	outputs, err := resolveAutoOutputs(node, workingDir)
+	outputs, err := resolveAutoOutputs(in.Node, sources)
 	if err != nil {
-		return nil, err
+		return nil, reject(err)
 	}
 	plan.Outputs = outputs
 	declared := make([]OutputValue, len(outputs))
 	for i, o := range outputs {
 		declared[i] = OutputValue{DefinitionID: o.DefinitionID}
 	}
-	if err := validateDeclaredOutputs(node, declared); err != nil {
-		return nil, err
+	if err := validateDeclaredOutputs(in.Node, declared); err != nil {
+		return nil, reject(err)
 	}
-	if err := validateCompleteOutputValues(tmpl, node, outputs); err != nil {
-		return nil, err
+	if err := validateCompleteOutputValues(in.Template, in.Node, outputs); err != nil {
+		return nil, reject(err)
 	}
-	if err := validateDeclaredOutcome(tmpl, node, outcome); err != nil {
-		return nil, err
+	if err := validateDeclaredOutcome(in.Template, in.Node, outcome); err != nil {
+		return nil, reject(err)
 	}
 	return plan, nil
 }
@@ -239,14 +308,10 @@ func gitOutput(dir string, args ...string) (string, error) {
 // resolveAutoOutputs resolves every declared output from its source (or the
 // default binding). Required outputs that do not resolve leave the contract
 // unmet; optional ones that do not resolve are omitted.
-func resolveAutoOutputs(node *NodeDefinition, workingDir string) ([]CompleteOutput, error) {
-	singleArtifact := ""
-	if node.Completion != nil && node.Completion.Kind == CompletionFiles && len(node.Completion.Artifacts) == 1 {
-		singleArtifact = node.Completion.Artifacts[0].Path
-	}
+func resolveAutoOutputs(node *NodeDefinition, sources autoOutputSources) ([]CompleteOutput, error) {
 	out := make([]CompleteOutput, 0, len(node.Outputs))
 	for _, def := range node.Outputs {
-		value, ok, err := resolveAutoOutput(def, singleArtifact, workingDir)
+		value, ok, err := resolveAutoOutput(def, sources)
 		if err != nil {
 			if !def.Required {
 				// An optional output whose source does not resolve is omitted.
@@ -265,15 +330,45 @@ func resolveAutoOutputs(node *NodeDefinition, workingDir string) ([]CompleteOutp
 	return out, nil
 }
 
+// autoOutputSources is the work product one auto-completion resolves declared
+// outputs from. It holds the attempt's working directory, the single
+// files-contract artifact a file output defaults to, and the completion
+// command's captured stdout.
+type autoOutputSources struct {
+	WorkingDir     string
+	SingleArtifact string
+	CommandStdout  []byte
+}
+
+// declaresCommandStdoutOutputs reports whether any declared output reads a value
+// from the completion command's stdout.
+func declaresCommandStdoutOutputs(node *NodeDefinition) bool {
+	for _, def := range node.Outputs {
+		if def.Source != nil && def.Source.Command != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// singleDeclaredArtifact returns the one artifact path a files contract
+// declares, or an empty string when it declares none or several.
+func singleDeclaredArtifact(contract *CompletionContract) string {
+	if contract == nil || contract.Kind != CompletionFiles || len(contract.Artifacts) != 1 {
+		return ""
+	}
+	return contract.Artifacts[0].Path
+}
+
 // resolveAutoOutput resolves one output. ok=false with a nil error means the
 // output does not resolve and may be omitted (optional only).
-func resolveAutoOutput(def OutputDefinition, singleArtifact, workingDir string) (json.RawMessage, bool, error) {
+func resolveAutoOutput(def OutputDefinition, sources autoOutputSources) (json.RawMessage, bool, error) {
 	src := def.Source
 	if src == nil {
 		// Default binding: a file output on a files contract with exactly one
 		// declared artifact binds to that artifact.
-		if def.Type == OutputFile && singleArtifact != "" {
-			value, err := json.Marshal(singleArtifact)
+		if def.Type == OutputFile && sources.SingleArtifact != "" {
+			value, err := json.Marshal(sources.SingleArtifact)
 			return value, err == nil, err
 		}
 		return nil, false, nil
@@ -283,7 +378,7 @@ func resolveAutoOutput(def OutputDefinition, singleArtifact, workingDir string) 
 		if def.Type != OutputString {
 			return nil, false, fmt.Errorf("output %q: git-head source requires a string output", def.ID)
 		}
-		out, err := gitOutput(workingDir, "rev-parse", "HEAD")
+		out, err := gitOutput(sources.WorkingDir, "rev-parse", "HEAD")
 		if err != nil {
 			return nil, false, fmt.Errorf("output %q: git-head source: %w", def.ID, err)
 		}
@@ -292,11 +387,23 @@ func resolveAutoOutput(def OutputDefinition, singleArtifact, workingDir string) 
 			return nil, false, err
 		}
 		return value, true, nil
+	case src.Command != "":
+		if def.Type == OutputFile {
+			return nil, false, fmt.Errorf("output %q: a pointer source requires a non-file output", def.ID)
+		}
+		if src.Command != "stdout" {
+			return nil, false, fmt.Errorf("output %q: command source %q is not supported", def.ID, src.Command)
+		}
+		resolved, err := resolveJSONPointer(sources.CommandStdout, src.Pointer)
+		if err != nil {
+			return nil, false, fmt.Errorf("output %q: pointer %q into the completion command's stdout: %w", def.ID, src.Pointer, err)
+		}
+		return resolved, true, nil
 	default:
 		if filepath.IsAbs(src.Artifact) {
 			return nil, false, fmt.Errorf("output %q: artifact source %q must be relative to the attempt's working directory", def.ID, src.Artifact)
 		}
-		abs, err := secureJoin(workingDir, src.Artifact)
+		abs, err := secureJoin(sources.WorkingDir, src.Artifact)
 		if err != nil {
 			return nil, false, fmt.Errorf("output %q: artifact source %q: %w", def.ID, src.Artifact, err)
 		}
@@ -346,11 +453,9 @@ func resolveJSONPointer(data []byte, pointer string) (json.RawMessage, error) {
 	if !strings.HasPrefix(pointer, "/") {
 		return nil, fmt.Errorf("pointer must begin with /")
 	}
-	var doc any
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	if err := decoder.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("artifact is not valid JSON: %w", err)
+	doc, err := decodeJSONDocument(data)
+	if err != nil {
+		return nil, fmt.Errorf("document is not valid JSON: %w", err)
 	}
 	cur := doc
 	for _, token := range strings.Split(pointer[1:], "/") {
@@ -380,75 +485,96 @@ func resolveJSONPointer(data []byte, pointer string) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// AutoCompletionDecision is the supervisor-side decision for one successfully
+// exiting attempt. Exactly one of Plan and Rejection is set whenever Eligible
+// is true.
+type AutoCompletionDecision struct {
+	// Eligible reports whether the node is an auto-dispatched provider node the
+	// supervisor completes itself.
+	Eligible bool
+	// Plan carries the completion request.
+	Plan *AutoCompletion
+	// Rejection names why the declared contract is unmet.
+	Rejection string
+	// FailureEvidence is the inspection evidence a completion check captured
+	// before its contract was rejected. It is recorded with the attempt's
+	// terminal fact, so a failed check is as inspectable as a passing one. It is
+	// empty for every rejection that ran no check.
+	FailureEvidence []CommandCapture
+	// Canceled reports that the rejection is the attempt's own cancellation
+	// reaching the check, not a judgment on its result.
+	Canceled bool
+}
+
 // DecideAutoCompletion is the supervisor-side decision for one successfully
-// exiting attempt: eligible reports whether the node is an auto-dispatched
-// provider node the supervisor completes itself; plan carries the completion
-// request; rejection names why the declared contract is unmet. Exactly one of
-// plan and rejection is set whenever eligible is true. err reports that the
-// workflow, activation, template, or node definition could not be read, so
-// eligibility is unknown; a rejection is only ever a contract the work did
-// not meet.
-func (m *Manager) DecideAutoCompletion(wf WorkflowID, nodeID NodeID, activationID ActivationID, workingDir, markerLabel string) (eligible bool, plan *AutoCompletion, rejection string, err error) {
+// exiting attempt. err reports that the workflow, activation, template, or node
+// definition could not be read, so eligibility is unknown. A rejection is only
+// ever a contract the work did not meet.
+func (m *Manager) DecideAutoCompletion(ctx context.Context, wf WorkflowID, nodeID NodeID, activationID ActivationID, workingDir, markerLabel string) (AutoCompletionDecision, error) {
 	snap, exists, err := m.store.loadCurrent(wf)
 	if err != nil {
-		return false, nil, "", fmt.Errorf("load workflow %s: %w", wf, err)
+		return AutoCompletionDecision{}, fmt.Errorf("load workflow %s: %w", wf, err)
 	}
 	if !exists {
-		return false, nil, "", fmt.Errorf("workflow %s not found", wf)
+		return AutoCompletionDecision{}, fmt.Errorf("workflow %s not found", wf)
 	}
 	act, err := findActivation(&snap.Instance, nodeID, activationID)
 	if err != nil {
-		return false, nil, "", err
+		return AutoCompletionDecision{}, err
 	}
 	if act == nil {
-		return false, nil, "", fmt.Errorf("activation %s for node %s not found", activationID, nodeID)
+		return AutoCompletionDecision{}, fmt.Errorf("activation %s for node %s not found", activationID, nodeID)
 	}
 	if act.Dispatch == nil || !act.Dispatch.IsAuto() {
-		return false, nil, "", nil
+		return AutoCompletionDecision{}, nil
 	}
 	tmpl, err := m.templateFor(&snap)
 	if err != nil {
-		return false, nil, "", fmt.Errorf("load template for workflow %s: %w", wf, err)
+		return AutoCompletionDecision{}, fmt.Errorf("load template for workflow %s: %w", wf, err)
 	}
 	node, err := findNode(tmpl, nodeID)
 	if err != nil {
-		return false, nil, "", err
+		return AutoCompletionDecision{}, err
 	}
 	switch node.Action.Kind {
 	case ActionRun, ActionLoop, ActionTeam:
 	default:
-		return false, nil, "", nil
+		return AutoCompletionDecision{}, nil
 	}
-	plan2, evalErr := EvaluateAutoCompletion(tmpl, node, workingDir, markerLabel)
+	plan, evalErr := EvaluateAutoCompletion(ctx, AutoCompletionInput{
+		Template:    tmpl,
+		Node:        node,
+		Params:      snap.Instance.Params,
+		WorkingDir:  workingDir,
+		MarkerLabel: markerLabel,
+	})
 	if evalErr != nil {
-		return true, nil, evalErr.Error(), nil
+		decision := AutoCompletionDecision{Eligible: true, Rejection: evalErr.Error()}
+		var unmet *ContractUnmetError
+		if errors.As(evalErr, &unmet) {
+			decision.FailureEvidence = unmet.Evidence
+			decision.Canceled = unmet.Canceled
+		}
+		return decision, nil
 	}
-	return true, plan2, "", nil
+	return AutoCompletionDecision{Eligible: true, Plan: plan}, nil
 }
 
-// CompleteAuto issues the workflow.complete command for a supervisor-side
-// auto-completion plan: same atomic command, evidence staging, output
-// recording, and lease release as an explicit worker handoff.
+// CompleteAuto completes a supervisor-side auto-completion plan through the
+// same atomic completion every handoff uses. A supervisor capture cannot take a
+// different path from a declared one. The plan's captures are staged from memory
+// in the same call, which is why they never travel on a command payload.
 func (m *Manager) CompleteAuto(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, ownerToken string, plan *AutoCompletion) (any, error) {
-	payload, err := json.Marshal(struct {
-		Op           string       `json:"op"`
-		NodeID       NodeID       `json:"node_id"`
-		ActivationID ActivationID `json:"activation_id"`
-		AttemptID    AttemptID    `json:"attempt_id"`
-		LeaseID      LeaseID      `json:"lease_id"`
-		OwnerToken   string       `json:"owner_token"`
-		AutoCompletion
-	}{
-		Op:             "complete",
-		NodeID:         nodeID,
-		ActivationID:   activationID,
-		AttemptID:      attemptID,
-		LeaseID:        leaseID,
-		OwnerToken:     ownerToken,
-		AutoCompletion: *plan,
+	return m.applyComplete(wf, commandCompleteRequest{
+		NodeID:       nodeID,
+		ActivationID: activationID,
+		AttemptID:    attemptID,
+		LeaseID:      leaseID,
+		OwnerToken:   ownerToken,
+		Outcome:      plan.Outcome,
+		Outputs:      plan.Outputs,
+		Artifacts:    plan.Artifacts,
+		captures:     plan.Captures,
+		supervised:   true,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return m.WorkflowCommand(string(wf), payload)
 }

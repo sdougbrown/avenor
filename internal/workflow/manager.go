@@ -184,9 +184,19 @@ func safeComponent(s string) bool {
 	return !strings.ContainsAny(s, "/\\\x00")
 }
 
-func (m *Manager) checkWorkflowID(id string) (WorkflowID, error) {
+// validateWorkflowID applies the id rule every command entry point enforces: an
+// id is usable only when it is safe as a path component, so no instance
+// directory can resolve outside the workflow root.
+func validateWorkflowID(id string) error {
 	if !safeComponent(id) {
-		return "", errors.New("invalid workflow id")
+		return errors.New("invalid workflow id")
+	}
+	return nil
+}
+
+func (m *Manager) checkWorkflowID(id string) (WorkflowID, error) {
+	if err := validateWorkflowID(id); err != nil {
+		return "", err
 	}
 	return WorkflowID(id), nil
 }
@@ -1157,23 +1167,58 @@ func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activati
 	return m.RecordAttemptTermination(wf, nodeID, activationID, attemptID, leaseID, t)
 }
 
-// AttemptTermination is one attempt's terminal fact: the final status, the
-// optional inert terminal-marker evidence, and the working directory the
-// attempt's runtime ran in (recorded when known).
+// AttemptTermination is one attempt's terminal fact. It carries the final status,
+// the optional inert terminal-marker evidence, and the working directory the
+// attempt's runtime ran in (recorded when known). Any inspection evidence the
+// supervisor captured for it is carried too.
 type AttemptTermination struct {
 	Status           AttemptStatus
 	MarkerKind       string
 	MarkerLabel      string
 	WorkingDirectory string
+	// Evidence is inspection evidence captured for this terminal fact, such as a
+	// failed completion check's bounded streams and run summary. It is staged and
+	// recorded with the attempt's terminal fact, so a contract-unmet attempt is
+	// as inspectable as a completed one. It is in-process only: a supervisor
+	// capture never travels on a command payload.
+	Evidence []CommandCapture
 }
 
 // RecordAttemptTermination records the terminal status of an already-started
-// attempt like RecordAttemptTerminated, and additionally carries the
-// attempt's working directory and terminal marker evidence.
-func (m *Manager) RecordAttemptTermination(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, t AttemptTermination) error {
+// attempt like RecordAttemptTerminated. It additionally carries the attempt's
+// working directory, terminal marker evidence, and inspection evidence.
+// Evidence is staged before the command and discarded again if the terminal fact
+// does not land, so a failed call leaves nothing behind.
+func (m *Manager) RecordAttemptTermination(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, t AttemptTermination) (err error) {
+	if err := validateWorkflowID(string(wf)); err != nil {
+		return err
+	}
 	if t.Status == "" {
 		return errors.New("attempt termination status is required")
 	}
+	records, staged, err := m.stageAttemptEvidence(wf, nodeID, activationID, attemptID, leaseID, t.Evidence)
+	if err != nil {
+		// A capture that failed part-way left earlier copies staged; they belong
+		// to no fact.
+		return fmt.Errorf("stage attempt evidence: %w", discardStaged(m, wf, staged, err))
+	}
+	// The staged copies belong to the terminal fact only once it lands; a
+	// durable fact keeps them even though the command returned an error.
+	keep := false
+	defer func() {
+		if keep {
+			return
+		}
+		if err != nil {
+			err = discardStaged(m, wf, staged, err)
+			return
+		}
+		// An idempotent answer references the copy the first apply staged, so
+		// this call's copies belong to no fact and its success stands; a leftover
+		// is logged rather than turned into a failure.
+		reportDiscardFailure(wf, cleanupStaged(m, wf, staged))
+	}()
+
 	// The command is idempotent per attempt (stable "terminate-<attemptID>"
 	// key), so it is safe to retry: a concurrent command on the same instance
 	// can bump the revision in the window between the read and the apply. Without
@@ -1199,18 +1244,55 @@ func (m *Manager) RecordAttemptTermination(wf WorkflowID, nodeID NodeID, activat
 			MarkerKind:       t.MarkerKind,
 			MarkerLabel:      t.MarkerLabel,
 			WorkingDirectory: t.WorkingDirectory,
+			Evidence:         records,
 		})
 		if err == nil {
+			keep = true
 			return nil
 		}
 		if errors.Is(err, errDuplicateIdempotency) {
-			// Already recorded for this attempt.
+			// Already recorded for this attempt, so its evidence is already on
+			// the instance: this call's freshly staged copies belong to no fact.
 			return nil
 		}
 		if !errors.Is(err, errRevisionMismatch) {
+			// A durable command's evidence is referenced by the event log; a replay
+			// would recover the reference, so it must stay.
+			if errors.Is(err, ErrCommandDurable) {
+				keep = true
+			}
 			return err
 		}
 		// Optimistic-concurrency conflict; re-read under a fresh lock and retry.
 	}
 	return fmt.Errorf("terminate attempt %s: revision kept moving under concurrent commands", attemptID)
+}
+
+// stageAttemptEvidence stages the inspection evidence for one attempt's
+// terminal fact. It returns the records to carry on the terminate command,
+// together with the staged copies the caller discards if the fact never lands.
+//
+// The authority is this attempt's own lease owner, matching how completion
+// evidence is attributed. It applies only while that exact lease still stands. A
+// canceled attempt has had its lease released, and a re-armed activation may
+// already hold a newer lease. Attributing this attempt's captures to either would
+// be stale. With no matching lease the authority stays empty, and the evidence is
+// still recorded. Losing it would lose the only durable record of the check that
+// ran.
+func (m *Manager) stageAttemptEvidence(wf WorkflowID, nodeID NodeID, activationID ActivationID, attemptID AttemptID, leaseID LeaseID, captures []CommandCapture) ([]Evidence, []StagedEvidence, error) {
+	if len(captures) == 0 {
+		return nil, nil, nil
+	}
+	authority := ""
+	snap, exists, loadErr := m.store.loadCurrent(wf)
+	if loadErr != nil {
+		return nil, nil, loadErr
+	}
+	if exists {
+		if act, findErr := findActivation(&snap.Instance, nodeID, activationID); findErr == nil && act != nil &&
+			act.ActiveLease != nil && act.ActiveLease.ID == leaseID {
+			authority = act.ActiveLease.Owner
+		}
+	}
+	return m.stageEvidenceRecords(wf, nil, captures, authority, activationID, attemptID, m.now())
 }

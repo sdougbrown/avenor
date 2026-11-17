@@ -857,3 +857,27 @@ func TestCommandRecordedClassifiesIdempotentAnswers(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordAttemptTerminationRejectsInvalidWorkflowID(t *testing.T) {
+	t.Parallel()
+	m, _, _ := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
+	err := m.RecordAttemptTermination("../../escape", "start", "act", "att", "lease", AttemptTermination{Status: AttemptFailed})
+	if err == nil || !strings.Contains(err.Error(), "invalid workflow id") {
+		t.Fatalf("RecordAttemptTermination with a traversal id: %v", err)
+	}
+}
+
+// TestCompleteAutoRejectsInvalidWorkflowID checks the shared completion boundary.
+func TestCompleteAutoRejectsInvalidWorkflowID(t *testing.T) {
+	t.Parallel()
+	m, s, _ := newCompleteFixture(t, completeTemplateJSON, "complete-test", "1")
+	escaped := filepath.Clean(filepath.Join(s.Root(), "instances", "..", "..", "escape"))
+
+	_, err := m.CompleteAuto("../../escape", "start", "act-escape", "att-escape", "lease-escape", "owner", &AutoCompletion{Outcome: "done"})
+	if err == nil || !strings.Contains(err.Error(), "invalid workflow id") {
+		t.Fatalf("CompleteAuto with a traversal id: err = %v, want invalid workflow id", err)
+	}
+	if _, statErr := os.Stat(escaped); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("stat %s: %v, want no path outside the workflow root", escaped, statErr)
+	}
+}

@@ -26,14 +26,20 @@ type commandCompleteRequest struct {
 	Outcome      OutcomeName        `json:"outcome"`
 	Outputs      []CompleteOutput   `json:"outputs"`
 	Artifacts    []CompleteArtifact `json:"artifacts"`
+	// captures carries the supervisor's own in-memory evidence, which is never
+	// part of the wire. An unexported field is invisible to the JSON decoder, so
+	// this path is reachable only from CompleteAuto. The public complete request
+	// keeps its path-sourced artifacts and gains no way to supply bytes.
+	captures []CommandCapture
+	// supervised marks the supervisor's own evaluated completion. It is
+	// unexported, so no JSON request can set it: a command contract's verdict is
+	// the supervisor's check execution, never a caller's claim.
+	supervised bool
 }
 
-// commandComplete atomically completes a machine/external handoff activation.
-// Flow: validate -> idempotent no-op short-circuit -> wait for the terminal
-// fact when the contract depends on terminal output -> stage + hash evidence
-// -> one atomic CommandComplete. On any failure after staging, the freshly
-// staged evidence is removed so the store and filesystem never diverge, and
-// no completion event is emitted (snapshot unchanged).
+// commandComplete is the public workflow.complete handler: it decodes the
+// request and applies it. Every request it accepts names file-sourced artifacts
+// only.
 func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, error) {
 	var req commandCompleteRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
@@ -54,7 +60,21 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 	if req.Outcome == "" {
 		return nil, errors.New("complete requires outcome")
 	}
+	return m.applyComplete(wf, req)
+}
 
+// applyComplete atomically completes a machine/external handoff activation.
+// Flow: validate -> idempotent no-op short-circuit -> wait for the terminal
+// fact when the contract depends on terminal output -> stage + hash evidence
+// -> one atomic CommandComplete. A failure after staging that left no durable
+// events removes the freshly staged evidence, so the store and filesystem never
+// diverge. No completion event is emitted, so the snapshot is unchanged. Both
+// the public handler and the supervisor's own completion reach it, so it also
+// enforces the workflow id rule the public handler's router applies.
+func (m *Manager) applyComplete(wf WorkflowID, req commandCompleteRequest) (any, error) {
+	if err := validateWorkflowID(string(wf)); err != nil {
+		return nil, err
+	}
 	snap, exists, err := m.store.loadCurrent(wf)
 	if err != nil {
 		return nil, err
@@ -118,6 +138,16 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 		return nil, err
 	}
 
+	// A command contract is a supervisor-side check, not a declaration a lease
+	// holder may assert. Its verdict comes from running the check against the
+	// attempt's working directory. Only CompleteAuto, which evaluates first, may
+	// present for such a node. The public workflow.complete therefore cannot skip
+	// the check or consume the attempt's completion idempotency key ahead of the
+	// supervisor.
+	if node.Completion != nil && node.Completion.Kind == CompletionCommand && !req.supervised {
+		return nil, fmt.Errorf("node %q declares completion.kind %q, which only the supervisor's evaluated completion can satisfy (the check runs as a supervisor step after the worker exits)", req.NodeID, CompletionCommand)
+	}
+
 	// Declared machine contract checks (no side effects on failure).
 	declared := make([]OutputValue, len(req.Outputs))
 	for i, o := range req.Outputs {
@@ -149,31 +179,12 @@ func (m *Manager) commandComplete(wf WorkflowID, payload json.RawMessage) (any, 
 	// Stage evidence FIRST (a filesystem side effect, no state transition).
 	// Any failure removes what was already staged in this call.
 	now := m.now()
-	var staged []StagedEvidence
-	for _, a := range req.Artifacts {
-		se, err := m.store.StageEvidence(wf, a.SrcPath, a.StoredPath, a.NonEmpty, a.SHA256)
-		if err != nil {
-			return nil, fmt.Errorf("stage evidence: %w", discardStaged(m, wf, staged, err))
-		}
-		staged = append(staged, se)
+	evidence, staged, err := m.stageEvidenceRecords(wf, req.Artifacts, req.captures, act.ActiveLease.Owner, act.ID, req.AttemptID, now)
+	if err != nil {
+		return nil, fmt.Errorf("stage evidence: %w", discardStaged(m, wf, staged, err))
 	}
-
-	evidence := make([]Evidence, 0, len(staged))
 	evIDs := make([]EvidenceID, 0, len(staged))
-	owner := act.ActiveLease.Owner
 	for _, se := range staged {
-		evidence = append(evidence, Evidence{
-			ID:           se.EvidenceID,
-			Kind:         "artifact",
-			Source:       EvidenceMachine,
-			Authority:    owner,
-			OriginalPath: se.OriginalPath,
-			StoredPath:   se.StoredPath,
-			Size:         se.Size,
-			SHA256:       se.SHA256,
-			ActivationID: act.ID,
-			CreatedAt:    now,
-		})
 		evIDs = append(evIDs, se.EvidenceID)
 	}
 
@@ -473,4 +484,52 @@ func CommandRecorded(answer any) bool {
 	}
 	idempotent, _ := result["idempotent"].(bool)
 	return !idempotent
+}
+
+// maxEvidenceResultBytes bounds the inert provenance one evidence entry may
+// carry, so no single entry can grow a snapshot through it.
+const maxEvidenceResultBytes = 8 << 10
+
+// stageEvidenceRecords stages the evidence for one command and returns the
+// records to record with it. It stages the file-sourced artifacts a request
+// names first, then the supervisor's own captures. A staging failure returns the
+// copies that landed so the caller can discard them.
+func (m *Manager) stageEvidenceRecords(wf WorkflowID, artifacts []CompleteArtifact, captures []CommandCapture, authority string, activationID ActivationID, attemptID AttemptID, now time.Time) ([]Evidence, []StagedEvidence, error) {
+	records := make([]Evidence, 0, len(artifacts)+len(captures))
+	staged := make([]StagedEvidence, 0, len(artifacts)+len(captures))
+	stagedCopy := func(se StagedEvidence, result json.RawMessage) {
+		staged = append(staged, se)
+		records = append(records, Evidence{
+			ID:           se.EvidenceID,
+			Kind:         "artifact",
+			Source:       EvidenceMachine,
+			Authority:    authority,
+			OriginalPath: se.OriginalPath,
+			StoredPath:   se.StoredPath,
+			Size:         se.Size,
+			SHA256:       se.SHA256,
+			Result:       result,
+			ActivationID: activationID,
+			AttemptID:    attemptID,
+			CreatedAt:    now,
+		})
+	}
+	for _, artifact := range artifacts {
+		se, err := m.store.StageEvidence(wf, artifact.SrcPath, artifact.StoredPath, artifact.NonEmpty, artifact.SHA256)
+		if err != nil {
+			return nil, staged, err
+		}
+		stagedCopy(se, nil)
+	}
+	for _, capture := range captures {
+		if len(capture.Result) > maxEvidenceResultBytes {
+			return nil, staged, fmt.Errorf("evidence %q result exceeds %d bytes", capture.StoredPath, maxEvidenceResultBytes)
+		}
+		se, err := m.store.stageEvidenceBytes(wf, capture.Data, capture.StoredPath, false, "")
+		if err != nil {
+			return nil, staged, err
+		}
+		stagedCopy(se, capture.Result)
+	}
+	return records, staged, nil
 }

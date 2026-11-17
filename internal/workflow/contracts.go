@@ -90,7 +90,7 @@ func completionRequiresTerminal(node *NodeDefinition) bool {
 		return false
 	}
 	switch node.Completion.Kind {
-	case CompletionFiles, CompletionGit:
+	case CompletionFiles, CompletionGit, CompletionCommand:
 		return true
 	default:
 		return false

@@ -248,6 +248,7 @@ func buildCommandEvents(state Snapshot, command Command, policies Policies) ([]E
 		e.MarkerKind = command.MarkerKind
 		e.MarkerLabel = command.MarkerLabel
 		e.WorkingDirectory = command.WorkingDirectory
+		e.Evidence = command.Evidence
 		return []Event{e}, nil
 
 	case CommandBeginDispatch:
@@ -669,6 +670,16 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event, polici
 	attempt := findAttempt(next, act, event.AttemptID)
 	if attempt == nil {
 		return errors.New("terminated attempt not found")
+	}
+	// Inspection evidence captured for this terminal fact is recorded with the
+	// attempt, so a contract-unmet attempt stays inspectable. That evidence is a
+	// failed completion check's bounded streams and run summary. It is inert: no
+	// branch, lease, or retry decision reads it. It is recorded before the
+	// already-terminal no-op below, because the evidence belongs to this event
+	// either way. Dropping it would orphan the copies the supervisor already
+	// staged.
+	if len(event.Evidence) > 0 {
+		next.Instance.Evidence = append(next.Instance.Evidence, event.Evidence...)
 	}
 	// An already-terminal attempt is an idempotent no-op: a runtime whose
 	// lease expired under it (sweep-timed-out) or whose status was recorded

@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -31,6 +32,17 @@ func evalTemplate(node *NodeDefinition, terminalOutcomes ...string) *Template {
 	}
 }
 
+// evaluateAuto is the plain-entry evaluation the completion tests drive: no
+// instance parameters, no cancellation.
+func evaluateAuto(tmpl *Template, node *NodeDefinition, workingDir, markerLabel string) (*AutoCompletion, error) {
+	return EvaluateAutoCompletion(context.Background(), AutoCompletionInput{
+		Template:    tmpl,
+		Node:        node,
+		WorkingDir:  workingDir,
+		MarkerLabel: markerLabel,
+	})
+}
+
 func convertOutcomes(names []string) []OutcomeName {
 	out := make([]OutcomeName, len(names))
 	for i, n := range names {
@@ -46,7 +58,7 @@ func stringOutput(id string, required bool, source *OutputSource) OutputDefiniti
 func TestEvaluateAutoCompletionSingleCandidateOutcome(t *testing.T) {
 	t.Parallel()
 	tmpl := evalTemplate(autoEvalNode(nil, nil, map[OutcomeName]NodeID{"done": "next"}), "done")
-	plan, err := EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
+	plan, err := evaluateAuto(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion: %v", err)
 	}
@@ -62,7 +74,7 @@ func TestEvaluateAutoCompletionTerminalOutcomeVocabulary(t *testing.T) {
 	t.Parallel()
 	// No branches: the template's terminal outcomes are the vocabulary.
 	tmpl := evalTemplate(autoEvalNode(nil, nil, nil), "done")
-	plan, err := EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
+	plan, err := evaluateAuto(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion: %v", err)
 	}
@@ -74,7 +86,7 @@ func TestEvaluateAutoCompletionTerminalOutcomeVocabulary(t *testing.T) {
 	// terminal outcomes: one declared branch stays the single candidate even
 	// in a multi-terminal template.
 	tmpl = evalTemplate(autoEvalNode(nil, nil, map[OutcomeName]NodeID{"done": "next"}), "done", "abandoned")
-	plan, err = EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
+	plan, err = evaluateAuto(tmpl, &tmpl.Nodes[0], t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion: %v", err)
 	}
@@ -84,13 +96,13 @@ func TestEvaluateAutoCompletionTerminalOutcomeVocabulary(t *testing.T) {
 
 	// Two candidates and no marker: contract unmet.
 	tmpl = evalTemplate(autoEvalNode(nil, nil, map[OutcomeName]NodeID{"passed": "x", "failed": "x"}), "done")
-	if _, err := EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), ""); err == nil ||
+	if _, err := evaluateAuto(tmpl, &tmpl.Nodes[0], t.TempDir(), ""); err == nil ||
 		!strings.Contains(err.Error(), "no terminal marker selected") {
 		t.Fatalf("EvaluateAutoCompletion error = %v, want marker-selection rejection", err)
 	}
 
 	// The marker label selects a declared outcome.
-	plan, err = EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), "failed")
+	plan, err = evaluateAuto(tmpl, &tmpl.Nodes[0], t.TempDir(), "failed")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion with marker: %v", err)
 	}
@@ -99,7 +111,7 @@ func TestEvaluateAutoCompletionTerminalOutcomeVocabulary(t *testing.T) {
 	}
 
 	// A marker label outside the vocabulary is rejected.
-	if _, err := EvaluateAutoCompletion(tmpl, &tmpl.Nodes[0], t.TempDir(), "checkpoint"); err == nil {
+	if _, err := evaluateAuto(tmpl, &tmpl.Nodes[0], t.TempDir(), "checkpoint"); err == nil {
 		t.Fatal("EvaluateAutoCompletion accepted an undeclared marker label")
 	}
 }
@@ -116,7 +128,7 @@ func TestEvaluateAutoCompletionFilesContract(t *testing.T) {
 	}, map[OutcomeName]NodeID{"done": "next"})
 
 	tmpl := evalTemplate(node, "done")
-	plan, err := EvaluateAutoCompletion(tmpl, node, dir, "")
+	plan, err := evaluateAuto(tmpl, node, dir, "")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion: %v", err)
 	}
@@ -130,13 +142,13 @@ func TestEvaluateAutoCompletionFilesContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "result.md"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil || !strings.Contains(err.Error(), "is empty") {
+	if _, err := evaluateAuto(tmpl, node, dir, ""); err == nil || !strings.Contains(err.Error(), "is empty") {
 		t.Fatalf("empty artifact error = %v, want empty rejection", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "result.md")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil || !strings.Contains(err.Error(), "does not exist") {
+	if _, err := evaluateAuto(tmpl, node, dir, ""); err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("missing artifact error = %v, want missing rejection", err)
 	}
 	if err := os.Mkdir(filepath.Join(dir, "result.md"), 0o700); err != nil {
@@ -145,7 +157,7 @@ func TestEvaluateAutoCompletionFilesContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "result.md", "inner"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+	if _, err := evaluateAuto(tmpl, node, dir, ""); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("directory artifact error = %v, want non-regular rejection", err)
 	}
 }
@@ -164,7 +176,7 @@ func TestEvaluateAutoCompletionFilesContractSHA256(t *testing.T) {
 		Kind:      CompletionFiles,
 		Artifacts: []ArtifactRequirement{{Path: "result.md", SHA256: digest}},
 	}, map[OutcomeName]NodeID{"done": "next"})
-	plan, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, "")
+	plan, err := evaluateAuto(evalTemplate(node, "done"), node, dir, "")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion: %v", err)
 	}
@@ -173,7 +185,7 @@ func TestEvaluateAutoCompletionFilesContractSHA256(t *testing.T) {
 	}
 
 	node.Completion.Artifacts[0].SHA256 = strings.Repeat("0", 64)
-	if _, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, ""); err == nil ||
+	if _, err := evaluateAuto(evalTemplate(node, "done"), node, dir, ""); err == nil ||
 		!strings.Contains(err.Error(), "does not match the declared sha256") {
 		t.Fatalf("digest mismatch error = %v, want sha256 rejection", err)
 	}
@@ -203,12 +215,12 @@ func TestEvaluateAutoCompletionGitContract(t *testing.T) {
 
 	node := autoEvalNode(nil, &CompletionContract{Kind: CompletionGit, Git: &GitRequirement{Clean: true, Head: head}}, map[OutcomeName]NodeID{"done": "next"})
 	tmpl := evalTemplate(node, "done")
-	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err != nil {
+	if _, err := evaluateAuto(tmpl, node, dir, ""); err != nil {
 		t.Fatalf("clean repo at head: %v", err)
 	}
 
 	node.Completion.Git.Head = strings.Repeat("a", 40)
-	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil ||
+	if _, err := evaluateAuto(tmpl, node, dir, ""); err == nil ||
 		!strings.Contains(err.Error(), "does not match the declared head") {
 		t.Fatalf("head mismatch error = %v, want head rejection", err)
 	}
@@ -217,7 +229,7 @@ func TestEvaluateAutoCompletionGitContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("y\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil ||
+	if _, err := evaluateAuto(tmpl, node, dir, ""); err == nil ||
 		!strings.Contains(err.Error(), "uncommitted changes") {
 		t.Fatalf("dirty repo error = %v, want clean rejection", err)
 	}
@@ -225,14 +237,14 @@ func TestEvaluateAutoCompletionGitContract(t *testing.T) {
 	notRepo := t.TempDir()
 	for _, req := range []*GitRequirement{{Clean: true}, {Head: head}} {
 		node.Completion.Git = req
-		if _, err := EvaluateAutoCompletion(tmpl, node, notRepo, ""); err == nil ||
+		if _, err := evaluateAuto(tmpl, node, notRepo, ""); err == nil ||
 			!strings.Contains(err.Error(), "could not be evaluated") {
 			t.Fatalf("git contract %+v outside a repository: error = %v, want could-not-be-evaluated rejection", *req, err)
 		}
 	}
 
 	node.Completion.Git = &GitRequirement{ChangedFromBase: true}
-	if _, err := EvaluateAutoCompletion(tmpl, node, dir, ""); err == nil ||
+	if _, err := evaluateAuto(tmpl, node, dir, ""); err == nil ||
 		!strings.Contains(err.Error(), "no recorded base commit") {
 		t.Fatalf("changed_from_base error = %v, want no-base rejection", err)
 	}
@@ -256,7 +268,7 @@ func TestEvaluateAutoCompletionOutputSources(t *testing.T) {
 		Kind:      CompletionFiles,
 		Artifacts: []ArtifactRequirement{{Path: "pr-info.json"}, {Path: "pr-info.md"}},
 	}, map[OutcomeName]NodeID{"done": "next"})
-	plan, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, "")
+	plan, err := evaluateAuto(evalTemplate(node, "done"), node, dir, "")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion: %v", err)
 	}
@@ -305,7 +317,7 @@ func TestEvaluateAutoCompletionGitHeadSource(t *testing.T) {
 	node := autoEvalNode([]OutputDefinition{
 		stringOutput("head", true, &OutputSource{Git: "head"}),
 	}, &CompletionContract{Kind: CompletionGit, Git: &GitRequirement{Clean: true}}, map[OutcomeName]NodeID{"done": "next"})
-	plan, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, "")
+	plan, err := evaluateAuto(evalTemplate(node, "done"), node, dir, "")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion: %v", err)
 	}
@@ -331,7 +343,7 @@ func TestEvaluateAutoCompletionGitHeadSourceOutsideRepo(t *testing.T) {
 	required := autoEvalNode([]OutputDefinition{
 		stringOutput("head", true, &OutputSource{Git: "head"}),
 	}, nil, map[OutcomeName]NodeID{"done": "next"})
-	if _, err := EvaluateAutoCompletion(evalTemplate(required, "done"), required, dir, ""); err == nil ||
+	if _, err := evaluateAuto(evalTemplate(required, "done"), required, dir, ""); err == nil ||
 		!strings.Contains(err.Error(), "git-head source") {
 		t.Fatalf("required git-head output outside a repository: error = %v, want git-head source rejection", err)
 	}
@@ -339,7 +351,7 @@ func TestEvaluateAutoCompletionGitHeadSourceOutsideRepo(t *testing.T) {
 	optional := autoEvalNode([]OutputDefinition{
 		stringOutput("head", false, &OutputSource{Git: "head"}),
 	}, nil, map[OutcomeName]NodeID{"done": "next"})
-	plan, err := EvaluateAutoCompletion(evalTemplate(optional, "done"), optional, dir, "")
+	plan, err := evaluateAuto(evalTemplate(optional, "done"), optional, dir, "")
 	if err != nil {
 		t.Fatalf("optional git-head output outside a repository: %v", err)
 	}
@@ -362,7 +374,7 @@ func TestEvaluateAutoCompletionRequiredOutputUnresolvable(t *testing.T) {
 		Kind:      CompletionFiles,
 		Artifacts: []ArtifactRequirement{{Path: "result.md"}},
 	}, map[OutcomeName]NodeID{"done": "next"})
-	if _, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, ""); err == nil ||
+	if _, err := evaluateAuto(evalTemplate(node, "done"), node, dir, ""); err == nil ||
 		!strings.Contains(err.Error(), "cannot be resolved") {
 		t.Fatalf("unresolvable required output error = %v, want rejection", err)
 	}
@@ -380,7 +392,7 @@ func TestEvaluateAutoCompletionDefaultFileBinding(t *testing.T) {
 		Kind:      CompletionFiles,
 		Artifacts: []ArtifactRequirement{{Path: "result.md", NonEmpty: true}},
 	}, map[OutcomeName]NodeID{"done": "next"})
-	plan, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, "")
+	plan, err := evaluateAuto(evalTemplate(node, "done"), node, dir, "")
 	if err != nil {
 		t.Fatalf("EvaluateAutoCompletion: %v", err)
 	}
@@ -408,7 +420,7 @@ func TestEvaluateAutoCompletionPointerTypeMismatch(t *testing.T) {
 		Kind:      CompletionFiles,
 		Artifacts: []ArtifactRequirement{{Path: "data.json"}},
 	}, map[OutcomeName]NodeID{"done": "next"})
-	if _, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, ""); err == nil ||
+	if _, err := evaluateAuto(evalTemplate(node, "done"), node, dir, ""); err == nil ||
 		!strings.Contains(err.Error(), "requires a string value") {
 		t.Fatalf("type mismatch error = %v, want string-type rejection", err)
 	}
@@ -467,13 +479,13 @@ func TestEvaluateAutoCompletionRejectsPathsOutsideWorkingDir(t *testing.T) {
 			Kind:      CompletionFiles,
 			Artifacts: []ArtifactRequirement{{Path: path}},
 		}, map[OutcomeName]NodeID{"done": "next"})
-		if _, err := EvaluateAutoCompletion(evalTemplate(node, "done"), node, dir, ""); err == nil ||
+		if _, err := evaluateAuto(evalTemplate(node, "done"), node, dir, ""); err == nil ||
 			!(strings.Contains(err.Error(), "escapes the working directory") || strings.Contains(err.Error(), "must be relative")) {
 			t.Fatalf("artifact %q error = %v, want a working-directory rejection", path, err)
 		}
 
 		def := stringOutput("v", true, &OutputSource{Artifact: path, Pointer: "/v"})
-		if _, _, err := resolveAutoOutput(def, "", dir); err == nil ||
+		if _, _, err := resolveAutoOutput(def, autoOutputSources{WorkingDir: dir}); err == nil ||
 			!(strings.Contains(err.Error(), "escapes the working directory") || strings.Contains(err.Error(), "must be relative")) {
 			t.Fatalf("output source %q error = %v, want a working-directory rejection", path, err)
 		}
@@ -491,12 +503,12 @@ func TestResolveAutoOutputRejectsMismatchedSourceShape(t *testing.T) {
 	}
 	filePointer := OutputDefinition{ID: "f", Name: "F", Type: OutputFile, Required: true,
 		Source: &OutputSource{Artifact: "data.json", Pointer: "/n"}}
-	if _, _, err := resolveAutoOutput(filePointer, "", dir); err == nil ||
+	if _, _, err := resolveAutoOutput(filePointer, autoOutputSources{WorkingDir: dir}); err == nil ||
 		!strings.Contains(err.Error(), "a pointer source requires a non-file output") {
 		t.Fatalf("file output with pointer error = %v, want rejection", err)
 	}
 	stringWhole := stringOutput("s", true, &OutputSource{Artifact: "data.json"})
-	if _, _, err := resolveAutoOutput(stringWhole, "", dir); err == nil ||
+	if _, _, err := resolveAutoOutput(stringWhole, autoOutputSources{WorkingDir: dir}); err == nil ||
 		!strings.Contains(err.Error(), "whole-artifact source requires a file output") {
 		t.Fatalf("string output with whole artifact error = %v, want rejection", err)
 	}
@@ -518,11 +530,11 @@ func TestDecideAutoCompletionReportsUnreadableTemplateAsError(t *testing.T) {
 		t.Fatalf("remove template: %v", err)
 	}
 
-	eligible, plan, rejection, err := m.DecideAutoCompletion(wf, "start", act.ID, t.TempDir(), "")
+	decision, err := m.DecideAutoCompletion(context.Background(), wf, "start", act.ID, t.TempDir(), "")
 	if err == nil {
 		t.Fatal("DecideAutoCompletion with an unreadable template returned no error")
 	}
-	if eligible || plan != nil || rejection != "" {
-		t.Fatalf("DecideAutoCompletion = eligible %v, plan %+v, rejection %q; want an error only", eligible, plan, rejection)
+	if decision.Eligible || decision.Plan != nil || decision.Rejection != "" {
+		t.Fatalf("DecideAutoCompletion = %+v; want an error only", decision)
 	}
 }

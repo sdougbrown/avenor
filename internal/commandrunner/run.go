@@ -5,7 +5,8 @@
 // environment, bounded stdout and stderr, and a deadline. The child's process
 // group is killed on timeout, cancellation, output overflow, or child exit.
 // Supervisor code that runs an external program under a declared contract uses
-// this runner, so its safeguards cannot drift between those callers. Other
+// this runner — the workflow controller's external-gate adapters and workflow
+// completion commands — so their safeguards cannot drift apart. Other
 // supervisor code still calls git directly; this package makes no claim about
 // call sites it does not serve.
 //
