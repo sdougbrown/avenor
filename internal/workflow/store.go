@@ -325,7 +325,9 @@ func (s *Store) StoreTemplate(templateID TemplateID, templateVersion TemplateVer
 			}
 		}
 		if identical {
-			return nil
+			// Registration is a no-op, so nothing rewrites the file: tighten a
+			// template an earlier version stored readable.
+			return os.Chmod(path, StateFilePerm)
 		}
 		return &TemplateConflictError{TemplateID: templateID, TemplateVersion: templateVersion}
 	} else if !errors.Is(err, fs.ErrNotExist) {

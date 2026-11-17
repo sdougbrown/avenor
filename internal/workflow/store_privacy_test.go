@@ -156,3 +156,29 @@ func TestRewrittenProjectionIsTightened(t *testing.T) {
 		t.Fatalf("projection mode = %o, want %o", got, StateFilePerm)
 	}
 }
+
+// TestIdenticalTemplateRegistrationTightensItsFile proves re-registering an
+// unchanged template still tightens the stored file's mode, since the no-op path
+// never rewrites it.
+func TestIdenticalTemplateRegistrationTightensItsFile(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	tmpl := storeTemplateFixture(t, "privacy", "1")
+	if err := s.StoreTemplate("privacy", "1", tmpl); err != nil {
+		t.Fatalf("first StoreTemplate: %v", err)
+	}
+	path := filepath.Join(s.Root(), "templates", "privacy", "1.json")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod template: %v", err)
+	}
+	if err := s.StoreTemplate("privacy", "1", tmpl); err != nil {
+		t.Fatalf("identical StoreTemplate: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat template: %v", err)
+	}
+	if got := info.Mode().Perm(); got != StateFilePerm {
+		t.Fatalf("template mode = %o, want %o", got, StateFilePerm)
+	}
+}
