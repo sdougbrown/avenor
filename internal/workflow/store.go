@@ -46,8 +46,7 @@ type Store struct {
 	// command. No filesystem-level injection can isolate that write, because
 	// every command also repaves the snapshot from the log first. Production
 	// leaves it nil. A test installs and clears it while controller goroutines
-	// are applying commands, so snapshotFaultMu guards every access.
-	snapshotFaultMu    sync.Mutex
+	// are applying commands, so faultMu guards every access.
 	faultMu            sync.Mutex
 	snapshotWriteFault func(WorkflowID, Snapshot) error
 	// appendFault and discardFault, when non-nil, force one failure that file

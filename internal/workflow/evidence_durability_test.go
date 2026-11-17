@@ -27,28 +27,6 @@ func failNextSnapshotReplace(t *testing.T, s *Store) {
 	t.Cleanup(func() { s.SetSnapshotWriteFault(nil) })
 }
 
-// readOnlyFile makes one existing file unwritable for the duration of one call,
-// so its append fails while the directory stays writable.
-func readOnlyFile(t *testing.T, path string) (restore func()) {
-	t.Helper()
-	if err := os.Chmod(path, 0o400); err != nil {
-		t.Fatalf("make %s read-only: %v", path, err)
-	}
-	restore = func() {
-		if err := os.Chmod(path, StateFilePerm); err != nil {
-			t.Fatalf("restore %s: %v", path, err)
-		}
-	}
-	// The mode only blocks a non-privileged user: probe the real behavior so the
-	// test cannot silently assert a failure its premise never created.
-	if f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0); err == nil {
-		f.Close()
-		restore()
-		t.Skip("file permissions do not block this user (e.g. root); cannot force the append failure")
-	}
-	return restore
-}
-
 // stagedEvidenceCopies returns every staged evidence file under the instance,
 // keyed by its path relative to the instance directory, so a test can assert
 // exact bytes without knowing the evidence ID the store minted.
