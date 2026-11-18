@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # Install avenor — the agent orchestration harness.
 #
@@ -12,7 +12,7 @@ REPO="sdougbrown/avenor"
 GLOBAL=0
 VERSION="${AVENOR_VERSION:-}"
 
-while [[ $# -gt 0 ]]; do
+while [ $# -gt 0 ]; do
   case "$1" in
     --global)          GLOBAL=1; shift ;;
     --version)         VERSION="$2"; shift 2 ;;
@@ -92,9 +92,17 @@ if ! curl -fsSL -o "${TMP}/checksums.txt" "${BASE}/checksums.txt"; then
 fi
 
 # ── Verify checksum ───────────────────────────────────────────────────────
+case "$OS" in
+  darwin) SHASUM="shasum -a 256" ;;
+  linux)  SHASUM="sha256sum"   ;;
+esac
 (
   cd "$TMP"
-  if ! grep -E "  ${ASSET}$" checksums.txt | shasum -a 256 -c - >/dev/null 2>&1; then
+  grep -E "  ${ASSET}$" checksums.txt > check.txt || {
+    echo "No checksum entry for ${ASSET}" >&2
+    exit 1
+  }
+  if ! $SHASUM -c check.txt >/dev/null 2>&1; then
     echo "Checksum verification failed for ${ASSET}" >&2
     exit 1
   fi
@@ -110,7 +118,7 @@ fi
 echo "Installed avenor ${VERSION} → ${TARGET}"
 
 # ── PATH reminder ─────────────────────────────────────────────────────────
-if ! command -v avenor &>/dev/null 2>&1; then
+if ! command -v avenor >/dev/null 2>&1; then
   echo ""
   echo "Note: ${BIN_DIR} is not in your PATH. Add to your shell profile:"
   echo "  export PATH=\"${BIN_DIR}:\$PATH\""
