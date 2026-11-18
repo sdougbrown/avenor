@@ -98,7 +98,11 @@ case "$OS" in
 esac
 (
   cd "$TMP"
-  if ! grep -E "  ${ASSET}$" checksums.txt | $SHASUM -c - >/dev/null 2>&1; then
+  grep -E "  ${ASSET}$" checksums.txt > check.txt || {
+    echo "No checksum entry for ${ASSET}" >&2
+    exit 1
+  }
+  if ! $SHASUM -c check.txt >/dev/null 2>&1; then
     echo "Checksum verification failed for ${ASSET}" >&2
     exit 1
   fi
