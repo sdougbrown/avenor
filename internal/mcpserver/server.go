@@ -326,7 +326,7 @@ func NewServer(opts Options) (*Server, error) {
 	// surfaces never produce.
 	mcpServer.AddTool(&mcp.Tool{
 		Name:        "message",
-		Description: "Send, ask, reply to, resume or withdraw a message between agent runs; control replies are not available on this surface. The call is bound to the supervisor this server knows the addressed run on, so a run on a non-default supervisor is addressable only once this server has registered it: call status with that supervisor_id first, for example after an MCP restart.",
+		Description: "Tell, ask, reply to, resume or withdraw a message between agent runs; control replies are not available on this surface. The call is bound to the supervisor this server knows the addressed run on, so a run on a non-default supervisor is addressable only once this server has registered it: call status with that supervisor_id first, for example after an MCP restart.",
 		InputSchema: messaging.MessageInputFlatSchema(),
 	}, s.handleAvenorMessage)
 

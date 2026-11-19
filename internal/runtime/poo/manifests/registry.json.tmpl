@@ -2,7 +2,7 @@
   "version": 1,
   "tools": {
     "avenor_message": {
-      "description": "Send, ask, reply to or withdraw an Avenor message",
+      "description": "Tell, ask, reply to or withdraw an Avenor message",
       "command": [{{json .Executable}}, "message", {{json .AsksFlag}}],
       "env": {"AVENOR_BROKER_URL": "env:AVENOR_BROKER_URL", "AVENOR_RUN_ID": "env:AVENOR_RUN_ID", "AVENOR_BROKER_TOKEN": "env:AVENOR_BROKER_TOKEN"},
       "timeout": {{json .Timeout}},
