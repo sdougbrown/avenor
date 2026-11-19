@@ -144,7 +144,7 @@ Answer a pending permission request. The `option_id` comes from the `pending_per
 
 ### `avenor_message`
 
-Send a message to another run, withdraw a pending ask, resume a completed run, or deliver a control reply. Every action is explicit and every result states whether a failed ask can still be withdrawn.
+Tell, ask, reply to, resume or withdraw a message between runs, or deliver a control reply. Every action is explicit and every result states whether a failed ask can still be withdrawn.
 
 | `action` | Required fields | What it does |
 |---|---|---|

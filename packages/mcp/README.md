@@ -166,7 +166,7 @@ Returns `{ ok: true }` on success. Throws if no permission request is pending fo
 
 ### `message`
 
-Send a message to another run, withdraw a pending ask, resume a completed run, or deliver a control reply. Cross-variant argument rules are enforced by the shared router, so an argument outside the chosen action's field set is an error rather than a silent no-op.
+Tell, ask, reply to, resume or withdraw a message between runs, or deliver a control reply. Cross-variant argument rules are enforced by the shared router, so an argument outside the chosen action's field set is an error rather than a silent no-op.
 
 | `action` | Required fields | What it does |
 |---|---|---|
