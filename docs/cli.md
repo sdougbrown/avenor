@@ -489,8 +489,11 @@ reach the inbox the feed serves. The launch re-checks that the parent is still
 this supervisor's live binding: a binding retired between the read and the
 launch is refused rather than adopted. There is no flag for a parent run,
 host, supervisor, launch wrapper, roster file or backend; `--agent` selects a
-roster entry by name and every other launch field keeps the supervisor's own
-defaults. `--prompt` and `--prompt-stdin` are mutually exclusive.
+roster entry by name. The child runs the backend the conversation runs: a poo
+conversation spawns `poo` children, a pi conversation `pi` ones, and an OpenCode
+conversation `opencode-acp` ones. Every other launch field keeps the
+supervisor's own defaults. `--prompt` and `--prompt-stdin` are mutually
+exclusive.
 
 Results are the supervisor's spawn result as JSON, including `runtime_id`,
 `session_id`, `on_event` and `sentinel_file`. Pass `runtime_id` to `status`

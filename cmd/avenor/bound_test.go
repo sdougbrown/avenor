@@ -136,6 +136,9 @@ func TestBoundSpawnNamesTheBoundConversation(t *testing.T) {
 	if _, named := params["run_id"]; named {
 		t.Fatalf("spawn params carry a caller-chosen run id: %+v", params)
 	}
+	if params["backend"] != "poo" {
+		t.Fatalf("spawn backend = %v, want the harness the conversation runs", params["backend"])
+	}
 	if !strings.Contains(out.String(), `"runtime_id": "rt_child"`) {
 		t.Fatalf("spawn stdout = %s, want the supervisor's spawn result", &out)
 	}

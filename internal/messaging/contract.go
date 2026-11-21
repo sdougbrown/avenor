@@ -163,6 +163,22 @@ var bindHostSemantics = map[string]BindSemantics{
 	"poo":      BindMintsPerConversation,
 }
 
+// bindHostBackend names the backend that runs a host's own conversations. A
+// child spawned from a bound conversation starts on the same harness the
+// conversation runs, the way each host's own tooling spawns.
+var bindHostBackend = map[string]string{
+	"pi":       "pi",
+	"opencode": "opencode-acp",
+	"poo":      "poo",
+}
+
+// BindHostBackend returns the backend a host's conversations run on, and
+// whether the host names one.
+func BindHostBackend(host string) (string, bool) {
+	backend, ok := bindHostBackend[host]
+	return backend, ok
+}
+
 // BindHostSemantics returns how the bind policy serves host, and whether it
 // serves it at all.
 func BindHostSemantics(host string) (BindSemantics, bool) {

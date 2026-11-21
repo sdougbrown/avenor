@@ -203,6 +203,12 @@ func handleBoundSpawn(ctx context.Context, inv clicontract.Invocation, _ io.Writ
 		"dir":           inv.Flags["dir"],
 		"parent_run_id": bound.RunID,
 	}
+	// The child runs the harness the conversation runs, so a poo conversation
+	// spawns poo children and a pi conversation pi ones, as each host's own
+	// tooling does.
+	if backend, ok := messaging.BindHostBackend(coords.host); ok {
+		params["backend"] = backend
+	}
 	for _, field := range []struct{ flag, key string }{{"agent", "agent"}, {"label", "label"}} {
 		if value := inv.Flags[field.flag]; value != "" {
 			params[field.key] = value
