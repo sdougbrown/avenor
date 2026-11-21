@@ -116,13 +116,13 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 }
 
 // MessageBindLookup implements control.StableHandler for the owner-only
-// message_bind_lookup verb: it answers the live binding one (host, native
+// message_bind_lookup verb. It answers the live binding one (host, native
 // session) pair already has, without minting one. A registered command reads it
-// to reach the conversation its configured
-// feed bound; it never reclaims, remints or rotates, because only a bind may. A
-// pair this supervisor does not hold, and a binding whose run the broker reports
-// removed, expired or retired, is refused so the caller reports the missing
-// attachment instead of adopting a fresh identity the inbox does not read.
+// to reach the conversation its feed bound. It never reclaims, remints or
+// rotates, because only a bind may. A pair this supervisor does not hold is
+// refused, as is a binding whose run the broker reports removed, expired or
+// retired. The caller then reports the missing attachment instead of adopting a
+// fresh identity no inbox reads.
 func (s *Supervisor) MessageBindLookup(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
 	if err := bindCoordinates(caller, req); err != nil {
 		return messaging.MessageBindResult{}, err
