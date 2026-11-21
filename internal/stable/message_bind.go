@@ -12,16 +12,17 @@ import (
 // keeps an unbounded host from accumulating unbounded identities.
 const maxMessageBindings = 256
 
-// messageBindHosts are the hosts message_bind serves. The pi host reuses the
-// supervisor's own run under a reuse-only binding; every other host mints one
-// run per native conversation. A host without defined bind semantics is
-// refused rather than guessed at.
-var messageBindHosts = map[string]bool{"pi": true, "opencode": true}
-
 // messageBindKey identifies one bound conversation.
 type messageBindKey struct {
 	host      string
 	sessionID string
+}
+
+// bindReusesSupervisorRun reports whether host binds its one conversation to
+// the supervisor's own run instead of minting per conversation.
+func bindReusesSupervisorRun(host string) bool {
+	semantics, _ := messaging.BindHostSemantics(host)
+	return semantics == messaging.BindReusesSupervisorRun
 }
 
 func refuseBind(err error) (messaging.MessageBindResult, error) {
@@ -30,13 +31,14 @@ func refuseBind(err error) (messaging.MessageBindResult, error) {
 
 // MessageBind implements control.StableHandler for the owner-only message_bind
 // verb: it maps one (host, native session) pair to exactly one broker-owned
-// run and returns that run's messaging credentials. The pi host reuses the
-// supervisor's own run with a single conversation bound to it; every other
-// served host mints a run per conversation. A record the supervisor did not
-// mint is refused, never adopted. A minting host whose binding the broker has
-// confirmed dead — record removed, peer expired or retired — is reclaimed and
-// re-answered with a freshly minted identity; the pi host never remints and
-// fails closed instead.
+// run and returns that run's messaging credentials, under the bind policy in
+// internal/messaging. A reuse-only host binds the supervisor's own run with a
+// single conversation bound to it; every other served host mints a run per
+// conversation. A record the supervisor did not mint is refused, never
+// adopted. A minting host whose binding the broker has confirmed dead —
+// record removed, peer expired or retired — is reclaimed and re-answered with
+// a freshly minted identity; a reuse-only host never remints and fails closed
+// instead.
 func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
 	if caller.Kind != messaging.CallerOwner {
 		return messaging.MessageBindResult{}, &router.ToolError{
@@ -44,7 +46,7 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 			Message: "message_bind requires the owner connection",
 		}
 	}
-	if !messageBindHosts[req.Host] {
+	if _, served := messaging.BindHostSemantics(req.Host); !served {
 		return messaging.MessageBindResult{}, fmt.Errorf("message_bind does not serve host %q", req.Host)
 	}
 	if !messaging.ValidSessionID(req.SessionID) {
@@ -56,12 +58,13 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 		return refuseBind(fmt.Errorf("broker not available"))
 	}
 	key := messageBindKey{host: req.Host, sessionID: req.SessionID}
+	reuse := bindReusesSupervisorRun(req.Host)
 	if runID, ok := s.messageBinds[key]; ok {
 		res, err := s.messageBindCredentials(runID, false)
 		if err == nil {
 			return res, nil
 		}
-		if req.Host == "pi" {
+		if reuse {
 			return refuseBind(err)
 		}
 		// The broker has confirmed the mapped record removed, expired or
@@ -71,10 +74,10 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 		// ask edges — carries into the replacement.
 		delete(s.messageBinds, key)
 	}
-	if req.Host == "pi" {
+	if reuse {
 		for bound := range s.messageBinds {
-			if bound.host == "pi" {
-				return refuseBind(fmt.Errorf("host pi already binds session %q; one conversation per supervisor singleton", bound.sessionID))
+			if bindReusesSupervisorRun(bound.host) {
+				return refuseBind(fmt.Errorf("host %s already binds session %q; one conversation per supervisor singleton", bound.host, bound.sessionID))
 			}
 		}
 	}
@@ -85,10 +88,10 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 		}
 	}
 	var runID string
-	if req.Host == "pi" {
+	if reuse {
 		id, token := s.registerBrokerRun()
 		if id == "" || token == "" {
-			return refuseBind(fmt.Errorf("supervisor broker run unavailable; host pi cannot bind"))
+			return refuseBind(fmt.Errorf("supervisor broker run unavailable; host %s cannot bind", req.Host))
 		}
 		runID = id
 	} else {
@@ -99,7 +102,7 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 		runID = id
 	}
 	s.messageBinds[key] = runID
-	return s.messageBindCredentials(runID, req.Host != "pi")
+	return s.messageBindCredentials(runID, !reuse)
 }
 
 // mintBoundRun registers a fresh leased broker run for one conversation: a
@@ -122,11 +125,11 @@ func (s *Supervisor) mintBoundRun() (string, error) {
 // retired, or the id now holds a record this broker did not mint. Unavailable
 // records cannot revive under the scan: a lapsed lease or tombstone refuses
 // every renewal path, and an unowned record renews only its own credential.
-// Live bindings and the pi singleton are preserved. The caller holds
+// Live bindings and the reuse-only singleton are preserved. The caller holds
 // messageBindMu.
 func (s *Supervisor) reclaimUnavailableBinds() {
 	for key, runID := range s.messageBinds {
-		if key.host == "pi" {
+		if bindReusesSupervisorRun(key.host) {
 			continue
 		}
 		if _, ok := s.broker.OwnedReachableToken(runID); ok {
@@ -139,8 +142,8 @@ func (s *Supervisor) reclaimUnavailableBinds() {
 // messageBindCredentials reports the messaging credentials of a bound run.
 // The token comes from the broker's non-minting owned+reachable read, so a
 // run whose record is gone, expired, retired, or unowned is refused. The
-// caller decides whether that unavailability is a refusal (pi) or a
-// reclamation (minting hosts).
+// caller decides whether that unavailability is a refusal (a reuse-only host)
+// or a reclamation (minting hosts).
 func (s *Supervisor) messageBindCredentials(runID string, created bool) (messaging.MessageBindResult, error) {
 	token, ok := s.broker.OwnedReachableToken(runID)
 	if !ok {

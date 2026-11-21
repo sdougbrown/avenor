@@ -415,7 +415,7 @@ Success:
 {"jsonrpc":"2.0","id":1,"result":{"broker_url":"http://127.0.0.1:39039","run_id":"supervisor","run_token":"…","generation":"…","created":false}}
 ```
 
-- `host` — the native host the conversation belongs to. `pi` reuses the supervisor's own run: one conversation binds to the supervisor singleton, a second pi session is refused, and a lost supervisor run fails closed rather than reminting. `opencode` mints one run per conversation, reclaiming and reminting when the broker has confirmed a bound run dead. Any other host is refused.
+- `host` — the native host the conversation belongs to. `pi` reuses the supervisor's own run: one conversation binds to the supervisor singleton, a second pi session is refused, and a lost supervisor run fails closed rather than reminting. `opencode` and `poo` mint one run per conversation, reclaiming and reminting when the broker has confirmed a bound run dead. Any other host is refused.
 - `session_id` — the native session id: 1–200 bytes forming one safe filesystem path component, with no control or formatting characters.
 - `created` — whether the bind minted a new run. The pi host reuses the supervisor's existing run, so it reports `false`.
 
