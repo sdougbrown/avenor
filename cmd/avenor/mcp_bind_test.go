@@ -17,6 +17,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/internal/mcpserver"
+	"golang.org/x/sys/unix"
 )
 
 func TestMCPBindFlagError(t *testing.T) {
@@ -69,6 +70,10 @@ func TestValidateBindHandoff(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer read.Close()
+		// A host hands over a descriptor that is not already close-on-exec.
+		if _, err := unix.FcntlInt(write.Fd(), unix.F_SETFD, 0); err != nil {
+			t.Fatalf("clear descriptor flags: %v", err)
+		}
 		handoff, err := validateBindHandoff(int(write.Fd()))
 		if err != nil {
 			t.Fatalf("validateBindHandoff(pipe) = %v, want nil", err)
@@ -76,8 +81,36 @@ func TestValidateBindHandoff(t *testing.T) {
 		if handoff == nil {
 			t.Fatal("validateBindHandoff(pipe) = nil writer")
 		}
+		// Nothing this launch starts may keep the write end, or the host would
+		// wait for an EOF that never comes.
+		file, ok := handoff.(*os.File)
+		if !ok {
+			t.Fatalf("handoff = %T, want the descriptor", handoff)
+		}
+		flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFD, 0)
+		if err != nil {
+			t.Fatalf("read descriptor flags: %v", err)
+		}
+		if flags&unix.FD_CLOEXEC == 0 {
+			t.Fatal("the handoff descriptor is not close-on-exec")
+		}
 		if err := handoff.Close(); err != nil {
 			t.Fatalf("close handoff: %v", err)
+		}
+	})
+
+	t.Run("read-only fifo", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "handoff.fifo")
+		if err := unix.Mkfifo(path, 0o600); err != nil {
+			t.Fatalf("mkfifo: %v", err)
+		}
+		fifo, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK, 0)
+		if err != nil {
+			t.Fatalf("open fifo: %v", err)
+		}
+		defer fifo.Close()
+		if _, err := validateBindHandoff(int(fifo.Fd())); err == nil || !strings.Contains(err.Error(), "not writable") {
+			t.Fatalf("validateBindHandoff(read-only fifo) = %v, want the not-writable refusal", err)
 		}
 	})
 
@@ -466,5 +499,206 @@ func TestMCPSubprocessRefusesANonPipeHandoff(t *testing.T) {
 	}
 	if info.Size() != 0 {
 		t.Fatalf("the handoff file holds %d bytes; a credential must never reach a file", info.Size())
+	}
+}
+
+// fullPipe prepares a pipe whose write end is blocking (the mode a host hands
+// over) and full, so a launch that writes to it without a bound waits forever.
+// The reader stays open and never drains it.
+func fullPipe(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = read.Close() })
+	if err := write.SetWriteDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+		t.Fatalf("set fill deadline: %v", err)
+	}
+	if _, err := write.Write(make([]byte, 1<<20)); err == nil {
+		t.Fatal("filling the pipe did not stop the fill write")
+	}
+	if err := write.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear fill deadline: %v", err)
+	}
+	// os.Pipe hands back a non-blocking descriptor; a host's pipe is blocking.
+	if err := unix.SetNonblock(int(write.Fd()), false); err != nil {
+		t.Fatalf("restore blocking mode: %v", err)
+	}
+	return read, write
+}
+
+// TestMCPSubprocessWithAFullBlockingHandoffPipeExitsBounded pins the launch's
+// bound on a host that is not draining its pipe: the inherited descriptor is
+// blocking (Go's os.NewFile does not register a blocking descriptor with the
+// runtime poller), so a launch that cannot bound the write would wait forever.
+// It must instead exit on its own with the handoff refusal.
+func TestMCPSubprocessWithAFullBlockingHandoffPipeExitsBounded(t *testing.T) {
+	bin := buildAvenorBinary(t)
+	scratch, err := os.MkdirTemp("/tmp", "avmcp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	env := bindDriveEnv(scratch)
+	for _, dir := range []string{filepath.Join(scratch, "home"), filepath.Join(scratch, "avenor")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	socket := filepath.Join(scratch, "stable.sock")
+	startBindDriveSupervisor(t, bin, env, socket)
+
+	// Descriptor 3 carries a placeholder so the handoff lands on 4, where an
+	// autostarted child's own extra files cannot displace it.
+	placeholder, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer placeholder.Close()
+	_, handoffWrite := fullPipe(t)
+	cmd := exec.Command(bin, "mcp", "--transport", "stdio",
+		"--supervisor-socket", socket, "--no-autostart",
+		"--bind-host", "poo", "--bind-session", "ses_full",
+		"--bind-output-fd", "4")
+	cmd.Env = env
+	cmd.ExtraFiles = []*os.File{placeholder, handoffWrite}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start mcp: %v", err)
+	}
+	// The child holds the only writer now; the reader never drains it.
+	if err := handoffWrite.Close(); err != nil {
+		t.Fatalf("close the parent's handoff copy: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the launch succeeded with a full pipe nobody drains")
+		}
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the launch waited on a host that never drained its handoff pipe")
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "hand off to the launch pipe") || !strings.Contains(got, "not reading the handoff pipe") {
+		t.Fatalf("stderr = %q, want the handoff refusal naming the unread pipe", got)
+	}
+	if strings.Contains(got, "run_token") {
+		t.Fatalf("stderr = %q, want no credential", got)
+	}
+}
+
+// TestMCPSubprocessAutostartsAndHandsOff pins the normal launch a host uses when
+// it lets Avenor own the supervisor: the identity arrives on the inherited pipe,
+// the pipe reaches EOF — so the autostarted supervisor did not keep a write end —
+// and the protocol still round-trips on stdout.
+func TestMCPSubprocessAutostartsAndHandsOff(t *testing.T) {
+	bin := buildAvenorBinary(t)
+	scratch, err := os.MkdirTemp("/tmp", "avmcp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	env := bindDriveEnv(scratch)
+	for _, dir := range []string{filepath.Join(scratch, "home"), filepath.Join(scratch, "avenor")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	socket := filepath.Join(scratch, "autostart.sock")
+	// The supervisor this launch starts belongs to the drive, not the operator.
+	t.Cleanup(func() {
+		stop := exec.Command(bin, "control", "--socket", socket, "shutdown")
+		stop.Env = env
+		_ = stop.Run()
+	})
+
+	placeholder, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer placeholder.Close()
+	handoffRead, handoffWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handoffRead.Close()
+	cmd := exec.Command(bin, "mcp", "--transport", "stdio",
+		"--control-socket", socket,
+		"--bind-host", "poo", "--bind-session", "ses_autostart",
+		"--bind-output-fd", "4")
+	cmd.Env = env
+	cmd.ExtraFiles = []*os.File{placeholder, handoffWrite}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start mcp: %v", err)
+	}
+	if err := handoffWrite.Close(); err != nil {
+		t.Fatalf("close the parent's handoff copy: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	if err := handoffRead.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	line, err := io.ReadAll(handoffRead)
+	if err != nil {
+		t.Fatalf("read handoff to EOF: %v (stderr: %s)", err, stderr.String())
+	}
+	var identity map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(line), &identity); err != nil {
+		t.Fatalf("handoff line %q: %v", line, err)
+	}
+	if runID, _ := identity["run_id"].(string); runID == "" || runID == "supervisor" {
+		t.Fatalf("handoff identity = %v, want the conversation's own run", identity)
+	}
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "bind-drive", Version: "1"}, nil)
+	cs, err := client.Connect(ctx, &mcpsdk.IOTransport{Reader: stdout, Writer: stdin}, nil)
+	if err != nil {
+		t.Fatalf("connect over stdio: %v (stderr: %s)", err, stderr.String())
+	}
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("tools/list over stdio: %v (stderr: %s)", err, stderr.String())
+	}
+	if len(tools.Tools) == 0 {
+		t.Fatal("tools/list returned no tools")
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("mcp exited with %v; stderr: %s", err, stderr.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the server did not exit after stdin closed")
 	}
 }

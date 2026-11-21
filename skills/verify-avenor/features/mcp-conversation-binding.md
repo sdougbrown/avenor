@@ -17,14 +17,20 @@ avenor mcp --transport stdio \
 ```
 
 - The three bind flags travel together or not at all, only on `--transport stdio`.
-- `--bind-output-fd` names an inherited writable pipe. stdin, stdout and stderr
-  (`0`, `1`, `2`) are refused: they carry the MCP protocol and its diagnostics.
-  A regular file or a closed descriptor is refused before the bind, so a
-  credential can never be written to a file.
-- The launch writes `{"broker_url","run_id","run_token","generation","created"}`
-  as one JSON line on the pipe, closes it, and only then serves.
+- `--bind-output-fd` names an inherited pipe open for writing. stdin, stdout and
+  stderr (`0`, `1`, `2`) are refused: they carry the MCP protocol and its
+  diagnostics. A regular file, a closed descriptor, or a read-only pipe is
+  refused before the bind, so a credential can never be written to a file or to
+  the wrong side.
+- The launch makes the descriptor non-blocking (so Go registers it with the
+  runtime poller and the write has a deadline), marks it close-on-exec before it
+  can autostart a supervisor, writes
+  `{"broker_url","run_id","run_token","generation","created"}` as one JSON line,
+  and closes it. The host reads the line and then EOF: no process the launch
+  starts keeps the write end.
 - A launch that cannot bind or hand off exits non-zero; there is no unbound
-  fallback and no retry.
+  fallback and no retry. A host that stops reading the pipe fails the launch
+  inside the handoff window instead of stalling it.
 
 ## Typed refusals
 
@@ -35,6 +41,7 @@ avenor mcp --transport stdio \
 | stdio descriptor | 2 | `--bind-output-fd must name a writable inherited descriptor other than 0, 1 and 2, …` |
 | not a pipe | 2 | `--bind-output-fd <fd> is not a pipe; the conversation's credentials are handed over on a private pipe and nowhere else` |
 | closed descriptor | 2 | `--bind-output-fd <fd> is not an inherited open descriptor: …` |
+| read-only pipe | 2 | `--bind-output-fd <fd> is not writable; the handoff pipe must be open for writing` |
 | bind or handoff failure | 1 | `avenor mcp: conversation bind for host "poo" session "…": …` |
 
 No refusal text carries the credential.
@@ -253,7 +260,13 @@ neither the tool surface nor the child's stderr carries the `run_token`. The
 server exits 0 when stdin closes, and a relaunch of the same native session
 returns the same `run_id` and `run_token` with `created: false`.
 
-**Not covered by this drive.** The child-to-parent delivery path (a spawn's child
+**Not covered by this drive.** The launch's bound on a host that stops draining
+the pipe (an inherited blocking full pipe, which exits with
+`the host is not reading the handoff pipe`), the close-on-exec EOF proof with an
+autostarted supervisor, and the read-only descriptor refusal are proved by
+`TestMCPSubprocessWithAFullBlockingHandoffPipeExitsBounded`,
+`TestMCPSubprocessAutostartsAndHandsOff` and `TestValidateBindHandoff` in
+`cmd/avenor`. The child-to-parent delivery path (a spawn's child
 asking the bound run and getting an answer) and the supervisor's refusal of a
 stale parent after a supervisor restart are proved by
 `TestMCPDeclaredConversationIsTheChildParent`,

@@ -65,12 +65,15 @@ func boundResult(runID, token string) messaging.MessageBindResult {
 	}
 }
 
-// writeCloserSpy records whether the handoff pipe was closed.
+// writeCloserSpy records whether the handoff pipe was closed and whether the
+// launch bounded its write.
 type writeCloserSpy struct {
-	mu     sync.Mutex
-	writes int
-	closed bool
-	err    error
+	mu          sync.Mutex
+	writes      int
+	closed      bool
+	err         error
+	deadlineErr error
+	deadlineOK  bool
 }
 
 func (w *writeCloserSpy) Write(p []byte) (int, error) {
@@ -81,6 +84,13 @@ func (w *writeCloserSpy) Write(p []byte) (int, error) {
 		return 0, w.err
 	}
 	return len(p), nil
+}
+
+func (w *writeCloserSpy) SetWriteDeadline(time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deadlineOK = true
+	return w.deadlineErr
 }
 
 func (w *writeCloserSpy) Close() error {
@@ -458,6 +468,64 @@ func TestSpawnOnAnotherSupervisorNamesNoParent(t *testing.T) {
 	if !strings.Contains(diag.String(), "parent run run_poo lives on /run/own.sock") {
 		t.Fatalf("diagnostics did not name the run's supervisor: %s", diag)
 	}
+}
+
+// TestHandoffWithoutADeadlineFailsTheLaunch pins the bound the handoff needs: a
+// writer that cannot take a write deadline is refused before the write, never
+// written to without a bound.
+func TestHandoffWithoutADeadlineFailsTheLaunch(t *testing.T) {
+	cl := &bindingClient{}
+	cl.setResult(boundResult("run_poo", "tok_secret"))
+	handoff := &noDeadlineWriter{}
+	s, _ := declaredServer(t, cl, "poo", "ses_poo", handoff)
+	defer s.Close()
+
+	err := s.bindHostConversation(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cannot bound its write") {
+		t.Fatalf("bind = %v, want the unbounded-writer refusal", err)
+	}
+	if handoff.writes != 0 {
+		t.Fatalf("writes = %d, want none without a bound", handoff.writes)
+	}
+	if !handoff.closed {
+		t.Fatal("the handoff pipe was left open")
+	}
+}
+
+// TestHandoffDeadlineSetupErrorFailsTheLaunch pins that a failed deadline setup
+// is reported, not swallowed: without it the write it was meant to bound would
+// run unbounded.
+func TestHandoffDeadlineSetupErrorFailsTheLaunch(t *testing.T) {
+	cl := &bindingClient{}
+	cl.setResult(boundResult("run_poo", "tok_secret"))
+	handoff := &writeCloserSpy{deadlineErr: errors.New("descriptor is blocking")}
+	s, _ := declaredServer(t, cl, "poo", "ses_poo", handoff)
+	defer s.Close()
+
+	err := s.bindHostConversation(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "bound the handoff write") {
+		t.Fatalf("bind = %v, want the deadline setup failure", err)
+	}
+	writes, closed := handoff.state()
+	if writes != 0 || !closed {
+		t.Fatalf("writes = %d, closed = %v, want no write and a closed pipe", writes, closed)
+	}
+}
+
+// noDeadlineWriter is a writer with no deadline support at all.
+type noDeadlineWriter struct {
+	writes int
+	closed bool
+}
+
+func (w *noDeadlineWriter) Write(p []byte) (int, error) {
+	w.writes++
+	return len(p), nil
+}
+
+func (w *noDeadlineWriter) Close() error {
+	w.closed = true
+	return nil
 }
 
 // TestUnboundServerLeavesSpawnParamsAlone pins the preserved default: a server

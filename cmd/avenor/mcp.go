@@ -12,6 +12,7 @@ import (
 
 	"github.com/sdougbrown/avenor/internal/mcpserver"
 	clicontract "github.com/sdougbrown/cli-contract"
+	"golang.org/x/sys/unix"
 )
 
 type allowedHostList []string
@@ -204,22 +205,37 @@ func handleMCP(ctx context.Context, inv clicontract.Invocation, stderr io.Writer
 }
 
 // validateBindHandoff wraps fd as the pipe the conversation's identity is
-// handed over on. A descriptor that is not open, or not a pipe, is refused here:
-// a regular file would put the credentials on disk, a socket or terminal would
-// hand them to the wrong reader, and an absent descriptor would lose them
-// without telling the host.
+// handed over on. A descriptor that is not open, not a pipe, or not open for
+// writing is refused here: a regular file would put the credentials on disk, a
+// socket, terminal or read-only pipe would hand them to the wrong side, and an
+// absent descriptor would lose them without telling the host.
 func validateBindHandoff(fd int) (io.WriteCloser, error) {
-	file := os.NewFile(uintptr(fd), "avenor-conversation-bind")
-	info, err := file.Stat()
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
 	if err != nil {
-		_ = file.Close()
 		return nil, fmt.Errorf("--bind-output-fd %d is not an inherited open descriptor: %w", fd, err)
 	}
-	if info.Mode()&os.ModeNamedPipe == 0 {
-		_ = file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil, fmt.Errorf("--bind-output-fd %d is not an inherited open descriptor: %w", fd, err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFIFO {
 		return nil, fmt.Errorf("--bind-output-fd %d is not a pipe; the conversation's credentials are handed over on a private pipe and nowhere else", fd)
 	}
-	return file, nil
+	if flags&unix.O_ACCMODE == unix.O_RDONLY {
+		return nil, fmt.Errorf("--bind-output-fd %d is not writable; the handoff pipe must be open for writing", fd)
+	}
+	// Go's os.NewFile registers a descriptor with the runtime poller only when it
+	// is already non-blocking, and a host's pipe arrives blocking. Without the
+	// poller the handoff has no write deadline, so a full pipe nobody drains
+	// would stall the launch instead of failing it.
+	if err := unix.SetNonblock(fd, true); err != nil {
+		return nil, fmt.Errorf("--bind-output-fd %d cannot be made non-blocking: %w", fd, err)
+	}
+	// Nothing this launch starts may inherit the write end: an autostarted
+	// supervisor holding it would keep the host waiting for an EOF that never
+	// arrives.
+	unix.CloseOnExec(fd)
+	return os.NewFile(uintptr(fd), "avenor-conversation-bind"), nil
 }
 
 // resolveAuthToken applies the bearer-token precedence for HTTP transport:

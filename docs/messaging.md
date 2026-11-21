@@ -150,16 +150,19 @@ avenor mcp --transport stdio \
 ```
 
 The three flags travel together, only on the stdio transport, and the descriptor
-must be a private pipe the host inherited — never stdin, stdout or stderr, which
-carry the protocol and its diagnostics.
+must be a private pipe the host inherited, open for writing — never stdin, stdout
+or stderr, which carry the protocol and its diagnostics, and never a file.
 
 Before it serves a tool call, the launch binds the conversation on the supervisor
 it owns and writes the bind result (`broker_url`, `run_id`, `run_token`,
 `generation`, `created`) as one JSON line on that pipe, then closes it. The
+descriptor is close-on-exec before anything can be autostarted, so no process the
+launch starts keeps the write end and the host always reaches EOF. The
 credentials appear on the pipe and nowhere else: not in a log, argv, file, MCP
 tool result or child environment. A launch that cannot bind or hand off exits
 non-zero without serving, so the host learns the conversation has no inbox
-instead of holding an identity nothing reads. There is no unbound fallback and no
+instead of holding an identity nothing reads, and a host that stops reading the
+pipe fails the launch inside the handoff window instead of stalling it. There is no unbound fallback and no
 retry: a host that comes back relaunches, and a repeat bind of a live conversation
 returns the same identity with `created: false`.
 

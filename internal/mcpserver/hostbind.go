@@ -3,8 +3,10 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -98,19 +100,10 @@ func (b *hostBind) setIdentity(supervisorPath, runID string) {
 // one JSON line on the inherited pipe, then closes the pipe so the host reads a
 // complete identity followed by EOF. The credentials travel on that pipe and
 // nowhere else: not to a log, not to argv, not to a file, not to an MCP tool
-// result, and not into a child's environment. The write is one small line to a
-// private pipe, and its deadline keeps a host that stopped reading from stalling
-// the launch.
+// result, and not into a child's environment. The write is bounded so a host
+// that stopped reading fails the launch instead of stalling it.
 func (b *hostBind) handOff(res messaging.MessageBindResult) error {
-	line, err := json.Marshal(control.NewMessageBindResult(res))
-	if err == nil {
-		// A pipe can take a write deadline; a writer that cannot block, such
-		// as a regular file, needs none.
-		if deadline, ok := b.handoff.(interface{ SetWriteDeadline(time.Time) error }); ok {
-			_ = deadline.SetWriteDeadline(time.Now().Add(hostHandoffTimeout))
-		}
-		_, err = b.handoff.Write(append(line, '\n'))
-	}
+	err := b.writeLine(res)
 	// Close whatever the write did: the host reads a complete line and then
 	// EOF, or a truncated line that tells it the handoff failed.
 	if closeErr := b.closeHandoff(); err == nil {
@@ -118,6 +111,32 @@ func (b *hostBind) handOff(res messaging.MessageBindResult) error {
 	}
 	if err != nil {
 		return fmt.Errorf("conversation bind for host %q session %q: hand off to the launch pipe: %w", b.host, b.sessionID, err)
+	}
+	return nil
+}
+
+// writeLine puts the bind result on the pipe as one JSON line under a write
+// deadline. The deadline is not optional: a blocking write into a pipe nobody
+// drains has no bound otherwise, and the deadline is only available when the
+// writer is registered with the runtime poller — which is why the launch makes
+// the inherited descriptor non-blocking before it gets here.
+func (b *hostBind) writeLine(res messaging.MessageBindResult) error {
+	line, err := json.Marshal(control.NewMessageBindResult(res))
+	if err != nil {
+		return err
+	}
+	deadliner, ok := b.handoff.(interface{ SetWriteDeadline(time.Time) error })
+	if !ok {
+		return errors.New("the handoff pipe cannot bound its write")
+	}
+	if err := deadliner.SetWriteDeadline(time.Now().Add(hostHandoffTimeout)); err != nil {
+		return fmt.Errorf("bound the handoff write: %w", err)
+	}
+	if _, err := b.handoff.Write(append(line, '\n')); err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return fmt.Errorf("the host is not reading the handoff pipe within %s: %w", hostHandoffTimeout, err)
+		}
+		return err
 	}
 	return nil
 }

@@ -680,7 +680,7 @@ avenor mcp [flags]
 | `--mcp-launch-wrapper-policy` | `$AVENOR_MCP_LAUNCH_WRAPPER_POLICY`, then `$HOME/.avenor/launch-wrapper-policy.json` | Policy file forwarded to a supervisor this command autostarts; ignored when attaching to an existing supervisor (see [backends.md](backends.md#mcp-surfaces-operator-allowlist)) |
 | `--bind-host` | (none) | Native host conversation this server is launched for; its bound broker run becomes the children's parent. Requires `--bind-session` and `--bind-output-fd`, stdio only (see [messaging.md](messaging.md#mcp-conversation-launch)) |
 | `--bind-session` | (none) | Native session id of the conversation `--bind-host` names |
-| `--bind-output-fd` | (none) | Inherited writable pipe descriptor, other than `0`, `1` and `2`, that the conversation's credentials are handed over on as one JSON line; the server closes it |
+| `--bind-output-fd` | (none) | Inherited pipe descriptor open for writing, other than `0`, `1` and `2`, that the conversation's credentials are handed over on as one JSON line; the launch marks it close-on-exec, bounds the write, and closes it |
 
 ### Examples
 
