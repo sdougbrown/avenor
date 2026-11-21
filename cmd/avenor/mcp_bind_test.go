@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,23 @@ import (
 	"github.com/sdougbrown/avenor/internal/mcpserver"
 	"golang.org/x/sys/unix"
 )
+
+type bindDriveStderr struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *bindDriveStderr) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *bindDriveStderr) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func TestMCPBindFlagError(t *testing.T) {
 	for _, tc := range []struct {
@@ -290,7 +308,7 @@ func TestMCPSubprocessHandsOverTheConversationIdentity(t *testing.T) {
 	// The inherited pipe is the first extra file, so it is descriptor 3 in the
 	// child — a descriptor MCP does not read or write.
 	cmd.ExtraFiles = []*os.File{handoffWrite}
-	var stderr bytes.Buffer
+	var stderr bindDriveStderr
 	cmd.Stderr = &stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -638,7 +656,7 @@ func TestMCPSubprocessAutostartsAndHandsOff(t *testing.T) {
 		"--bind-output-fd", "4")
 	cmd.Env = env
 	cmd.ExtraFiles = []*os.File{placeholder, handoffWrite}
-	var stderr bytes.Buffer
+	var stderr bindDriveStderr
 	cmd.Stderr = &stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
