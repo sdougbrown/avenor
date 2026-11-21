@@ -904,6 +904,24 @@ func TestAwaitDiscoveryExplicitSocketBypassesScan(t *testing.T) {
 	}
 }
 
+// TestAwaitDiscoveryScansTheConversationSocketsRoot pins the one root rule: a
+// supervisor the feed started under $AVENOR_HOME/sockets is discoverable, so a
+// run it serves resolves by target like any other.
+func TestAwaitDiscoveryScansTheConversationSocketsRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AVENOR_HOME", root)
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	writeSocketLink(t, filepath.Join(root, "sockets"), "conversation.sock", server.socket())
+
+	var stdout, stderr bytes.Buffer
+	if got := awaitRunDeclared([]string{"run_1"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if stdout.String() != "TURN-DONE rt_1\n" {
+		t.Fatalf("stdout = %q, want the run the conversation supervisor serves", stdout.String())
+	}
+}
+
 func TestAwaitDiscoverySkipsDeadSockets(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

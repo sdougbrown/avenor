@@ -16,6 +16,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/runstate"
+	"github.com/sdougbrown/avenor/internal/supervisor"
 	clicontract "github.com/sdougbrown/cli-contract"
 )
 
@@ -227,11 +228,10 @@ func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target st
 }
 
 func awaitResolveTargetFromSockets(ctx context.Context, stderr io.Writer, target string) (awaitResolvedTarget, error) {
-	home, err := os.UserHomeDir()
+	dir, err := supervisor.SocketDir()
 	if err != nil {
 		return awaitResolvedTarget{}, err
 	}
-	dir := filepath.Join(home, ".avenor", "sockets")
 	entries, err := os.ReadDir(dir)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return awaitResolvedTarget{}, ctxErr
