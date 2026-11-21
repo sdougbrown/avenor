@@ -321,7 +321,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 		case <-exited:
 			// A competing starter may have won the bind. Re-check before
 			// declaring failure, and never unlink or shut down its socket.
-			return attachWinner(socketPath, opts)
+			return attachWinner(socketPath)
 		case <-deadline:
 			_ = cmd.Process.Kill()
 			<-exited
@@ -345,7 +345,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 							select {
 							case <-exited:
 								_ = cl.Close()
-								return attachWinner(socketPath, opts)
+								return attachWinner(socketPath)
 							default:
 								return &Lifecycle{
 									SocketPath: socketPath,
@@ -367,7 +367,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 								<-exited
 							}
 							if isOwnerCapabilityRejection(authErr) {
-								if winner, err := attachWinner(socketPath, opts); err == nil {
+								if winner, err := attachWinner(socketPath); err == nil {
 									return winner, nil
 								}
 							}
@@ -384,7 +384,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 							<-exited
 						}
 						_ = cl.Close()
-						return attachWinner(socketPath, opts)
+						return attachWinner(socketPath)
 					}
 				}
 				_ = cl.Close()
@@ -439,7 +439,7 @@ func Attach(socketPath string, probeDial func(socketPath string) (net.Conn, erro
 
 // attachWinner returns the shared lifecycle of the supervisor that holds
 // socketPath after this attempt's own child lost it.
-func attachWinner(socketPath string, opts Options) (*Lifecycle, error) {
+func attachWinner(socketPath string) (*Lifecycle, error) {
 	cl, state, err := Attach(socketPath, ProbeDial)
 	if state == Live {
 		return &Lifecycle{SocketPath: socketPath, Client: cl, Shared: true}, nil

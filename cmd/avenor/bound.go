@@ -241,10 +241,11 @@ func handleBoundStatus(ctx context.Context, inv clicontract.Invocation, _ io.Wri
 	if wait := inv.Flags["wait"]; wait != "" && wait != "turn_complete" {
 		return nil, usageErrorf("avenor status: --wait takes turn_complete")
 	}
-	// The wait bound is the flag's own; a zero would reach the supervisor as an
-	// unbounded wait instead of the short one the caller asked for.
+	// A supplied bound of zero would reach the supervisor as an unbounded wait,
+	// so the flag is refused rather than read as "no wait"; omitting it keeps
+	// the flag's own default.
 	if inv.Supplied["timeout-ms"] && inv.Ints["timeout-ms"] < 1 {
-		return nil, usageErrorf("avenor status: --timeout-ms must be at least 1; omit it to wait out the turn")
+		return nil, usageErrorf("avenor status: --timeout-ms must be at least 1; omit it to use the 600000 ms default")
 	}
 	c, _, err := attachBoundRead(ctx, coords)
 	if err != nil {
