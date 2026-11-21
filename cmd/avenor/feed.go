@@ -50,14 +50,11 @@ func handleFeedBroker(ctx context.Context, inv clicontract.Invocation, stderr io
 	brokerURL := orDefault(inv.Flags["broker-url"], os.Getenv(runtime.EnvBrokerURL))
 	runID := orDefault(inv.Flags["run-id"], os.Getenv(runtime.EnvBrokerRunID))
 	token := orDefault(inv.Flags["token"], os.Getenv(runtime.EnvBrokerToken))
-	coords, requested := boundCoordinatesFrom(inv)
+	coords, requested, err := boundOptionalCoordinates(inv, "avenor feed broker", "broker-url", "run-id", "token")
+	if err != nil {
+		return nil, err
+	}
 	if requested {
-		if err := coords.complete(); err != nil {
-			return nil, fmt.Errorf("avenor feed broker: %w", err)
-		}
-		if inv.Supplied["broker-url"] || inv.Supplied["run-id"] || inv.Supplied["token"] {
-			return nil, usageErrorf("avenor feed broker: --broker-url, --run-id and --token are mutually exclusive with --bind-host and --bind-session")
-		}
 		if coords.derived {
 			lifecycle, err := startOwnedConversationSupervisor(coords)
 			if err != nil {

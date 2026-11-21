@@ -54,14 +54,11 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 	// conversation through its live binding instead of a credential handed to
 	// it. Absent credentials alone never select that path: only the configured
 	// coordinates do, so an unconfigured call keeps failing as it always has.
-	coords, requested := boundCoordinatesFrom(inv)
+	coords, requested, err := boundOptionalCoordinates(inv, "avenor message", "broker-url", "token", "run-id")
+	if err != nil {
+		return nil, err
+	}
 	if requested {
-		if err := coords.complete(); err != nil {
-			return nil, fmt.Errorf("avenor message: %w", err)
-		}
-		if inv.Supplied["broker-url"] || inv.Supplied["token"] || inv.Supplied["run-id"] {
-			return nil, usageErrorf("avenor message: --broker-url, --token and --run-id are mutually exclusive with --bind-host and --bind-session")
-		}
 		c, bound, err := attachBoundRead(ctx, coords)
 		if err != nil {
 			return nil, fmt.Errorf("avenor message: %w", err)

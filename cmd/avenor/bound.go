@@ -300,13 +300,46 @@ func handleBoundResult(ctx context.Context, inv clicontract.Invocation, _ io.Wri
 // boundCommandCoordinates resolves the coordinates a bound command requires,
 // naming the command in the refusals so a model reading stderr knows which call
 // was misconfigured.
-func boundCommandCoordinates(inv clicontract.Invocation, command string) (boundCoordinates, error) {
+func boundCommandCoordinates(inv clicontract.Invocation, command string, credentialFlags ...string) (boundCoordinates, error) {
 	coords, requested := boundCoordinatesFrom(inv)
 	if !requested {
 		return coords, usageErrorf("%s: --bind-host and --bind-session (or %s and %s) are required", command, envBindHost, envBindSession)
+	}
+	if err := refuseCredentialFlags(inv, command, credentialFlags); err != nil {
+		return coords, err
 	}
 	if err := coords.complete(); err != nil {
 		return coords, fmt.Errorf("%s: %w", command, err)
 	}
 	return coords, nil
+}
+
+// boundOptionalCoordinates resolves a command's attachment when one is
+// configured, and leaves the command on its own credential path when none is.
+// The credential flags a command must not combine with the coordinates are
+// named by the caller, so one rule serves every configured command.
+func boundOptionalCoordinates(inv clicontract.Invocation, command string, credentialFlags ...string) (boundCoordinates, bool, error) {
+	coords, requested := boundCoordinatesFrom(inv)
+	if !requested {
+		return coords, false, nil
+	}
+	if err := refuseCredentialFlags(inv, command, credentialFlags); err != nil {
+		return coords, true, err
+	}
+	if err := coords.complete(); err != nil {
+		return coords, true, fmt.Errorf("%s: %w", command, err)
+	}
+	return coords, true, nil
+}
+
+// refuseCredentialFlags holds the one rule the configured commands share: a
+// call names its attachment one way, in the coordinates or in a credential
+// passed on the command line, never both.
+func refuseCredentialFlags(inv clicontract.Invocation, command string, credentialFlags []string) error {
+	for _, flag := range credentialFlags {
+		if inv.Supplied[flag] {
+			return usageErrorf("%s: --%s is mutually exclusive with --bind-host and --bind-session", command, flag)
+		}
+	}
+	return nil
 }

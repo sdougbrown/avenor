@@ -32,18 +32,18 @@ func refuseBind(err error) (messaging.MessageBindResult, error) {
 // bindCoordinates refuses a bind request the policy does not serve before any
 // map or broker read: the owner connection, a served host, and a native session
 // id the broker's ask records can name.
-func bindCoordinates(caller messaging.Caller, req messaging.MessageBindRequest) error {
+func bindCoordinates(caller messaging.Caller, req messaging.MessageBindRequest, verb string) error {
 	if caller.Kind != messaging.CallerOwner {
 		return &router.ToolError{
 			Code:    "not_permitted",
-			Message: "message_bind requires the owner connection",
+			Message: verb + " requires the owner connection",
 		}
 	}
 	if _, served := messaging.BindHostSemantics(req.Host); !served {
-		return fmt.Errorf("message_bind does not serve host %q", req.Host)
+		return fmt.Errorf("%s does not serve host %q", verb, req.Host)
 	}
 	if !messaging.ValidSessionID(req.SessionID) {
-		return fmt.Errorf("message_bind requires a native session id of 1-%d bytes forming one safe filesystem path component with no control or formatting characters", messaging.MaxSessionIDBytes)
+		return fmt.Errorf("%s requires a native session id of 1-%d bytes forming one safe filesystem path component with no control or formatting characters", verb, messaging.MaxSessionIDBytes)
 	}
 	return nil
 }
@@ -59,7 +59,7 @@ func bindCoordinates(caller messaging.Caller, req messaging.MessageBindRequest) 
 // a freshly minted identity; a reuse-only host never remints and fails closed
 // instead.
 func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
-	if err := bindCoordinates(caller, req); err != nil {
+	if err := bindCoordinates(caller, req, "message_bind"); err != nil {
 		return messaging.MessageBindResult{}, err
 	}
 	s.messageBindMu.Lock()
@@ -124,7 +124,7 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 // retired. The caller then reports the missing attachment instead of adopting a
 // fresh identity no inbox reads.
 func (s *Supervisor) MessageBindLookup(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
-	if err := bindCoordinates(caller, req); err != nil {
+	if err := bindCoordinates(caller, req, "message_bind_lookup"); err != nil {
 		return messaging.MessageBindResult{}, err
 	}
 	s.messageBindMu.Lock()

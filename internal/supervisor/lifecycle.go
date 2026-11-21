@@ -81,21 +81,9 @@ type Client interface {
 	Close() error
 }
 
-// Options are the injection points and launch settings a caller supplies when
-// it starts a supervisor. The zero value is the production configuration.
+// Options are the launch settings a caller supplies when it starts a
+// supervisor. The zero value is the production configuration.
 type Options struct {
-	// Exec builds the supervisor child command. It is exec.Command unless a
-	// test substitutes the binary under test.
-	Exec func(name string, args ...string) *exec.Cmd
-	// AfterReady runs once the child has proved it bound its socket, before the
-	// first identity probe. A no-op unless a test needs to interleave.
-	AfterReady func()
-	// ProbeDial classifies an existing control socket before a replacement is
-	// attempted. It is a bounded credential-free dial unless a test injects an
-	// outcome.
-	ProbeDial func(socketPath string) (net.Conn, error)
-	// StartupTimeout bounds how long a started child has to become ready.
-	StartupTimeout time.Duration
 	// ShutdownTimeout overrides the supervisor's --shutdown-timeout, so a
 	// caller whose own parent kills it after a grace period gets a shutdown
 	// that finishes inside it. Zero keeps the supervisor's default.
@@ -132,23 +120,6 @@ var (
 // holds a control socket path.
 const probeTimeout = 250 * time.Millisecond
 
-// withDefaults completes the zero value into the production configuration.
-func (o Options) withDefaults() Options {
-	if o.Exec == nil {
-		o.Exec = ExecCommand
-	}
-	if o.AfterReady == nil {
-		o.AfterReady = AfterReady
-	}
-	if o.ProbeDial == nil {
-		o.ProbeDial = ProbeDial
-	}
-	if o.StartupTimeout <= 0 {
-		o.StartupTimeout = StartupTimeout
-	}
-	return o
-}
-
 // Lifecycle is one launcher's hold on a supervisor: the child it started, or
 // the shared supervisor it attached to.
 type Lifecycle struct {
@@ -175,7 +146,6 @@ type Lifecycle struct {
 // already there, and returns the lifecycle. An empty socketPath names the
 // default per-process supervisor socket under the sockets root.
 func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyPath string, opts Options) (*Lifecycle, error) {
-	opts = opts.withDefaults()
 	// The launcher owns the socket's directory. A default socket needs the
 	// home root; a named one needs only its own parent, and must not require a
 	// home directory it will never write to.
@@ -207,7 +177,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 		_ = lockFile.Close()
 	}()
 
-	if cl, state, err := Attach(socketPath, opts.ProbeDial); state == Live {
+	if cl, state, err := Attach(socketPath, ProbeDial); state == Live {
 		return &Lifecycle{
 			SocketPath: socketPath,
 			Client:     cl,
@@ -242,7 +212,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 		args = append(args, "--shutdown-timeout", opts.ShutdownTimeout.String())
 	}
 
-	cmd := opts.Exec(exePath, args...)
+	cmd := ExecCommand(exePath, args...)
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if opts.ShutdownOnParentExit {
@@ -336,7 +306,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 	}()
 
 	backoff := 50 * time.Millisecond
-	deadline := time.After(opts.StartupTimeout)
+	deadline := time.After(StartupTimeout)
 	readyCh := ready
 	childReady := false
 
@@ -346,7 +316,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 			readyCh = nil
 			childReady = readyErr == nil
 			if childReady {
-				opts.AfterReady()
+				AfterReady()
 			}
 		case <-exited:
 			// A competing starter may have won the bind. Re-check before
@@ -355,7 +325,7 @@ func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyP
 		case <-deadline:
 			_ = cmd.Process.Kill()
 			<-exited
-			return nil, fmt.Errorf("supervisor startup timed out after %s", opts.StartupTimeout)
+			return nil, fmt.Errorf("supervisor startup timed out after %s", StartupTimeout)
 		default:
 		}
 
@@ -470,7 +440,7 @@ func Attach(socketPath string, probeDial func(socketPath string) (net.Conn, erro
 // attachWinner returns the shared lifecycle of the supervisor that holds
 // socketPath after this attempt's own child lost it.
 func attachWinner(socketPath string, opts Options) (*Lifecycle, error) {
-	cl, state, err := Attach(socketPath, opts.ProbeDial)
+	cl, state, err := Attach(socketPath, ProbeDial)
 	if state == Live {
 		return &Lifecycle{SocketPath: socketPath, Client: cl, Shared: true}, nil
 	}
