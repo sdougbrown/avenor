@@ -176,17 +176,18 @@ type Lifecycle struct {
 // default per-process supervisor socket under the sockets root.
 func Start(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyPath string, opts Options) (*Lifecycle, error) {
 	opts = opts.withDefaults()
-	if socketPath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("get home directory: %w", err)
-		}
-		socketPath = filepath.Join(home, ".avenor", "sockets", fmt.Sprintf("avenor-mcp-%d.sock", os.Getpid()))
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("get home directory: %w", err)
 	}
-	// The launcher owns the socket's directory, so a conversation's derived
-	// sockets root comes into being with the supervisor that serves it.
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0700); err != nil {
+
+	socketsDir := filepath.Join(home, ".avenor", "sockets")
+	if err := os.MkdirAll(socketsDir, 0700); err != nil {
 		return nil, fmt.Errorf("create sockets directory: %w", err)
+	}
+
+	if socketPath == "" {
+		socketPath = filepath.Join(socketsDir, fmt.Sprintf("avenor-mcp-%d.sock", os.Getpid()))
 	}
 
 	// The lock covers the health check/startup sequence, not the lifetime of

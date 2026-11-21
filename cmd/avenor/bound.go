@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/sdougbrown/avenor/client"
@@ -40,6 +41,12 @@ var startConversationSupervisor = supervisor.Start
 // socket names, or attaches to the one already running, and returns the
 // lifecycle the feed holds until it stops serving.
 func startOwnedConversationSupervisor(coords boundCoordinates) (*supervisor.Lifecycle, error) {
+	// A conversation's derived sockets root comes into being with the
+	// supervisor that serves it; the shared launcher keeps creating only the
+	// default root, because an operator who names a socket names its directory.
+	if err := os.MkdirAll(filepath.Dir(coords.socket), 0700); err != nil {
+		return nil, fmt.Errorf("create the conversation's sockets directory: %w", err)
+	}
 	return startConversationSupervisor(coords.socket, 0, "", supervisor.Options{
 		ShutdownTimeout:      conversationShutdownTimeout,
 		ShutdownOnParentExit: true,
