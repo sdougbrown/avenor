@@ -48,6 +48,29 @@ func mcpFlagError(transport string, allowedHosts []string) error {
 	return nil
 }
 
+// mcpBindFlagError rejects a conversation declaration the launch cannot make:
+// the three flags travel together, only on the stdio transport, and never on one
+// of the descriptors MCP itself reads or writes.
+func mcpBindFlagError(transport, host, session string, fd int, hostSet, sessionSet, fdSet bool) error {
+	declared := hostSet || sessionSet || fdSet
+	if !declared {
+		return nil
+	}
+	if !(hostSet && sessionSet && fdSet) {
+		return errors.New("--bind-host, --bind-session and --bind-output-fd are supplied together or not at all")
+	}
+	if transport != "stdio" {
+		return errors.New("--bind-host is only supported with --transport stdio, a transport that serves one conversation")
+	}
+	if host == "" || session == "" {
+		return errors.New("--bind-host and --bind-session require non-empty values")
+	}
+	if fd < 3 {
+		return errors.New("--bind-output-fd must name a writable inherited descriptor other than 0, 1 and 2, which carry the MCP protocol and its diagnostics")
+	}
+	return nil
+}
+
 // mcpMaxWaitError rejects a negative wait budget; the parse-level default is
 // 25s and an explicit 0 disables the clamp on both transports.
 func mcpMaxWaitError(value time.Duration) error {
@@ -102,6 +125,13 @@ func handleMCP(ctx context.Context, inv clicontract.Invocation, stderr io.Writer
 	if err := mcpFlagError(transport, allowedHosts); err != nil {
 		return nil, usageErrorf("avenor mcp: %v", err)
 	}
+	bindHost := inv.Flags["bind-host"]
+	bindSession := inv.Flags["bind-session"]
+	bindFD := inv.Ints["bind-output-fd"]
+	if err := mcpBindFlagError(transport, bindHost, bindSession, bindFD,
+		inv.Supplied["bind-host"], inv.Supplied["bind-session"], inv.Supplied["bind-output-fd"]); err != nil {
+		return nil, usageErrorf("avenor mcp: %v", err)
+	}
 	if err := mcpMaxWaitError(maxWait); err != nil {
 		return nil, usageErrorf("avenor mcp: %v", err)
 	}
@@ -125,6 +155,18 @@ func handleMCP(ctx context.Context, inv clicontract.Invocation, stderr io.Writer
 		return nil, fmt.Errorf("avenor mcp: mcp launch wrapper policy: %w", err)
 	}
 
+	// The declared conversation's credentials are handed to the host on the
+	// descriptor it inherited for that purpose. The server owns the writer from
+	// here: it writes the identity, closes the descriptor, and reports no
+	// credential anywhere else.
+	var handoff io.WriteCloser
+	if inv.Supplied["bind-output-fd"] {
+		handoff, err = validateBindHandoff(bindFD)
+		if err != nil {
+			return nil, usageErrorf("avenor mcp: %v", err)
+		}
+	}
+
 	s, err := newMCPServerFn(mcpserver.Options{
 		Transport:                  transport,
 		ControlSocket:              controlSocket,
@@ -137,8 +179,14 @@ func handleMCP(ctx context.Context, inv clicontract.Invocation, stderr io.Writer
 		AllowedHosts:               allowedHosts,
 		ControlClient:              nil,
 		MCPLaunchWrapperPolicyPath: mcpPolicyPath,
+		BindHost:                   bindHost,
+		BindSession:                bindSession,
+		BindHandoff:                handoff,
 	})
 	if err != nil {
+		if handoff != nil {
+			_ = handoff.Close()
+		}
 		return nil, fmt.Errorf("avenor mcp: %w", err)
 	}
 	defer s.Close()
@@ -153,6 +201,25 @@ func handleMCP(ctx context.Context, inv clicontract.Invocation, stderr io.Writer
 		}
 	}
 	return nil, nil
+}
+
+// validateBindHandoff wraps fd as the pipe the conversation's identity is
+// handed over on. A descriptor that is not open, or not a pipe, is refused here:
+// a regular file would put the credentials on disk, a socket or terminal would
+// hand them to the wrong reader, and an absent descriptor would lose them
+// without telling the host.
+func validateBindHandoff(fd int) (io.WriteCloser, error) {
+	file := os.NewFile(uintptr(fd), "avenor-conversation-bind")
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("--bind-output-fd %d is not an inherited open descriptor: %w", fd, err)
+	}
+	if info.Mode()&os.ModeNamedPipe == 0 {
+		_ = file.Close()
+		return nil, fmt.Errorf("--bind-output-fd %d is not a pipe; the conversation's credentials are handed over on a private pipe and nowhere else", fd)
+	}
+	return file, nil
 }
 
 // resolveAuthToken applies the bearer-token precedence for HTTP transport:

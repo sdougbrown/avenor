@@ -139,6 +139,39 @@ conversation's own broker run:
   run-id tail where the name alone is not unique — and a later rename
   outranks it.
 
+## MCP conversation launch
+
+A trusted host that owns a native conversation launches Avenor's MCP server for
+that one conversation:
+
+```sh
+avenor mcp --transport stdio \
+  --bind-host <host> --bind-session <native-session-id> --bind-output-fd <fd>
+```
+
+The three flags travel together, only on the stdio transport, and the descriptor
+must be a private pipe the host inherited — never stdin, stdout or stderr, which
+carry the protocol and its diagnostics.
+
+Before it serves a tool call, the launch binds the conversation on the supervisor
+it owns and writes the bind result (`broker_url`, `run_id`, `run_token`,
+`generation`, `created`) as one JSON line on that pipe, then closes it. The
+credentials appear on the pipe and nowhere else: not in a log, argv, file, MCP
+tool result or child environment. A launch that cannot bind or hand off exits
+non-zero without serving, so the host learns the conversation has no inbox
+instead of holding an identity nothing reads. There is no unbound fallback and no
+retry: a host that comes back relaunches, and a repeat bind of a live conversation
+returns the same identity with `created: false`.
+
+Every spawn the server forwards to that supervisor names the bound run as
+`parent_run_id`, so a child's messages reach the inbox the conversation consumes.
+A spawn aimed at another supervisor names no parent — that supervisor holds no
+record of the conversation — and is never asked to bind it. The supervisor is the
+one authority on the mapping: a parent run it no longer holds live (removed,
+expired, retired, or minted before a restart) is refused with `reconnect the host
+conversation to bind it again` and is never adopted into a fresh record, so a
+child never reports to a parent nothing reads.
+
 ## Child CLI messages
 
 A child with broker credentials can use `avenor message --action tell`,

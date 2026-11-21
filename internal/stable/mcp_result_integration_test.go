@@ -15,8 +15,10 @@ package stable
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +30,7 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/mcpserver"
 	"github.com/sdougbrown/avenor/internal/messaging"
@@ -298,17 +301,22 @@ func noteParentRun(note string) string {
 }
 
 // connectMCP declares one host conversation on a server over its supervisor and
-// returns the session a client drives it with.
-func connectMCP(t *testing.T, ctx context.Context, cl mcpserver.ControlClient, host, session string) *mcpsdk.ClientSession {
+// returns the session a client drives it with, plus the identity the launch
+// handed over on the private pipe. The line is read before the client connects:
+// the launch writes it before it serves anything.
+func connectMCP(t *testing.T, ctx context.Context, opts mcpserver.Options, host, session string) (*mcpsdk.ClientSession, messaging.MessageBindResult) {
 	t.Helper()
-	srv, err := mcpserver.NewServer(mcpserver.Options{
-		Transport:     "stdio",
-		NoAutostart:   true,
-		ControlClient: cl,
-		BindHost:      host,
-		BindSession:   session,
-		Stderr:        os.Stderr,
-	})
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = read.Close() })
+	opts.Transport, opts.NoAutostart = "stdio", true
+	opts.BindHost, opts.BindSession, opts.BindHandoff = host, session, write
+	if opts.Stderr == nil {
+		opts.Stderr = os.Stderr
+	}
+	srv, err := mcpserver.NewServer(opts)
 	if err != nil {
 		t.Fatalf("mcp server: %v", err)
 	}
@@ -317,13 +325,30 @@ func connectMCP(t *testing.T, ctx context.Context, cl mcpserver.ControlClient, h
 	serveCtx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
 	go func() { _ = srv.ServeTransport(serveCtx, serverTransport) }()
+
+	line, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatalf("read handoff: %v", err)
+	}
+	if len(line) == 0 {
+		t.Fatal("the launch handed over no identity: it failed before serving")
+	}
+	var handedControl control.MessageBindResult
+	if err := json.Unmarshal(line, &handedControl); err != nil {
+		t.Fatalf("handoff line: %v", err)
+	}
+	handed := handedControl.MessageBindResult()
+	if handed.RunID == "" || handed.RunToken == "" || handed.BrokerURL == "" || handed.Generation == "" {
+		t.Fatalf("handoff identity = %+v, want the bind result's five fields", handed)
+	}
+
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "poo-test", Version: "1"}, nil)
 	cs, err := client.Connect(serveCtx, clientTransport, nil)
 	if err != nil {
 		t.Fatalf("connect mcp client: %v", err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	return cs
+	return cs, handed
 }
 
 // spawnOverMCP drives the spawn tool and returns its structured result.
@@ -402,15 +427,11 @@ func TestMCPDeclaredConversationIsTheChildParent(t *testing.T) {
 
 	bound := map[string]messaging.MessageBindResult{}
 	for _, session := range []string{"ses_poo_a", "ses_poo_b"} {
-		res, err := cl.MessageBind(messaging.MessageBindRequest{Host: "poo", SessionID: session})
-		if err != nil {
-			t.Fatalf("message_bind %s: %v", session, err)
-		}
-		if !res.Created {
+		cs, identity := connectMCP(t, ctx, mcpserver.Options{ControlClient: cl}, "poo", session)
+		if !identity.Created {
 			t.Fatalf("bind %s reported created=false, want the conversation's own run", session)
 		}
-		bound[session] = res
-		cs := connectMCP(t, ctx, cl, "poo", session)
+		bound[session] = identity
 		spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "pony"})
 	}
 	if bound["ses_poo_a"].RunID == bound["ses_poo_b"].RunID {
@@ -534,12 +555,7 @@ func TestMCPDeclaredConversationSkipsAnAlternateSupervisor(t *testing.T) {
 		return child, nil
 	})
 	cl := main.connectClient()
-	bound, err := cl.MessageBind(messaging.MessageBindRequest{Host: "poo", SessionID: "ses_poo"})
-	if err != nil {
-		t.Fatalf("message_bind: %v", err)
-	}
-
-	cs := connectMCP(t, ctx, cl, "poo", "ses_poo")
+	cs, bound := connectMCP(t, ctx, mcpserver.Options{ControlClient: cl}, "poo", "ses_poo")
 	spawnOverMCP(t, ctx, cs, map[string]any{
 		"dir":           t.TempDir(),
 		"prompt":        "report",
@@ -561,5 +577,84 @@ func TestMCPDeclaredConversationSkipsAnAlternateSupervisor(t *testing.T) {
 	}
 	if record := main.sup.broker.GetRun(bound.RunID); record == nil {
 		t.Fatalf("the bound run %q is missing from its own supervisor", bound.RunID)
+	}
+}
+
+// TestMCPDeclaredConversationRefusesAStaleBinding drives the restart case end to
+// end: an MCP server binds its conversation at launch, the supervisor that
+// minted that binding is replaced on the same socket, and the server keeps
+// serving with the identity it handed over. A spawn must then be refused with
+// the reconnect instruction — never rebound, and never given a parent record the
+// replacement minted by that id — so no child starts against a parent nothing
+// consumes.
+func TestMCPDeclaredConversationRefusesAStaleBinding(t *testing.T) {
+	// A short avenor home keeps the tool-addressable socket path under the unix
+	// socket length limit, and the replacement needs the same path.
+	home, err := os.MkdirTemp("/tmp", "avb-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	sockets := filepath.Join(home, "sockets")
+	if err := os.MkdirAll(sockets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AVENOR_HOME", home)
+	socket := filepath.Join(sockets, "avenor-mcp-restart.sock")
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	var firstChildren atomic.Int32
+	first := newItestHarness(t, Config{ControlSocket: socket}, func(runtime.StartOptions, string) (runtime.Provider, error) {
+		firstChildren.Add(1)
+		return newConversationChild(), nil
+	})
+	cs, bound := connectMCP(t, ctx, mcpserver.Options{SupervisorSocket: socket}, "poo", "ses_poo")
+
+	// Replace the supervisor that minted the binding on the same socket.
+	first.shutdown("kill")
+	if err := first.sup.control.Stop(); err != nil {
+		t.Fatalf("stop first supervisor: %v", err)
+	}
+	var replacementChildren atomic.Int32
+	replacement := newItestHarness(t, Config{ControlSocket: socket}, func(runtime.StartOptions, string) (runtime.Provider, error) {
+		replacementChildren.Add(1)
+		return newConversationChild(), nil
+	})
+	if _, err := replacement.sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "poo", SessionID: "ses_poo"}); err != nil {
+		t.Fatalf("message_bind on the replacement: %v", err)
+	}
+
+	// The MCP server's cached connection died with the supervisor, so the first
+	// call may still report the transport; every call must be refused, and the
+	// supervisor's own refusal names the reconnect.
+	refused := false
+	var lastText string
+	for attempt := 0; attempt < 4 && !refused; attempt++ {
+		res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{Name: "spawn", Arguments: map[string]any{
+			"dir":     t.TempDir(),
+			"prompt":  "report",
+			"backend": "pony",
+		}})
+		if err != nil {
+			t.Fatalf("spawn tool call: %v", err)
+		}
+		if !res.IsError {
+			t.Fatalf("spawn after a supervisor replacement succeeded; a stale binding must be refused")
+		}
+		lastText = resultToolText(t, res)
+		refused = strings.Contains(lastText, "reconnect the host conversation")
+	}
+	if !refused {
+		t.Fatalf("spawn refusal = %q, want the reconnect instruction", lastText)
+	}
+	if n := firstChildren.Load(); n != 0 {
+		t.Fatalf("the first supervisor started %d children", n)
+	}
+	if n := replacementChildren.Load(); n != 0 {
+		t.Fatalf("the replacement started %d children for a stale binding", n)
+	}
+	if record := replacement.sup.broker.GetRun(bound.RunID); record != nil {
+		t.Fatalf("the replacement minted a ghost parent record for %q", bound.RunID)
 	}
 }

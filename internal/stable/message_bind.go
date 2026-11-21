@@ -157,3 +157,32 @@ func (s *Supervisor) messageBindCredentials(runID string, created bool) (messagi
 		Created:    created,
 	}, nil
 }
+
+// requireBoundParent refuses a parent that this supervisor no longer holds as a
+// native conversation's live binding. The lookup is non-minting: a binding the
+// supervisor does not map, or whose run the broker reports removed, expired or
+// retired, is refused so the host can reconnect and bind again, never adopted
+// into a fresh record that no consumer reads. The caller holds no lock; the bind
+// authority's own lock covers the map and the run's liveness together.
+func (s *Supervisor) requireBoundParent(runID string) error {
+	s.messageBindMu.Lock()
+	mapped := false
+	for _, bound := range s.messageBinds {
+		if bound == runID {
+			mapped = true
+			break
+		}
+	}
+	var tokenOK bool
+	if mapped {
+		_, tokenOK = s.broker.OwnedReachableToken(runID)
+	}
+	s.messageBindMu.Unlock()
+	switch {
+	case !mapped:
+		return fmt.Errorf("parent run %s is not a live conversation binding on this supervisor; reconnect the host conversation to bind it again", runID)
+	case !tokenOK:
+		return fmt.Errorf("bound parent run %s is expired or retired; reconnect the host conversation to bind it again", runID)
+	}
+	return nil
+}

@@ -16,11 +16,11 @@ var (
 	buildErr     error
 )
 
-// buildVerifyBinary builds the avenor binary once and caches the path so
-// that all verify tests share a single compilation. The binary is placed
-// in a process-level temp directory (not t.TempDir) so it survives across
-// test functions.
-func buildVerifyBinary(t *testing.T) string {
+// buildAvenorBinary builds the avenor binary once and caches the path so
+// that every test driving the real binary shares a single compilation. The
+// binary is placed in a process-level temp directory (not t.TempDir) so it
+// survives across test functions.
+func buildAvenorBinary(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
 		dir, err := os.MkdirTemp("", "avenor-verify-test-")
@@ -52,7 +52,7 @@ func writeVerifyFile(t *testing.T, dir, name, contents string) string {
 }
 
 func TestVerifyValidLoopConfig(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "loop.json", `{
 		"max_iterations": 3,
@@ -71,7 +71,7 @@ func TestVerifyValidLoopConfig(t *testing.T) {
 }
 
 func TestVerifyValidTeamConfig(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "team.json", `{
 		"pre": [{"name":"setup","prompt":"init"}],
@@ -90,7 +90,7 @@ func TestVerifyValidTeamConfig(t *testing.T) {
 }
 
 func TestVerifyInvalidTeamConfig(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "team.json", `{
 		"pre": [{"name":"setup","prompt":"init"}],
@@ -108,7 +108,7 @@ func TestVerifyInvalidTeamConfig(t *testing.T) {
 }
 
 func TestVerifyValidRoster(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "roster.json", `{
 		"planner": {"backend": "agy", "agent": "planner"},
@@ -127,7 +127,7 @@ func TestVerifyValidRoster(t *testing.T) {
 }
 
 func TestVerifyRosterWithEntryLookup(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "roster.json", `{
 		"planner": {"backend": "agy", "agent": "planner"}
@@ -144,7 +144,7 @@ func TestVerifyRosterWithEntryLookup(t *testing.T) {
 }
 
 func TestVerifyRosterEntryNotFound(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "roster.json", `{
 		"planner": {"backend": "agy", "agent": "planner"}
@@ -161,7 +161,7 @@ func TestVerifyRosterEntryNotFound(t *testing.T) {
 }
 
 func TestVerifyInvalidLoopConfig(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "loop.json", `{
 		"max_iterations": 3,
@@ -179,7 +179,7 @@ func TestVerifyInvalidLoopConfig(t *testing.T) {
 }
 
 func TestVerifyEmptyPhaseName(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "loop.json", `{
 		"max_iterations": 3,
@@ -197,7 +197,7 @@ func TestVerifyEmptyPhaseName(t *testing.T) {
 }
 
 func TestVerifyNoArgs(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	cmd := exec.Command(bin, "verify")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -209,7 +209,7 @@ func TestVerifyNoArgs(t *testing.T) {
 }
 
 func TestVerifyYAMLConfig(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "loop.yaml", "max_iterations: 3\nloop:\n  - name: test\n    prompt: run tests\n")
 
@@ -224,7 +224,7 @@ func TestVerifyYAMLConfig(t *testing.T) {
 }
 
 func TestVerifyTOMLConfig(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 	writeVerifyFile(t, dir, "loop.toml", "max_iterations = 3\n[[loop]]\nname = \"test\"\nprompt = \"run tests\"\n")
 
@@ -239,7 +239,7 @@ func TestVerifyTOMLConfig(t *testing.T) {
 }
 
 func TestVerifyNestedLoopFile(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	// Outer loop has a phase that delegates to a nested loop file.
@@ -271,7 +271,7 @@ func TestVerifyNestedLoopFile(t *testing.T) {
 }
 
 func TestVerifyNestedLoopFileInvalid(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	// Outer loop delegates to a nested loop file that has an invalid config.
@@ -298,7 +298,7 @@ func TestVerifyNestedLoopFileInvalid(t *testing.T) {
 }
 
 func TestVerifyLoopWithRosterAndRosterEntryRef(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	writeVerifyFile(t, dir, "roster.json", `{
@@ -321,7 +321,7 @@ func TestVerifyLoopWithRosterAndRosterEntryRef(t *testing.T) {
 }
 
 func TestVerifyLoopWithMissingRosterEntryRef(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	writeVerifyFile(t, dir, "roster.json", `{
@@ -344,7 +344,7 @@ func TestVerifyLoopWithMissingRosterEntryRef(t *testing.T) {
 }
 
 func TestVerifyFileNotFound(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	cmd := exec.Command(bin, "verify", "--dir", dir, "--loop-file", "nonexistent.json")
@@ -361,7 +361,7 @@ func TestVerifyFileNotFound(t *testing.T) {
 }
 
 func TestVerifyRosterEntryWithoutRosterFile(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	cmd := exec.Command(bin, "verify", "--roster-entry", "planner")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
@@ -373,7 +373,7 @@ func TestVerifyRosterEntryWithoutRosterFile(t *testing.T) {
 }
 
 func TestVerifyNestedTeamFile(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	// Outer team has a phase that delegates to a nested team file.
@@ -398,7 +398,7 @@ func TestVerifyNestedTeamFile(t *testing.T) {
 }
 
 func TestVerifyNestedTeamFileInvalid(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	// Outer team delegates to a nested team file that has an invalid config.
@@ -423,7 +423,7 @@ func TestVerifyNestedTeamFileInvalid(t *testing.T) {
 }
 
 func TestVerifyCrossReferencingConfigs(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	// Two config files that reference each other (A->B->A) exercises the seen
@@ -448,7 +448,7 @@ func TestVerifyCrossReferencingConfigs(t *testing.T) {
 }
 
 func TestVerifyCombinedLoopTeamRoster(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	dir := t.TempDir()
 
 	writeVerifyFile(t, dir, "roster.json", `{

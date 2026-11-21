@@ -419,7 +419,9 @@ func newMessagePreflightResult(res messaging.PreflightResult) MessagePreflightRe
 	return MessagePreflightResult{Protocol: res.Protocol, Generation: res.Generation}
 }
 
-func newMessageBindResult(res messaging.MessageBindResult) MessageBindResult {
+// NewMessageBindResult projects a bind result onto the wire shape: the five
+// fields a binding hands to its host.
+func NewMessageBindResult(res messaging.MessageBindResult) MessageBindResult {
 	return MessageBindResult{
 		BrokerURL:  res.BrokerURL,
 		RunID:      res.RunID,

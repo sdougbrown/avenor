@@ -678,6 +678,9 @@ avenor mcp [flags]
 | `--addr` | `127.0.0.1:3748` | Address to listen on for HTTP transport |
 | `--auth-token` | (none) | Bearer token for HTTP transport; defaults to `MCP_AUTH_TOKEN` env var |
 | `--mcp-launch-wrapper-policy` | `$AVENOR_MCP_LAUNCH_WRAPPER_POLICY`, then `$HOME/.avenor/launch-wrapper-policy.json` | Policy file forwarded to a supervisor this command autostarts; ignored when attaching to an existing supervisor (see [backends.md](backends.md#mcp-surfaces-operator-allowlist)) |
+| `--bind-host` | (none) | Native host conversation this server is launched for; its bound broker run becomes the children's parent. Requires `--bind-session` and `--bind-output-fd`, stdio only (see [messaging.md](messaging.md#mcp-conversation-launch)) |
+| `--bind-session` | (none) | Native session id of the conversation `--bind-host` names |
+| `--bind-output-fd` | (none) | Inherited writable pipe descriptor, other than `0`, `1` and `2`, that the conversation's credentials are handed over on as one JSON line; the server closes it |
 
 ### Examples
 
@@ -697,6 +700,14 @@ Connect to an existing supervisor:
 
 ```sh
 avenor mcp --transport stdio --supervisor-socket /tmp/avenor.sock --no-autostart
+```
+
+Serve one native host conversation and receive its messaging identity on an
+inherited pipe (descriptor 3 here), so children report to that conversation:
+
+```sh
+avenor mcp --transport stdio --supervisor-socket /tmp/avenor.sock --no-autostart \
+  --bind-host poo --bind-session session-abc --bind-output-fd 3
 ```
 
 See [mcp.md](mcp.md) for protocol details and client configuration.

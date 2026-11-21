@@ -1876,7 +1876,7 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}
-		return success(req.ID, newMessageBindResult(res))
+		return success(req.ID, NewMessageBindResult(res))
 	case "resume":
 		if s.stableHandler == nil {
 			return failure(req.ID, -32601, "method not found", nil)

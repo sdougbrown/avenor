@@ -272,6 +272,11 @@ type SpawnParams struct {
 	// fields, so none of it affects the idempotency parameter hash; each field
 	// is documented on resumeSpawn.
 	resume resumeSpawn
+	// boundParent marks ParentRunID as the launch-declared conversation binding
+	// an MCP surface forwarded, so the spawn requires a live binding of this
+	// supervisor instead of adopting a record by that id. It carries no JSON tag
+	// and is set only by SpawnMCP.
+	boundParent bool
 }
 
 // resumeSpawn groups the spawn parameters only the resume path sets. Folding
@@ -2044,15 +2049,26 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 
 	// Ensure the parent has a broker run for channel messaging and prepend
 	// the parent run ID to the child's prompt so it knows where to reply.
+	// A bound parent is the MCP surface's conversation binding: this supervisor
+	// must already hold it live, so a stale identity is refused here rather than
+	// adopted into a record nothing consumes. The child keeps no parent token
+	// for that route either — the bound conversation's credential stays with the
+	// host that consumes it.
 	var parentToken string
 	if params.ParentRunID != "" && s.broker != nil {
-		var err error
-		parentToken, _, err = s.broker.EnsureRun(params.ParentRunID, "")
-		if err != nil {
-			// A parent that registered itself through the broker's open route is
-			// not this supervisor's record to adopt, so the note carries the run ID
-			// without a credential the supervisor could vouch for.
-			fmt.Fprintf(s.stderrWriter(), "avenor stable: parent run %s left unadopted: %v; the child is told the parent's run ID only\n", params.ParentRunID, err)
+		if params.boundParent {
+			if err := s.requireBoundParent(params.ParentRunID); err != nil {
+				return SpawnResult{}, err
+			}
+		} else {
+			var err error
+			parentToken, _, err = s.broker.EnsureRun(params.ParentRunID, "")
+			if err != nil {
+				// A parent that registered itself through the broker's open route is
+				// not this supervisor's record to adopt, so the note carries the run ID
+				// without a credential the supervisor could vouch for.
+				fmt.Fprintf(s.stderrWriter(), "avenor stable: parent run %s left unadopted: %v; the child is told the parent's run ID only\n", params.ParentRunID, err)
+			}
 		}
 		parentNote := fmt.Sprintf("Your parent's broker run ID is %q. Report status updates, findings, and questions back to your parent run %q with your surface's own messaging tool: use the action your surface calls tell for a status update, and ask when you need a reply.\n\n", params.ParentRunID, params.ParentRunID)
 		promptText = parentNote + promptText
@@ -5970,6 +5986,11 @@ func (s *Supervisor) SpawnMCP(raw json.RawMessage) (any, error) {
 		return nil, errors.New("spawn_mcp: loop_file and team_file are not accepted; workflow spawns use the spawn verb")
 	}
 	s.applySpawnCallerParent(raw, &p)
+	// A non-empty parent on this verb is the conversation binding the MCP
+	// surface's launch declared, never a caller-chosen run id: the spawn requires
+	// this supervisor to hold it live, so a restart or replacement is reported to
+	// the host instead of minted into a ghost parent.
+	p.boundParent = p.ParentRunID != ""
 	gated, err := s.authorizeMCPLaunchWrapper(p)
 	if err != nil {
 		return nil, err

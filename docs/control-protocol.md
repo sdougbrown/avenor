@@ -334,6 +334,14 @@ This is the MCP-gated variant: the supervisor enforces its launch wrapper policy
 
 Requires ownership.
 
+A non-empty `parent_run_id` on this verb is the conversation binding an MCP
+launch declared: the supervisor requires it to be one of its own live bindings
+and refuses a stale one with `parent run <id> is not a live conversation binding
+on this supervisor; reconnect the host conversation to bind it again` or
+`bound parent run <id> is expired or retired; reconnect the host conversation to
+bind it again`, rather than adopting the id into a fresh record. The trusted
+`spawn` verb keeps adopting a named parent run.
+
 #### `list`
 
 ```json

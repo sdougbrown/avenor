@@ -98,6 +98,12 @@ type Options struct {
 	// conversation: the server spawns children exactly as it always has.
 	BindHost    string
 	BindSession string
+	// BindHandoff is the inherited private pipe the declared conversation's
+	// messaging credentials are written to, as one JSON line followed by EOF.
+	// It is required with BindHost and BindSession, and the server owns it:
+	// the handoff closes it. The credentials appear on that pipe alone — never
+	// in a log, argv, file, MCP tool result or child environment.
+	BindHandoff io.WriteCloser
 }
 
 type Server struct {
@@ -134,15 +140,13 @@ type Server struct {
 	messageSupervisorOrder []string
 
 	// hostBind is the trusted host conversation this server was launched for,
-	// nil when the launch declared none. hostBindMu guards the identity that
-	// binding resolved to: the supervisor it is bound on and its run.
-	hostBind      *hostBind
-	hostBindMu    sync.Mutex
-	hostBindPath  string
-	hostBindRunID string
-	// bindGate deduplicates conversation-bind diagnostics under its own note,
-	// so a spawn loop that keeps failing to bind cannot flood stderr.
-	bindGate diagnote.Gate
+	// nil when the launch declared none, together with the identity its one
+	// bind resolved to.
+	hostBind *hostBind
+	// unboundNoteGate deduplicates the note about a spawn this server cannot
+	// give a parent route, so a spawn loop aimed at another supervisor cannot
+	// flood stderr.
+	unboundNoteGate diagnote.Gate
 }
 
 type statusArgs struct {
@@ -267,7 +271,7 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.NoAutostart && opts.SupervisorSocket == "" && opts.ControlClient == nil {
 		return nil, fmt.Errorf("--no-autostart requires --supervisor-socket")
 	}
-	hostBind, err := newHostBind(opts.Transport, opts.BindHost, opts.BindSession)
+	hostBind, err := newHostBind(opts.Transport, opts.BindHost, opts.BindSession, opts.BindHandoff)
 	if err != nil {
 		return nil, err
 	}
@@ -1237,7 +1241,7 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	// on the supervisor that holds it: elsewhere no consumer serves that run, so
 	// the child starts without a parent route. parent_run_id is broker identity;
 	// the runtime parent (parent_id) stays this supervisor's own bookkeeping.
-	if parentRunID := s.boundParentRun(ctx, cl, supervisorPath); parentRunID != "" {
+	if parentRunID := s.boundParentRun(supervisorPath); parentRunID != "" {
 		params["parent_run_id"] = parentRunID
 	}
 
@@ -1823,10 +1827,18 @@ func (s *Server) Run() error {
 }
 
 // ServeTransport serves the MCP protocol over transport until ctx is done. A
-// declared host conversation is bound before the first call, so a spawn this
-// server serves names a parent the supervisor already minted.
+// declared host conversation is bound and handed to the launching host before
+// the first call is served, so every spawn this server forwards names the run
+// the conversation consumes and the host already holds.
 func (s *Server) ServeTransport(ctx context.Context, transport mcp.Transport) error {
-	s.bindHostConversation(ctx)
+	if err := s.bindHostConversation(ctx); err != nil {
+		// The launching host is reading the handoff pipe: close it so a failed
+		// launch reads EOF instead of waiting for this process to exit.
+		if s.hostBind != nil {
+			_ = s.hostBind.closeHandoff()
+		}
+		return err
+	}
 	return s.mcpServer.Run(ctx, transport)
 }
 
