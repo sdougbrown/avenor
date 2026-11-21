@@ -136,16 +136,11 @@ func (s *Supervisor) MessageBindLookup(caller messaging.Caller, req messaging.Me
 	if !mapped {
 		return refuseBind(fmt.Errorf("no live conversation binding for host %q session %q on this supervisor; the conversation's inbox feed must bind it first", req.Host, req.SessionID))
 	}
-	token, ok := s.broker.OwnedReachableToken(runID)
-	if !ok {
+	res, err := s.messageBindCredentials(runID, false)
+	if err != nil {
 		return refuseBind(fmt.Errorf("conversation binding for host %q session %q is expired or retired; the conversation's inbox feed must bind it again", req.Host, req.SessionID))
 	}
-	return messaging.MessageBindResult{
-		BrokerURL:  s.brokerURL(),
-		RunID:      runID,
-		RunToken:   token,
-		Generation: s.broker.Store().Generation(),
-	}, nil
+	return res, nil
 }
 
 // mintBoundRun registers a fresh leased broker run for one conversation: a
