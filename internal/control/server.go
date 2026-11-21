@@ -141,6 +141,11 @@ type StableHandler interface {
 	// attaches a receiver.
 	MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error)
 
+	// MessageBindLookup answers the live binding the same pair already has,
+	// without minting one. A registered command reads it to reach the
+	// conversation its configured feed bound; only a bind may mint.
+	MessageBindLookup(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error)
+
 	// TreeBudgetStatus reports tree-budget diagnostics. A supervisor without an
 	// active budget returns a degraded status map with its reason.
 	TreeBudgetStatus() any
@@ -1873,6 +1878,22 @@ func (s *ControlServer) dispatch(c *connState, req Request) Response {
 			return failure(req.ID, -32602, "invalid params", nil)
 		}
 		res, err := s.stableHandler.MessageBind(messaging.Caller{Kind: messaging.CallerOwner, RunID: messaging.SupervisorRunID}, p.request())
+		if err != nil {
+			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
+		}
+		return success(req.ID, NewMessageBindResult(res))
+	case "message_bind_lookup":
+		if !s.ensureOwner(c) {
+			return failure(req.ID, -32010, "permission_denied", nil)
+		}
+		if s.stableHandler == nil {
+			return failure(req.ID, -32601, "method not found", nil)
+		}
+		var p MessageBindParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return failure(req.ID, -32602, "invalid params", nil)
+		}
+		res, err := s.stableHandler.MessageBindLookup(messaging.Caller{Kind: messaging.CallerOwner, RunID: messaging.SupervisorRunID}, p.request())
 		if err != nil {
 			return failure(req.ID, -32000, err.Error(), authorityErrorData(err))
 		}

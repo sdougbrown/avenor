@@ -440,6 +440,16 @@ A connection without the owner grant is refused with `-32010` (`permission_denie
 
 For an authenticated owner, a missing stable handler (one-shot mode) returns `-32601` (`method not found`).
 
+#### `message_bind_lookup`
+
+Reads the live binding one native conversation already has, without binding it. The params and result are `message_bind`'s; `created` is always `false`. It is how a registered command on a configured host session reaches the conversation its feed bound: the read never reclaims, remints or rotates, so only a bind may change an identity.
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"message_bind_lookup","params":{"host":"poo","session_id":"sess_1"}}
+```
+
+A pair this supervisor does not map is refused with `-32000` and `data.code: refused`: `no live conversation binding for host "poo" session "sess_1" on this supervisor; the conversation's inbox feed must bind it first`. A binding whose run the broker reports removed, expired or retired is refused the same way: `conversation binding for host "poo" session "sess_1" is expired or retired; the conversation's inbox feed must bind it again`. Unserved hosts and invalid session ids are `invalid-request` exactly as in `message_bind`, and a connection without the owner grant is refused with `-32010` before the handler runs.
+
 #### `message_receive`, `message_peers`, `message_preflight`
 
 The read-only half of the typed messaging surface. They are ungated, like `status` and `result`, and answer the same snake_case DTOs (`messages`, `peers`, `protocol`/`generation`). `message_receive` is a blocking verb with the same rules as `message_wait`: a negative `timeout_ms` is `-32602`, a value above the ceiling is clamped to it, and the receive runs off the connection's read loop under the shared per-connection slot budget.

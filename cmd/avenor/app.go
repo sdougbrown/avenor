@@ -30,6 +30,9 @@ func app() *clicontract.App {
 			runCmd,
 			feedCommand(),
 			messageCommand(),
+			spawnCommand(),
+			statusCommand(),
+			resultCommand(),
 			{
 				Name:  "probe",
 				Short: "run a one-shot backend probe and write the transcript",

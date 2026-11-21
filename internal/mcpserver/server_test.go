@@ -165,6 +165,10 @@ func (f *fakeClient) Status(runtimeID string) (map[string]any, error) {
 	return f.statusResult, f.statusErr
 }
 
+// Identity is the identity probe the supervisor lifecycle makes; a fake
+// supervisor reports none.
+func (f *fakeClient) Identity() (string, error) { return "", nil }
+
 func (f *fakeClient) Result(runtimeID string) (map[string]any, error) {
 	f.resultCapturedRuntimeIDs = append(f.resultCapturedRuntimeIDs, runtimeID)
 	return f.resultResult, f.resultErr
@@ -426,7 +430,7 @@ func TestParallelSpawnLazilyStartsOneSharedSupervisor(t *testing.T) {
 		starts.Add(1)
 		startupEntered <- struct{}{}
 		<-releaseStartup
-		return &supervisorLifecycle{socketPath: socketPath, client: control}, nil
+		return &supervisorLifecycle{SocketPath: socketPath, Client: control}, nil
 	}
 
 	s, err := NewServer(Options{Transport: "stdio"})
@@ -924,7 +928,7 @@ func TestAvenorStatusListMCPShape(t *testing.T) {
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
 	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
-		t.Fatalf("connect client: %v", err)
+		t.Fatalf("connect Client: %v", err)
 	}
 	defer clientSession.Close()
 
@@ -1024,7 +1028,7 @@ func TestAvenorStatusListEmptyMCPShape(t *testing.T) {
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test-client", Version: "dev"}, nil)
 	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
-		t.Fatalf("connect client: %v", err)
+		t.Fatalf("connect Client: %v", err)
 	}
 	defer clientSession.Close()
 
@@ -1860,8 +1864,8 @@ func TestServerCloseWithLifecycle(t *testing.T) {
 	}
 
 	lc := &supervisorLifecycle{
-		socketPath: socketPath,
-		client:     fc,
+		SocketPath: socketPath,
+		Client:     fc,
 	}
 	s.lifecycle = lc
 
@@ -2046,7 +2050,7 @@ func TestAvenorSpawnRejectsMixedRosterSelectors(t *testing.T) {
 				t.Fatal("expected invalid roster selector")
 			}
 			if fake.spawnCapturedParams != nil {
-				t.Fatalf("invalid selector reached control client: %#v", fake.spawnCapturedParams)
+				t.Fatalf("invalid selector reached control Client: %#v", fake.spawnCapturedParams)
 			}
 		})
 	}
@@ -2675,8 +2679,8 @@ func TestSpawnAfterShutdownAutostartsNewSupervisor(t *testing.T) {
 		n := starts.Add(1)
 		policyPaths = append(policyPaths, mcpLaunchWrapperPolicyPath)
 		return &supervisorLifecycle{
-			socketPath: fmt.Sprintf("/tmp/avenor-restart-%d.sock", n),
-			client:     &spawnCountingClient{},
+			SocketPath: fmt.Sprintf("/tmp/avenor-restart-%d.sock", n),
+			Client:     &spawnCountingClient{},
 		}, nil
 	}
 
@@ -2757,8 +2761,8 @@ func TestSpawnAutostartForwardsMCPLaunchWrapperPolicyPath(t *testing.T) {
 	startSupervisorFunc = func(socketPath string, idleTimeout time.Duration, mcpLaunchWrapperPolicyPath string) (*supervisorLifecycle, error) {
 		gotPolicyPath = mcpLaunchWrapperPolicyPath
 		return &supervisorLifecycle{
-			socketPath: "/tmp/avenor-policy-forward.sock",
-			client:     &spawnCountingClient{},
+			SocketPath: "/tmp/avenor-policy-forward.sock",
+			Client:     &spawnCountingClient{},
 		}, nil
 	}
 
@@ -2789,7 +2793,7 @@ func TestOwnedLifecycleShutdownErrorReachesMCPCaller(t *testing.T) {
 	}
 	// An owned lifecycle takes the lifecycle shutdown path rather than the
 	// direct client path used by TestAvenorShutdownError above.
-	s.lifecycle = &supervisorLifecycle{client: fake}
+	s.lifecycle = &supervisorLifecycle{Client: fake}
 
 	_, _, err = s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{})
 	if !errors.Is(err, cause) {
@@ -2799,7 +2803,7 @@ func TestOwnedLifecycleShutdownErrorReachesMCPCaller(t *testing.T) {
 		t.Fatalf("shutdown error lacks MCP operation context: %v", err)
 	}
 	if s.lifecycle != nil || s.controlClient != nil || s.closed || s.defaultSupervisorPath != "" {
-		t.Fatalf("shutdown error retained closed lifecycle/client: lifecycle=%v client=%v closed=%v defaultPath=%q", s.lifecycle, s.controlClient, s.closed, s.defaultSupervisorPath)
+		t.Fatalf("shutdown error retained closed lifecycle/Client: lifecycle=%v client=%v closed=%v defaultPath=%q", s.lifecycle, s.controlClient, s.closed, s.defaultSupervisorPath)
 	}
 	if fake.closeCalls != 1 {
 		t.Fatalf("fake client Close calls = %d, want 1", fake.closeCalls)
@@ -3947,7 +3951,7 @@ func TestAvenorShutdownWithExplicitLifecyclePath(t *testing.T) {
 	}
 
 	// Inject lifecycle as if the MCP server had autostarted a supervisor at sockPath.
-	s.lifecycle = &supervisorLifecycle{socketPath: sockPath, client: lifecycleClient}
+	s.lifecycle = &supervisorLifecycle{SocketPath: sockPath, Client: lifecycleClient}
 	s.defaultSupervisorPath = sockPath
 
 	_, _, err = s.handleAvenorShutdown(context.Background(), nil, shutdownArgs{

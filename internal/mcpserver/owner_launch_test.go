@@ -13,6 +13,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/messaging"
+	"github.com/sdougbrown/avenor/internal/supervisor"
 )
 
 // requireAvenorBinary returns the real avenor binary. Launcher evidence is a
@@ -43,11 +44,11 @@ func requireAvenorBinary(t *testing.T) string {
 func startRealSupervisorServer(t *testing.T, socketPath string) *Server {
 	t.Helper()
 	binary := requireAvenorBinary(t)
-	origExec := execCommand
-	execCommand = func(_ string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(_ string, args ...string) *exec.Cmd {
 		return exec.Command(binary, args...)
 	}
-	t.Cleanup(func() { execCommand = origExec })
+	t.Cleanup(func() { supervisor.ExecCommand = origExec })
 
 	s, err := NewServer(Options{
 		Transport:     "stdio",
@@ -284,12 +285,12 @@ func TestMCPAttachReloadsRotatedOwnerRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load first record: %v", err)
 	}
-	pid := first.lifecycle.cmd.Process.Pid
+	pid := first.lifecycle.Cmd.Process.Pid
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill supervisor: %v", err)
 	}
-	<-first.lifecycle.exited
-	first.lifecycle.waited = true
+	<-first.lifecycle.Exited
+	first.lifecycle.Waited = true
 	_ = first.Close()
 	if _, err := os.Stat(socketPath + ".dead"); err == nil {
 		t.Fatal("SIGKILL wrote a tombstone; the replacement case would be masked")
@@ -323,12 +324,12 @@ func TestFreshLauncherRespawnsAfterSIGKILL(t *testing.T) {
 	if _, _, err := first.getClientForSupervisor(""); err != nil {
 		t.Fatalf("first autostart attach: %v", err)
 	}
-	pid := first.lifecycle.cmd.Process.Pid
+	pid := first.lifecycle.Cmd.Process.Pid
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill supervisor: %v", err)
 	}
-	<-first.lifecycle.exited
-	first.lifecycle.waited = true
+	<-first.lifecycle.Exited
+	first.lifecycle.Waited = true
 	_ = first.Close()
 
 	// A fresh server holds no handles to the dead child: its replacement

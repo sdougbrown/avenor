@@ -231,10 +231,10 @@ type errReader struct{ err error }
 
 func (e errReader) Read(p []byte) (int, error) { return 0, e.err }
 
-// TestReadMessageStdin pins the read helper's refusal paths that a real pipe
+// TestReadStdinText pins the read helper's refusal paths that a real pipe
 // cannot produce: a read error surfaces without sending.
-func TestReadMessageStdin(t *testing.T) {
-	if _, err := readMessageStdin(errReader{errors.New("read failed")}); err == nil || !strings.Contains(err.Error(), "read failed") {
+func TestReadStdinText(t *testing.T) {
+	if _, err := readStdinText("message stdin", errReader{errors.New("read failed")}); err == nil || !strings.Contains(err.Error(), "read failed") {
 		t.Fatalf("read error = %v, want it surfaced", err)
 	}
 }
