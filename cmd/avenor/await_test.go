@@ -904,6 +904,25 @@ func TestAwaitDiscoveryExplicitSocketBypassesScan(t *testing.T) {
 	}
 }
 
+// TestAwaitDiscoveryKeepsTheHomeRootWhenAVENORHomeMoves pins the plain caller:
+// moving the conversation sockets root under $AVENOR_HOME does not hide the
+// supervisors already published under ~/.avenor/sockets.
+func TestAwaitDiscoveryKeepsTheHomeRootWhenAVENORHomeMoves(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AVENOR_HOME", t.TempDir())
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	writeSocketLink(t, filepath.Join(home, ".avenor", "sockets"), "legacy.sock", server.socket())
+
+	var stdout, stderr bytes.Buffer
+	if got := awaitRunDeclared([]string{"run_1"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if stdout.String() != "TURN-DONE rt_1\n" {
+		t.Fatalf("stdout = %q, want the run published under the home root", stdout.String())
+	}
+}
+
 // TestAwaitDiscoveryScansTheConversationSocketsRoot pins the one root rule: a
 // supervisor the feed started under $AVENOR_HOME/sockets is discoverable, so a
 // run it serves resolves by target like any other.

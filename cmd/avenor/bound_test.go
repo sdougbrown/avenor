@@ -206,17 +206,22 @@ func TestBoundStatusAndResultReachTheRun(t *testing.T) {
 func TestBoundCommandsRefusePartialCoordinates(t *testing.T) {
 	handler := &boundHandler{bound: liveBinding()}
 	socket := startOwnerControlServer(t, handler)
-	for _, args := range [][]string{
-		{"spawn", "--socket", socket, "--prompt", "work", "--dir", t.TempDir()},
-		{"status", "--socket", socket, "--runtime", "rt_child"},
-		{"result", "--bind-host", "poo", "--runtime", "rt_child"},
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		// A socket alone names a supervisor, not a conversation.
+		{[]string{"spawn", "--socket", socket, "--prompt", "work", "--dir", t.TempDir()}, "names a supervisor without a conversation"},
+		{[]string{"status", "--socket", socket, "--runtime", "rt_child"}, "names a supervisor without a conversation"},
+		// Half a conversation names no session to serve.
+		{[]string{"result", "--bind-host", "poo", "--runtime", "rt_child"}, "required together"},
 	} {
 		var out, stderr bytes.Buffer
-		if code := runDeclared(args, &out, &stderr); code != 2 {
-			t.Fatalf("%v exit = %d, stderr = %s, want a usage refusal", args, code, &stderr)
+		if code := runDeclared(tc.args, &out, &stderr); code != 2 {
+			t.Fatalf("%v exit = %d, stderr = %s, want a usage refusal", tc.args, code, &stderr)
 		}
-		if !strings.Contains(stderr.String(), "required together") {
-			t.Fatalf("%v stderr = %s", args, &stderr)
+		if !strings.Contains(stderr.String(), tc.want) {
+			t.Fatalf("%v stderr = %s, want %q", tc.args, &stderr, tc.want)
 		}
 	}
 	if lookups, _, spawned := handler.calls(); lookups != 0 || spawned != 0 {
@@ -328,6 +333,30 @@ func TestBoundMessagePrefersCoordinatesOverInheritedCredentials(t *testing.T) {
 	}
 	if lookups, _, _ := handler.calls(); lookups != 1 {
 		t.Fatalf("lookups = %d, want the conversation's binding read", lookups)
+	}
+}
+
+// TestBoundMessageKeepsItsCredentialPathWithOnlyASocket pins the plain caller
+// this attachment must not disturb: a command that holds a supervisor socket in
+// its environment but names no conversation still uses its own broker
+// credentials.
+func TestBoundMessageKeepsItsCredentialPathWithOnlyASocket(t *testing.T) {
+	handler := &boundHandler{bound: liveBinding()}
+	socket := startOwnerControlServer(t, handler)
+	t.Setenv(envControlSocket, socket)
+	t.Setenv(envBindHost, "")
+	t.Setenv(envBindSession, "")
+	t.Setenv("AVENOR_BROKER_URL", "http://127.0.0.1:9")
+	t.Setenv("AVENOR_RUN_ID", "rt_plain")
+	t.Setenv("AVENOR_BROKER_TOKEN", "tok_plain")
+
+	var out, stderr bytes.Buffer
+	code := runDeclared([]string{"message", "--action=tell", "--target=x", "--message=x"}, &out, &stderr)
+	if code == 2 {
+		t.Fatalf("message exit = %d, stderr = %s, want the credential path, not a usage refusal", code, &stderr)
+	}
+	if lookups, _, _ := handler.calls(); lookups != 0 {
+		t.Fatalf("lookups = %d, want none: a socket alone names no conversation", lookups)
 	}
 }
 

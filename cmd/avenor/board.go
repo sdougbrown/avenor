@@ -28,11 +28,11 @@ func handleBoard(ctx context.Context, inv clicontract.Invocation, stderr io.Writ
 				scanDirs = append(scanDirs, board.ResolveHome(d))
 			}
 		}
-		// If no --scan and no --socket, default to the sockets root every
+		// If no --scan and no --socket, default to the sockets roots every
 		// supervisor publishes under.
 		if len(scanDirs) == 0 {
-			if dir, err := supervisor.SocketDir(); err == nil {
-				scanDirs = []string{dir}
+			if dirs, err := supervisor.SocketDirs(); err == nil {
+				scanDirs = dirs
 			}
 		}
 	}

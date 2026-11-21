@@ -48,6 +48,29 @@ func SocketDir() (string, error) {
 	return filepath.Join(home, "sockets"), nil
 }
 
+// SocketDirs returns the roots a supervisor socket is published under, in the
+// order a scan reads them: the default ~/.avenor/sockets root and the sockets
+// root the conversation rule names, which is the same directory unless
+// $AVENOR_HOME moves it. A reader that discovers supervisors scans both, so a
+// supervisor started before that root moved stays visible.
+func SocketDirs() ([]string, error) {
+	dirs := make([]string, 0, 2)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve the home directory for the sockets root: %w", err)
+	}
+	defaultDir := filepath.Join(home, ".avenor", "sockets")
+	dirs = append(dirs, defaultDir)
+	conversationDir, err := SocketDir()
+	if err != nil {
+		return nil, err
+	}
+	if conversationDir != defaultDir {
+		dirs = append(dirs, conversationDir)
+	}
+	return dirs, nil
+}
+
 // ConversationSocket returns the control socket of the supervisor that serves
 // one native host conversation. The feed that binds the conversation and every
 // command that reads its binding derive the same path, so a session reaches one

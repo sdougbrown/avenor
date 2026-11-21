@@ -70,15 +70,16 @@ type boundCoordinates struct {
 }
 
 // boundCoordinatesFrom reads the coordinates from a command's flags and their
-// environment defaults. requested reports whether the caller asked for a binding
-// at all: a command that names no coordinate keeps whatever path it had.
+// environment defaults. requested reports whether the caller named a
+// conversation: a socket alone names a supervisor, not a conversation, so a
+// command that holds one keeps the path it had before this attachment existed.
 func boundCoordinatesFrom(inv clicontract.Invocation) (coords boundCoordinates, requested bool) {
 	coords = boundCoordinates{
 		socket:  orDefault(inv.Flags["socket"], os.Getenv(envControlSocket)),
 		host:    orDefault(inv.Flags["bind-host"], os.Getenv(envBindHost)),
 		session: orDefault(inv.Flags["bind-session"], os.Getenv(envBindSession)),
 	}
-	return coords, coords.socket != "" || coords.host != "" || coords.session != ""
+	return coords, coords.host != "" || coords.session != ""
 }
 
 // complete resolves the coordinates into one attachment. A configured socket is
@@ -304,6 +305,9 @@ func handleBoundResult(ctx context.Context, inv clicontract.Invocation, _ io.Wri
 func boundCommandCoordinates(inv clicontract.Invocation, command string, credentialFlags ...string) (boundCoordinates, error) {
 	coords, requested := boundCoordinatesFrom(inv)
 	if !requested {
+		if coords.socket != "" {
+			return coords, usageErrorf("%s: a socket names a supervisor without a conversation; --bind-host and --bind-session (or %s and %s) are required too", command, envBindHost, envBindSession)
+		}
 		return coords, usageErrorf("%s: --bind-host and --bind-session (or %s and %s) are required", command, envBindHost, envBindSession)
 	}
 	if err := refuseCredentialFlags(inv, command, credentialFlags); err != nil {
