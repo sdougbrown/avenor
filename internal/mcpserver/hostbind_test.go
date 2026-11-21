@@ -129,6 +129,17 @@ func declaredServer(t *testing.T, cl ControlClient, host, session string, handof
 	return s, diag
 }
 
+func TestCloseBeforeServingClosesTheHandoff(t *testing.T) {
+	pipe := &writeCloserSpy{}
+	s, _ := declaredServer(t, &bindingClient{}, "poo", "ses_close", pipe)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if writes, closed := pipe.state(); writes != 0 || !closed {
+		t.Fatalf("after close: writes = %d, pipe closed = %v; want no writes and a closed pipe", writes, closed)
+	}
+}
+
 // bindDeclared runs the launch's one bind, the step ServeTransport performs
 // before it serves anything.
 func bindDeclared(t *testing.T, s *Server) {

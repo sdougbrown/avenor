@@ -402,13 +402,20 @@ func (s *Server) Close() error {
 	s.closed = true
 	s.supervisorMu.Unlock()
 
+	var handoffErr error
+	if s.hostBind != nil {
+		handoffErr = s.hostBind.closeHandoff()
+	}
+	var closeErr error
 	if lifecycle != nil {
-		return lifecycle.Close()
+		closeErr = lifecycle.Close()
+	} else if controlClient != nil {
+		closeErr = controlClient.Close()
 	}
-	if controlClient != nil {
-		return controlClient.Close()
+	if handoffErr != nil {
+		return errors.Join(handoffErr, closeErr)
 	}
-	return nil
+	return closeErr
 }
 
 func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolRequest, args statusArgs) (*mcp.CallToolResult, statusToolOutput, error) {
