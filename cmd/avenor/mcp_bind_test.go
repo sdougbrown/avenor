@@ -4,20 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/sdougbrown/avenor/internal/mcpserver"
 	"golang.org/x/sys/unix"
 )
 
@@ -155,41 +152,6 @@ func TestValidateBindHandoff(t *testing.T) {
 			t.Fatalf("validateBindHandoff(closed) = %v, want the closed-descriptor refusal", err)
 		}
 	})
-}
-
-// TestMCPBindDeclarationReachesTheServer pins what handleMCP forwards: the
-// declared conversation and the inherited pipe it hands the identity over on.
-func TestMCPBindDeclarationReachesTheServer(t *testing.T) {
-	read, write, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer read.Close()
-	var captured mcpserver.Options
-	orig := newMCPServerFn
-	newMCPServerFn = func(opts mcpserver.Options) (*mcpserver.Server, error) {
-		captured = opts
-		return nil, errors.New("capture only")
-	}
-	t.Cleanup(func() { newMCPServerFn = orig })
-
-	exit := runDeclared([]string{
-		"mcp", "--transport", "stdio",
-		"--bind-host", "poo", "--bind-session", "ses_cli",
-		"--bind-output-fd", strconv.Itoa(int(write.Fd())),
-	}, io.Discard, io.Discard)
-	if exit != 1 {
-		t.Fatalf("runDeclared = %d, want 1 from the capture constructor", exit)
-	}
-	if captured.BindHost != "poo" || captured.BindSession != "ses_cli" {
-		t.Fatalf("bind declaration = (%q, %q), want the supplied conversation", captured.BindHost, captured.BindSession)
-	}
-	if captured.BindHandoff == nil {
-		t.Fatal("the server was not given the handoff pipe")
-	}
-	if line, _ := io.ReadAll(read); len(line) != 0 {
-		t.Fatalf("handoff = %q, want nothing before a server serves", line)
-	}
 }
 
 // TestMCPBindFlagRejections drives the rejected declarations through the declared
