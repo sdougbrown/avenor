@@ -29,6 +29,25 @@ func refuseBind(err error) (messaging.MessageBindResult, error) {
 	return messaging.MessageBindResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
 }
 
+// bindCoordinates refuses a bind request the policy does not serve before any
+// map or broker read: the owner connection, a served host, and a native session
+// id the broker's ask records can name.
+func bindCoordinates(caller messaging.Caller, req messaging.MessageBindRequest) error {
+	if caller.Kind != messaging.CallerOwner {
+		return &router.ToolError{
+			Code:    "not_permitted",
+			Message: "message_bind requires the owner connection",
+		}
+	}
+	if _, served := messaging.BindHostSemantics(req.Host); !served {
+		return fmt.Errorf("message_bind does not serve host %q", req.Host)
+	}
+	if !messaging.ValidSessionID(req.SessionID) {
+		return fmt.Errorf("message_bind requires a native session id of 1-%d bytes forming one safe filesystem path component with no control or formatting characters", messaging.MaxSessionIDBytes)
+	}
+	return nil
+}
+
 // MessageBind implements control.StableHandler for the owner-only message_bind
 // verb: it maps one (host, native session) pair to exactly one broker-owned
 // run and returns that run's messaging credentials, under the bind policy in
@@ -40,17 +59,8 @@ func refuseBind(err error) (messaging.MessageBindResult, error) {
 // a freshly minted identity; a reuse-only host never remints and fails closed
 // instead.
 func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
-	if caller.Kind != messaging.CallerOwner {
-		return messaging.MessageBindResult{}, &router.ToolError{
-			Code:    "not_permitted",
-			Message: "message_bind requires the owner connection",
-		}
-	}
-	if _, served := messaging.BindHostSemantics(req.Host); !served {
-		return messaging.MessageBindResult{}, fmt.Errorf("message_bind does not serve host %q", req.Host)
-	}
-	if !messaging.ValidSessionID(req.SessionID) {
-		return messaging.MessageBindResult{}, fmt.Errorf("message_bind requires a native session id of 1-%d bytes forming one safe filesystem path component with no control or formatting characters", messaging.MaxSessionIDBytes)
+	if err := bindCoordinates(caller, req); err != nil {
+		return messaging.MessageBindResult{}, err
 	}
 	s.messageBindMu.Lock()
 	defer s.messageBindMu.Unlock()
@@ -103,6 +113,34 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 	}
 	s.messageBinds[key] = runID
 	return s.messageBindCredentials(runID, !reuse)
+}
+
+// MessageBindLookup implements control.StableHandler for the owner-only
+// message_bind_lookup verb. It answers the live binding one (host, native
+// session) pair already has, without minting one. A registered command reads it
+// to reach the conversation its feed bound. It never reclaims, remints or
+// rotates, because only a bind may. A pair this supervisor does not hold is
+// refused, as is a binding whose run the broker reports removed, expired or
+// retired. The caller then reports the missing attachment instead of adopting a
+// fresh identity no inbox reads.
+func (s *Supervisor) MessageBindLookup(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	if err := bindCoordinates(caller, req); err != nil {
+		return messaging.MessageBindResult{}, err
+	}
+	s.messageBindMu.Lock()
+	defer s.messageBindMu.Unlock()
+	if s.broker == nil {
+		return refuseBind(fmt.Errorf("broker not available"))
+	}
+	runID, mapped := s.messageBinds[messageBindKey{host: req.Host, sessionID: req.SessionID}]
+	if !mapped {
+		return refuseBind(fmt.Errorf("no live conversation binding for host %q session %q on this supervisor; the conversation's inbox feed must bind it first", req.Host, req.SessionID))
+	}
+	res, err := s.messageBindCredentials(runID, false)
+	if err != nil {
+		return refuseBind(fmt.Errorf("conversation binding for host %q session %q is expired or retired; the conversation's inbox feed must bind it again", req.Host, req.SessionID))
+	}
+	return res, nil
 }
 
 // mintBoundRun registers a fresh leased broker run for one conversation: a

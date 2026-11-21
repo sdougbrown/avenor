@@ -79,6 +79,10 @@ Event stream reads: `features/watch.md`. Permission answers:
 refusals, driven by the JSON-RPC bind script):
 `features/message-bind.md`.
 
+A configured host session's attachment (the feed's bind and the
+`spawn`/`status`/`result`/`message` reads, with no credential in argv or env):
+`features/bound-cli.md`.
+
 Stable handles over coordinates: sentinel file keys (`DONE`, `SESSION=`,
 `STOP_REASON=end_turn`), NDJSON event names (`session.start`,
 `session.end`, `avenor.turn.start`), control-socket JSON fields (`status`,

@@ -21,6 +21,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/supervisor"
 	"github.com/sdougbrown/avenor/internal/token"
 )
 
@@ -36,13 +37,13 @@ func TestStartSupervisorLeavesStaleSocketForChild(t *testing.T) {
 
 	// The child ControlServer.Start owns stale-path removal under its control
 	// lock. A failed parent spawn must leave that path untouched.
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
-	if _, err := startSupervisor(socketPath, 5*time.Second, ""); err == nil {
+	if _, err := startSupervisorFunc(socketPath, 5*time.Second, ""); err == nil {
 		t.Fatal("expected error from failed spawn")
 	}
 	if _, err := os.Stat(socketPath); err != nil {
@@ -55,13 +56,13 @@ func TestStartSupervisorLeavesStaleSocketForChild(t *testing.T) {
 func TestStartSupervisorForwardsLaunchWrapperPolicy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var capturedArgs []string
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		capturedArgs = args
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
-	defer func() { execCommand = origExec }()
-	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "/etc/avenor/policy.json")
+	defer func() { supervisor.ExecCommand = origExec }()
+	_, _ = startSupervisorFunc(filepath.Join(t.TempDir(), "s.sock"), 0, "/etc/avenor/policy.json")
 	joined := strings.Join(capturedArgs, " ")
 	if !strings.Contains(joined, "--mcp-launch-wrapper-policy /etc/avenor/policy.json") {
 		t.Fatalf("args = %v, want policy flag forwarded", capturedArgs)
@@ -73,13 +74,13 @@ func TestStartSupervisorForwardsLaunchWrapperPolicy(t *testing.T) {
 func TestStartSupervisorOmitsLaunchWrapperPolicyByDefault(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var capturedArgs []string
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		capturedArgs = args
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
-	defer func() { execCommand = origExec }()
-	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+	defer func() { supervisor.ExecCommand = origExec }()
+	_, _ = startSupervisorFunc(filepath.Join(t.TempDir(), "s.sock"), 0, "")
 	if strings.Contains(strings.Join(capturedArgs, " "), "mcp-launch-wrapper-policy") {
 		t.Fatalf("args = %v, want no policy flag", capturedArgs)
 	}
@@ -138,14 +139,14 @@ func TestSupervisorScrubChildEnv(t *testing.T) {
 			t.Setenv("AVENOR_TEST_UNRELATED_MARKER", "inherited-value")
 			tt.setup(t)
 			var child *exec.Cmd
-			origExec := execCommand
-			execCommand = func(string, ...string) *exec.Cmd {
+			origExec := supervisor.ExecCommand
+			supervisor.ExecCommand = func(string, ...string) *exec.Cmd {
 				child = exec.Command("/nonexistent/avenor-test-stub")
 				return child
 			}
-			t.Cleanup(func() { execCommand = origExec })
+			t.Cleanup(func() { supervisor.ExecCommand = origExec })
 
-			_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+			_, _ = startSupervisorFunc(filepath.Join(t.TempDir(), "s.sock"), 0, "")
 			if child == nil {
 				t.Fatal("startSupervisor never built a child command")
 			}
@@ -189,14 +190,14 @@ func TestSupervisorChildStripsEveryBrokerEnvName(t *testing.T) {
 		stripped = append(stripped, name)
 	}
 	var child *exec.Cmd
-	origExec := execCommand
-	execCommand = func(string, ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(string, ...string) *exec.Cmd {
 		child = exec.Command("/nonexistent/avenor-test-stub")
 		return child
 	}
-	t.Cleanup(func() { execCommand = origExec })
+	t.Cleanup(func() { supervisor.ExecCommand = origExec })
 
-	_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+	_, _ = startSupervisorFunc(filepath.Join(t.TempDir(), "s.sock"), 0, "")
 	if child == nil {
 		t.Fatal("startSupervisor never built a child command")
 	}
@@ -233,14 +234,14 @@ func TestSupervisorForwardsParentLinkWhenURLInEnv(t *testing.T) {
 			t.Setenv(token.EnvBrokerParentURL, tt.parentURL)
 			t.Setenv(token.EnvBrokerParentToken, "shared-link-credential")
 			var child *exec.Cmd
-			origExec := execCommand
-			execCommand = func(string, ...string) *exec.Cmd {
+			origExec := supervisor.ExecCommand
+			supervisor.ExecCommand = func(string, ...string) *exec.Cmd {
 				child = exec.Command("/nonexistent/avenor-test-stub")
 				return child
 			}
-			t.Cleanup(func() { execCommand = origExec })
+			t.Cleanup(func() { supervisor.ExecCommand = origExec })
 
-			_, _ = startSupervisor(filepath.Join(t.TempDir(), "s.sock"), 0, "")
+			_, _ = startSupervisorFunc(filepath.Join(t.TempDir(), "s.sock"), 0, "")
 			if child == nil {
 				t.Fatal("startSupervisor never built a child command")
 			}
@@ -275,10 +276,10 @@ func TestStartSupervisorDefaultSocketPath(t *testing.T) {
 	expectedPrefix := filepath.Join(expectedDir, "avenor-mcp-")
 	expectedSuffix := ".sock"
 
-	// Mock execCommand to capture the socket path
+	// Mock supervisor.ExecCommand to capture the socket path
 	var capturedSocket string
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		for i, a := range args {
 			if a == "--control-socket" && i+1 < len(args) {
 				capturedSocket = args[i+1]
@@ -286,7 +287,7 @@ func TestStartSupervisorDefaultSocketPath(t *testing.T) {
 		}
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
 	// Clean up any stale socket from the test
 	defer func() {
@@ -295,7 +296,7 @@ func TestStartSupervisorDefaultSocketPath(t *testing.T) {
 		}
 	}()
 
-	_, _ = startSupervisor("", 5*time.Second, "")
+	_, _ = startSupervisorFunc("", 5*time.Second, "")
 
 	if capturedSocket == "" {
 		t.Fatal("captured socket path is empty")
@@ -323,14 +324,14 @@ func TestStartSupervisorZeroIdleTimeoutOmitsFlag(t *testing.T) {
 	socketPath := filepath.Join(tmpDir, "test-zero-idle.sock")
 
 	var capturedArgs []string
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		capturedArgs = args
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
-	_, _ = startSupervisor(socketPath, 0, "")
+	_, _ = startSupervisorFunc(socketPath, 0, "")
 
 	for _, a := range capturedArgs {
 		if a == "--idle-timeout" {
@@ -346,14 +347,14 @@ func TestStartSupervisorNonZeroIdleTimeoutIncludesFlag(t *testing.T) {
 	defer os.Remove(socketPath)
 
 	var capturedArgs []string
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		capturedArgs = args
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
-	_, _ = startSupervisor(socketPath, 30*time.Minute, "")
+	_, _ = startSupervisorFunc(socketPath, 30*time.Minute, "")
 
 	found := false
 	for i, a := range capturedArgs {
@@ -385,13 +386,13 @@ func TestNewServerNoAutostartError(t *testing.T) {
 func TestNewServerAutostartFailsLazily(t *testing.T) {
 	// Autostart is lazy: construction succeeds, and the first control
 	// operation starts the supervisor and reports the startup failure.
-	origExec := execCommand
+	origExec := supervisor.ExecCommand
 	var execAttempts atomic.Int32
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		execAttempts.Add(1)
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
 	s, err := NewServer(Options{
 		Transport: "stdio",
@@ -423,9 +424,9 @@ func TestLifecycleShutdownNoProcess(t *testing.T) {
 	socketPath := filepath.Join(tmpDir, "avenor-mcp-test-noproc.sock")
 
 	lc := &supervisorLifecycle{
-		socketPath: socketPath,
-		cmd:        nil,
-		client:     nil,
+		SocketPath: socketPath,
+		Cmd:        nil,
+		Client:     nil,
 	}
 
 	if err := lc.Shutdown(); err != nil {
@@ -463,7 +464,7 @@ func TestOwnedLifecycleShutdownDoesNotUnlinkReplacement(t *testing.T) {
 	}
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	lc := &supervisorLifecycle{socketPath: socketPath, cmd: cmd, exited: exited}
+	lc := &supervisorLifecycle{SocketPath: socketPath, Cmd: cmd, Exited: exited}
 
 	if err := lc.Shutdown(); err != nil {
 		t.Fatalf("Shutdown: %v", err)
@@ -477,19 +478,19 @@ func TestStartSupervisorStartupTimeout(t *testing.T) {
 	tmpDir := t.TempDir()
 	socketPath := filepath.Join(tmpDir, "timeout-test.sock")
 
-	origTimeout := startupTimeout
-	startupTimeout = 100 * time.Millisecond
-	defer func() { startupTimeout = origTimeout }()
+	origTimeout := supervisor.StartupTimeout
+	supervisor.StartupTimeout = 100 * time.Millisecond
+	defer func() { supervisor.StartupTimeout = origTimeout }()
 
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		// Sleep long enough to trigger the timeout, but short enough
 		// that the test doesn't hang when Kill() is called.
 		return exec.Command("sleep", "10")
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
-	_, err := startSupervisor(socketPath, 0, "")
+	_, err := startSupervisorFunc(socketPath, 0, "")
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -544,31 +545,32 @@ func TestStartSupervisorReuseExistingSocket(t *testing.T) {
 	}()
 
 	// startSupervisor should detect the live socket and reuse it
-	// without spawning a new process (no execCommand call).
-	origExec := execCommand
+	// without spawning a new process (no supervisor.ExecCommand call).
+	origExec := supervisor.ExecCommand
 	execCalled := false
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		execCalled = true
 		return exec.Command("/nonexistent/avenor-test-stub")
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
-	lc, err := startSupervisor(socketPath, 0, "")
+	lc, err := startSupervisorFunc(socketPath, 0, "")
 	if err != nil {
 		t.Fatalf("startSupervisor: %v", err)
 	}
 	defer lc.Shutdown()
 
 	if execCalled {
-		t.Error("expected existing socket to be reused, but execCommand was called")
+		t.Error("expected existing socket to be reused, but supervisor.ExecCommand was called")
 	}
 
-	if lc.client == nil {
-		t.Fatal("expected non-nil client in lifecycle")
+	cl, ok := lc.Client.(*client.Client)
+	if !ok {
+		t.Fatalf("lifecycle client = %T, want the concrete control client", lc.Client)
 	}
 
 	// Verify the client actually works
-	status, err := lc.client.Status("")
+	status, err := cl.Status("")
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -656,8 +658,8 @@ func TestPreReadyWinnerIsSharedAndSurvivesLoserClose(t *testing.T) {
 	socketPath := filepath.Join(tmpDir, "winner.sock")
 
 	var winner net.Listener
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		var err error
 		winner, err = net.Listen("unix", socketPath)
 		if err != nil {
@@ -669,23 +671,23 @@ func TestPreReadyWinnerIsSharedAndSurvivesLoserClose(t *testing.T) {
 		return exec.Command("sleep", "0.1")
 	}
 	defer func() {
-		execCommand = origExec
+		supervisor.ExecCommand = origExec
 		if winner != nil {
 			_ = winner.Close()
 		}
 	}()
 
-	lifecycle, err := startSupervisor(socketPath, 0, "")
+	lifecycle, err := startSupervisorFunc(socketPath, 0, "")
 	if err != nil {
 		t.Fatalf("startSupervisor: %v", err)
 	}
-	if !lifecycle.shared {
+	if !lifecycle.Shared {
 		t.Fatal("starter classified a pre-ready competing winner as its child")
 	}
 	if err := lifecycle.Close(); err != nil {
 		t.Fatalf("close loser lifecycle: %v", err)
 	}
-	if cl, state, err := attachSupervisor(socketPath); state != supervisorLive {
+	if cl, state, err := supervisor.Attach(socketPath, supervisor.ProbeDial); state != supervisor.Live {
 		t.Fatalf("loser close shut down or removed the competing winner: %v", err)
 	} else {
 		_ = cl.Close()
@@ -752,12 +754,12 @@ func TestPostReadyReplacementIsShared(t *testing.T) {
 	defer childHoldReader.Close()
 	defer childHoldWriter.Close()
 
-	origExec := execCommand
-	origAfterReady := afterSupervisorReady
+	origExec := supervisor.ExecCommand
+	origAfterReady := supervisor.AfterReady
 	var spawnedChild *exec.Cmd
 	defer func() {
-		execCommand = origExec
-		afterSupervisorReady = origAfterReady
+		supervisor.ExecCommand = origExec
+		supervisor.AfterReady = origAfterReady
 	}()
 
 	parentReady := make(chan struct{})
@@ -765,11 +767,11 @@ func TestPostReadyReplacementIsShared(t *testing.T) {
 	var releaseProbeOnce sync.Once
 	release := func() { releaseProbeOnce.Do(func() { close(releaseProbe) }) }
 	defer release()
-	afterSupervisorReady = func() {
+	supervisor.AfterReady = func() {
 		close(parentReady)
 		<-releaseProbe
 	}
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestMCPPostReadyReplacementChild$")
 		spawnedChild = cmd
 		cmd.ExtraFiles = []*os.File{childClosedWriter, childHoldReader}
@@ -788,7 +790,7 @@ func TestPostReadyReplacementIsShared(t *testing.T) {
 	}
 	started := make(chan startResult, 1)
 	go func() {
-		lifecycle, err := startSupervisor(socketPath, 0, "")
+		lifecycle, err := startSupervisorFunc(socketPath, 0, "")
 		started <- startResult{lifecycle: lifecycle, err: err}
 	}()
 
@@ -829,7 +831,7 @@ func TestPostReadyReplacementIsShared(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("startSupervisor: %v", result.err)
 	}
-	if !result.lifecycle.shared {
+	if !result.lifecycle.Shared {
 		t.Fatal("starter classified a post-ready replacement as its child")
 	}
 	if spawnedChild == nil || spawnedChild.ProcessState == nil {
@@ -884,9 +886,9 @@ func TestCompetingLifecycleStartersConvergeOnWinner(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 	socketPath := filepath.Join(tmpDir, "winner.sock")
 
-	origExec := execCommand
+	origExec := supervisor.ExecCommand
 	var execCalls atomic.Int32
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		execCalls.Add(1)
 		cmd := exec.Command(os.Args[0], "-test.run=TestMCPSupervisorChild")
 		cmd.Env = append(os.Environ(),
@@ -895,7 +897,7 @@ func TestCompetingLifecycleStartersConvergeOnWinner(t *testing.T) {
 		)
 		return cmd
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
 	type result struct {
 		lifecycle *supervisorLifecycle
@@ -907,7 +909,7 @@ func TestCompetingLifecycleStartersConvergeOnWinner(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			defer wg.Done()
-			lifecycle, err := startSupervisor(socketPath, 0, "")
+			lifecycle, err := startSupervisorFunc(socketPath, 0, "")
 			results <- result{lifecycle: lifecycle, err: err}
 		}()
 	}
@@ -924,13 +926,13 @@ func TestCompetingLifecycleStartersConvergeOnWinner(t *testing.T) {
 	if got := execCalls.Load(); got != 1 {
 		t.Fatalf("child starts = %d, want 1", got)
 	}
-	if lifecycles[0].shared == lifecycles[1].shared {
+	if lifecycles[0].Shared == lifecycles[1].Shared {
 		t.Fatal("expected one owner and one shared lifecycle")
 	}
 
 	var owner, shared *supervisorLifecycle
 	for _, lifecycle := range lifecycles {
-		if lifecycle.shared {
+		if lifecycle.Shared {
 			shared = lifecycle
 		} else {
 			owner = lifecycle
@@ -939,7 +941,7 @@ func TestCompetingLifecycleStartersConvergeOnWinner(t *testing.T) {
 	if err := shared.Close(); err != nil {
 		t.Fatalf("close shared lifecycle: %v", err)
 	}
-	if winnerClient, state, err := attachSupervisor(socketPath); state != supervisorLive {
+	if winnerClient, state, err := supervisor.Attach(socketPath, supervisor.ProbeDial); state != supervisor.Live {
 		t.Fatalf("shared cleanup removed the winner socket: %v", err)
 	} else {
 		_ = winnerClient.Close()
@@ -990,15 +992,15 @@ func TestCompetingLifecycleAttachmentsDoNotRemoveWinner(t *testing.T) {
 		}
 	}()
 
-	first, err := startSupervisor(socketPath, 0, "")
+	first, err := startSupervisorFunc(socketPath, 0, "")
 	if err != nil {
 		t.Fatalf("first startSupervisor: %v", err)
 	}
-	second, err := startSupervisor(socketPath, 0, "")
+	second, err := startSupervisorFunc(socketPath, 0, "")
 	if err != nil {
 		t.Fatalf("second startSupervisor: %v", err)
 	}
-	if !first.shared || !second.shared {
+	if !first.Shared || !second.Shared {
 		t.Fatal("expected both starters to attach to the existing supervisor")
 	}
 
@@ -1010,7 +1012,7 @@ func TestCompetingLifecycleAttachmentsDoNotRemoveWinner(t *testing.T) {
 	if _, err := os.Stat(socketPath); err != nil {
 		t.Fatalf("winner socket removed by competing cleanup: %v", err)
 	}
-	if winnerClient, state, err := attachSupervisor(socketPath); state != supervisorLive {
+	if winnerClient, state, err := supervisor.Attach(socketPath, supervisor.ProbeDial); state != supervisor.Live {
 		t.Fatalf("winner supervisor is no longer healthy: %v", err)
 	} else {
 		_ = winnerClient.Close()
@@ -1025,7 +1027,7 @@ func TestLifecycleShutdownIsIdempotentAfterChildExit(t *testing.T) {
 	}
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	lc := &supervisorLifecycle{cmd: cmd, exited: exited, client: &fakeClient{}}
+	lc := &supervisorLifecycle{Cmd: cmd, Exited: exited, Client: &fakeClient{}}
 
 	for i := 0; i < 2; i++ {
 		done := make(chan error, 1)
@@ -1060,7 +1062,7 @@ func TestAuthenticateOwnChildRefusesAnotherOwnerRecord(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	defer cl.Close()
-	if err := authenticateOwnChild(cl, socket, os.Getpid()); !isOwnerRecordError(err) {
+	if err := supervisor.AuthenticateOwnChild(cl, socket, os.Getpid()); !supervisor.IsOwnerRecordError(err) {
 		t.Fatalf("authenticateOwnChild = %v, want a retryable record error", err)
 	}
 	if n := authCount(); n != 0 {
@@ -1072,14 +1074,14 @@ func TestStartSupervisorExitsDuringStartup(t *testing.T) {
 	tmpDir := t.TempDir()
 	socketPath := filepath.Join(tmpDir, "exit-test.sock")
 
-	origExec := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
+	origExec := supervisor.ExecCommand
+	supervisor.ExecCommand = func(name string, args ...string) *exec.Cmd {
 		// Command that exits immediately without creating a socket
 		return exec.Command("true")
 	}
-	defer func() { execCommand = origExec }()
+	defer func() { supervisor.ExecCommand = origExec }()
 
-	_, err := startSupervisor(socketPath, 0, "")
+	_, err := startSupervisorFunc(socketPath, 0, "")
 	if err == nil {
 		t.Fatal("expected error for supervisor exiting during startup")
 	}
@@ -1099,7 +1101,7 @@ func TestMCPAttachAfterSIGKILLUsesTypedOutcomes(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	t.Run("absent path is dead", func(t *testing.T) {
-		if _, state, err := attachSupervisor(filepath.Join(dir, "absent.sock")); state != supervisorDead || err == nil {
+		if _, state, err := supervisor.Attach(filepath.Join(dir, "absent.sock"), supervisor.ProbeDial); state != supervisor.Dead || err == nil {
 			t.Fatalf("state = %v err = %v, want dead", state, err)
 		}
 	})
@@ -1112,7 +1114,7 @@ func TestMCPAttachAfterSIGKILLUsesTypedOutcomes(t *testing.T) {
 		}
 		ln.(*net.UnixListener).SetUnlinkOnClose(false)
 		_ = ln.Close()
-		if _, state, _ := attachSupervisor(socket); state != supervisorDead {
+		if _, state, _ := supervisor.Attach(socket, supervisor.ProbeDial); state != supervisor.Dead {
 			t.Fatalf("state = %v, want dead", state)
 		}
 	})
@@ -1133,7 +1135,7 @@ func TestMCPAttachAfterSIGKILLUsesTypedOutcomes(t *testing.T) {
 				go func(c net.Conn) { _ = c.Close() }(conn)
 			}
 		}()
-		if _, state, err := attachSupervisor(socket); state != supervisorAuthRejected || !errors.Is(err, control.ErrOwnerRecordMissing) {
+		if _, state, err := supervisor.Attach(socket, supervisor.ProbeDial); state != supervisor.AuthRejected || !errors.Is(err, control.ErrOwnerRecordMissing) {
 			t.Fatalf("state = %v err = %v, want auth-rejected on the missing record", state, err)
 		}
 	})
@@ -1159,27 +1161,27 @@ func TestMCPAttachAfterSIGKILLUsesTypedOutcomes(t *testing.T) {
 				go serveOwnerAuthOnly(conn, other, nil)
 			}
 		}()
-		if _, state, err := attachSupervisor(socket); state != supervisorAuthRejected || !errors.Is(err, client.ErrOwnerUnauthenticated) {
+		if _, state, err := supervisor.Attach(socket, supervisor.ProbeDial); state != supervisor.AuthRejected || !errors.Is(err, client.ErrOwnerUnauthenticated) {
 			t.Fatalf("state = %v err = %v, want auth-rejected on the rejected capability", state, err)
 		}
 	})
 
 	t.Run("uncertain probe never spawns a replacement", func(t *testing.T) {
-		origDial := supervisorProbeDial
-		supervisorProbeDial = func(string) (net.Conn, error) {
+		origDial := supervisor.ProbeDial
+		supervisor.ProbeDial = func(string) (net.Conn, error) {
 			return nil, &net.OpError{Op: "dial", Err: syscall.ETIMEDOUT}
 		}
-		t.Cleanup(func() { supervisorProbeDial = origDial })
+		t.Cleanup(func() { supervisor.ProbeDial = origDial })
 
-		origExec := execCommand
+		origExec := supervisor.ExecCommand
 		execCalled := false
-		execCommand = func(string, ...string) *exec.Cmd {
+		supervisor.ExecCommand = func(string, ...string) *exec.Cmd {
 			execCalled = true
 			return exec.Command("true")
 		}
-		t.Cleanup(func() { execCommand = origExec })
+		t.Cleanup(func() { supervisor.ExecCommand = origExec })
 
-		_, err := startSupervisor(filepath.Join(dir, "uncertain.sock"), 0, "")
+		_, err := startSupervisorFunc(filepath.Join(dir, "uncertain.sock"), 0, "")
 		if err == nil {
 			t.Fatal("uncertain probe started a replacement")
 		}
@@ -1223,9 +1225,9 @@ func TestReplacementNotBlockedByMissingTombstone(t *testing.T) {
 				}
 			}
 
-			origExec := execCommand
-			t.Cleanup(func() { execCommand = origExec })
-			execCommand = func(string, ...string) *exec.Cmd {
+			origExec := supervisor.ExecCommand
+			t.Cleanup(func() { supervisor.ExecCommand = origExec })
+			supervisor.ExecCommand = func(string, ...string) *exec.Cmd {
 				cmd := exec.Command(os.Args[0], "-test.run=TestMCPSupervisorChild")
 				cmd.Env = append(os.Environ(),
 					"AVENOR_MCP_SUPERVISOR_CHILD=1",
@@ -1234,11 +1236,11 @@ func TestReplacementNotBlockedByMissingTombstone(t *testing.T) {
 				return cmd
 			}
 
-			lifecycle, err := startSupervisor(socket, 0, "")
+			lifecycle, err := startSupervisorFunc(socket, 0, "")
 			if err != nil {
 				t.Fatalf("startSupervisor: %v", err)
 			}
-			if lifecycle.shared {
+			if lifecycle.Shared {
 				t.Fatal("dead owner was attached instead of replaced")
 			}
 			if err := lifecycle.Close(); err != nil {
@@ -1333,25 +1335,25 @@ func TestNoLauncherUnlinksOwnerArtifacts(t *testing.T) {
 			tc.setup(t, socket)
 			before := snapshotLauncherArtifacts(t, socket)
 
-			origExec := execCommand
-			origTimeout := startupTimeout
+			origExec := supervisor.ExecCommand
+			origTimeout := supervisor.StartupTimeout
 			t.Cleanup(func() {
-				execCommand = origExec
-				startupTimeout = origTimeout
+				supervisor.ExecCommand = origExec
+				supervisor.StartupTimeout = origTimeout
 			})
 			switch tc.name {
 			case "spawn failure":
-				execCommand = func(string, ...string) *exec.Cmd {
+				supervisor.ExecCommand = func(string, ...string) *exec.Cmd {
 					return exec.Command("/nonexistent/avenor-test-stub")
 				}
 			case "child exits during startup":
-				execCommand = func(string, ...string) *exec.Cmd { return exec.Command("true") }
+				supervisor.ExecCommand = func(string, ...string) *exec.Cmd { return exec.Command("true") }
 			case "startup timeout":
-				startupTimeout = 100 * time.Millisecond
-				execCommand = func(string, ...string) *exec.Cmd { return exec.Command("sleep", "10") }
+				supervisor.StartupTimeout = 100 * time.Millisecond
+				supervisor.ExecCommand = func(string, ...string) *exec.Cmd { return exec.Command("sleep", "10") }
 			}
 
-			if _, err := startSupervisor(socket, 0, ""); err == nil {
+			if _, err := startSupervisorFunc(socket, 0, ""); err == nil {
 				t.Fatal("startSupervisor succeeded, want a failure")
 			}
 			after := snapshotLauncherArtifacts(t, socket)

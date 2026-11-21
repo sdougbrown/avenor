@@ -82,6 +82,10 @@ func (h *MessageHandler) MessageBind(messaging.Caller, messaging.MessageBindRequ
 	return messaging.MessageBindResult{}, fmt.Errorf("message_bind is not served by this handler")
 }
 
+func (h *MessageHandler) MessageBindLookup(messaging.Caller, messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	return messaging.MessageBindResult{}, fmt.Errorf("message_bind_lookup is not served by this handler")
+}
+
 func (h *MessageHandler) TreeBudgetStatus() any { return nil }
 
 func (h *MessageHandler) WaitForCapacityMS(int) error { return nil }

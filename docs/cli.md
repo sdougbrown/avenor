@@ -410,11 +410,120 @@ to other processes. `--timeout-ms` takes 0 to 600000, and the router refuses
 any other value with `invalid_request`. Zero or omission uses the shared default
 of 600 seconds.
 
+A host session that names its attachment coordinates instead (`--socket`,
+`--bind-host`, `--bind-session`) resolves the broker URL, run ID and token from
+the conversation's live binding for that call, so no credential reaches the
+command's arguments or environment. A session with only `--bind-host` and
+`--bind-session` reaches the supervisor derived for that conversation. See
+[bound conversations](#bound-conversations).
+
 Results are JSON with `action`, `outcome`, `text` and, where applicable,
 `message_id` and `reply`. Router outcomes exit 0, including `timed-out`: the
 ask remains open for a later reply. Refusals and transport errors exit 1;
 missing action or credentials exit 2. Router refusals include `code` and `text` on stdout. See [messaging.md](messaging.md)
 for the transport and addressing rules.
+
+## Bound conversations
+
+A configured host session — a plain `poo` session with a feed and registered
+commands, for example — reaches one supervisor through its native host name and
+native session ID, and optionally a control socket. They arrive as flags or as
+their environment defaults:
+
+| flag | environment | meaning |
+|---|---|---|
+| `--socket` | `AVENOR_SOCKET` | control socket of an explicitly configured supervisor |
+| `--bind-host` | `AVENOR_BIND_HOST` | native host the conversation belongs to, such as `poo` |
+| `--bind-session` | `AVENOR_BIND_SESSION` | native session ID of the conversation |
+
+With the host and session and no socket, the session needs no supervisor
+configuration: Avenor derives one socket per native conversation under its
+sockets root — `$AVENOR_HOME/sockets`, or `~/.avenor/sockets` when `AVENOR_HOME`
+is unset. The socket's name is an implementation detail of that derivation: the
+feed and every command of the session resolve the same one, and no flag,
+environment value or tool argument carries it.
+
+`avenor feed broker --bind-host poo --bind-session ID` derives the path, starts
+the supervisor if nothing serves it, binds the conversation once, and serves the
+inbox. Every other command derives the same path and only attaches: if the
+session's feed has not started its supervisor yet, `spawn`, `status`, `result`
+and `message` exit 1 with the derived path named and start nothing. A supervisor started that way belongs to the feed:
+the feed stops it when it stops serving, and the supervisor shuts down before its
+own children outlive the session. A feed that is killed outright cannot run that
+stop; on Linux the kernel tells the supervisor its launcher is gone, so it shuts
+itself down instead of outliving the session.
+
+With `--socket` (or `AVENOR_SOCKET`) the call uses that supervisor and nothing
+else: a socket that is not there is an error, and no command ever starts one.
+
+Each derived supervisor runs its own broker, so two sessions on derived sockets
+do not share an inbox hub. A session that must reach another one's runs needs
+them to reach one broker: an explicit configured socket, or a parent broker link
+in the feed's environment.
+
+The feed is the only consumer that binds. Every other command reads that binding
+without minting one, so the inbox and the commands always address the same run. A
+conversation the feed has not bound yet fails closed with `must bind it first`; a
+binding whose run the broker reports expired or retired fails with `bind it
+again`.
+
+A command that names a host without a session (or the reverse), or that passes
+both the coordinates and an explicit `--broker-url`, `--token` or `--run-id`,
+exits 2 without calling the supervisor. Credentials inherited from the
+environment do not conflict: a session that already holds them still reaches its
+conversation through the binding. The coordinates are configuration — a manifest
+fixes them in its argv and its env map, and no model-facing argument chooses
+them.
+
+## avenor spawn
+
+Spawn a child run on the conversation's bound supervisor:
+
+```sh
+avenor spawn --prompt "find the flaky test" --dir /work/checkout
+printf 'long task text\n' | avenor spawn --prompt-stdin --dir /work/checkout
+```
+
+The child's broker parent is the conversation's bound run, so its questions
+reach the inbox the feed serves. The launch re-checks that the parent is still
+this supervisor's live binding: a binding retired between the read and the
+launch is refused rather than adopted. There is no flag for a parent run,
+host, supervisor, launch wrapper, roster file or backend; `--agent` selects a
+roster entry by name. The child runs the backend the conversation runs: a poo
+conversation spawns `poo` children, a pi conversation `pi` ones, and an OpenCode
+conversation `opencode-acp` ones. Every other launch field keeps the
+supervisor's own defaults. `--prompt` and `--prompt-stdin` are mutually
+exclusive.
+
+Results are the supervisor's spawn result as JSON, including `runtime_id`,
+`session_id`, `on_event` and `sentinel_file`. Pass `runtime_id` to `status`
+and `result`.
+
+## avenor status
+
+Read one spawned run's status, optionally waiting its turn out first:
+
+```sh
+avenor status --runtime rt_01J9ZTFROM
+avenor status --runtime rt_01J9ZTFROM --wait turn_complete --timeout-ms 120000
+```
+
+`--wait` takes `turn_complete`, which waits through the supervisor's own
+bounded turn wait before the status is read. `--timeout-ms` defaults to 600000
+and must be at least 1 when given.
+The result is the supervisor's status snapshot as JSON: `status`, `phase`,
+`pending_permission`, `final_output` and the launch identity.
+
+## avenor result
+
+Read one spawned run's complete final reply:
+
+```sh
+avenor result --runtime rt_01J9ZTFROM
+```
+
+The result is `{"final_output": "…"}`. It is not a wait: call `status --wait
+turn_complete` first when the turn may still be running.
 
 ## avenor control
 

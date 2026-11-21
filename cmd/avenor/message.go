@@ -22,19 +22,19 @@ import (
 func messageCommand() *clicontract.Command {
 	return &clicontract.Command{
 		Name: "message", Short: "send messages as the current child run",
-		Flags: []clicontract.Flag{
-			{Name: "broker-url", Kind: clicontract.String, Usage: "broker URL (default: $AVENOR_BROKER_URL)"},
-			{Name: "run-id", Kind: clicontract.String, Usage: "caller run id (default: $AVENOR_RUN_ID)"},
-			{Name: "token", Kind: clicontract.String, Usage: "broker token (default: $AVENOR_BROKER_TOKEN; prefer the environment)"},
-			{Name: "action", Kind: clicontract.String, Usage: "tell, ask, reply or withdraw", Required: true},
-			{Name: "target", Kind: clicontract.String, Usage: "recipient run id or label"},
-			{Name: "message", Kind: clicontract.String, Usage: "message text"},
-			{Name: "message-stdin", Kind: clicontract.Bool, Usage: "read the message text from stdin to EOF (mutually exclusive with --message)"},
-			{Name: "reply-to", Kind: clicontract.String, Usage: "message id to reply to"},
-			{Name: "message-id", Kind: clicontract.String, Usage: "message id to withdraw"},
-			{Name: "timeout-ms", Kind: clicontract.Int, Usage: "wait in milliseconds (maximum 600000)"},
-			{Name: "asks-dir", Kind: clicontract.String, Usage: "directory of feed ask records"},
-		},
+		Flags: append(bindCoordinateFlags(),
+			clicontract.Flag{Name: "broker-url", Kind: clicontract.String, Usage: "broker URL (default: $AVENOR_BROKER_URL)"},
+			clicontract.Flag{Name: "run-id", Kind: clicontract.String, Usage: "caller run id (default: $AVENOR_RUN_ID)"},
+			clicontract.Flag{Name: "token", Kind: clicontract.String, Usage: "broker token (default: $AVENOR_BROKER_TOKEN; prefer the environment)"},
+			clicontract.Flag{Name: "action", Kind: clicontract.String, Usage: "tell, ask, reply or withdraw", Required: true},
+			clicontract.Flag{Name: "target", Kind: clicontract.String, Usage: "recipient run id or label"},
+			clicontract.Flag{Name: "message", Kind: clicontract.String, Usage: "message text"},
+			clicontract.Flag{Name: "message-stdin", Kind: clicontract.Bool, Usage: "read the message text from stdin to EOF (mutually exclusive with --message)"},
+			clicontract.Flag{Name: "reply-to", Kind: clicontract.String, Usage: "message id to reply to"},
+			clicontract.Flag{Name: "message-id", Kind: clicontract.String, Usage: "message id to withdraw"},
+			clicontract.Flag{Name: "timeout-ms", Kind: clicontract.Int, Usage: "wait in milliseconds (maximum 600000)"},
+			clicontract.Flag{Name: "asks-dir", Kind: clicontract.String, Usage: "directory of feed ask records"},
+		),
 		InputRules: []*clicontract.Rule{
 			clicontract.EnabledOn("message", clicontract.Not(clicontract.Truthy("message-stdin")), "--message and --message-stdin are mutually exclusive"),
 		},
@@ -50,6 +50,25 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 	url := orDefault(inv.Flags["broker-url"], os.Getenv(runtime.EnvBrokerURL))
 	token := orDefault(inv.Flags["token"], os.Getenv(runtime.EnvBrokerToken))
 	runID := orDefault(inv.Flags["run-id"], os.Getenv(runtime.EnvBrokerRunID))
+	// A command configured with the attachment's coordinates reaches the
+	// conversation through its live binding instead of a credential handed to
+	// it. Absent credentials alone never select that path: only the configured
+	// coordinates do, so an unconfigured call keeps failing as it always has.
+	coords, requested := boundCoordinatesFrom(inv)
+	if requested {
+		if err := coords.complete(); err != nil {
+			return nil, fmt.Errorf("avenor message: %w", err)
+		}
+		if inv.Supplied["broker-url"] || inv.Supplied["token"] || inv.Supplied["run-id"] {
+			return nil, usageErrorf("avenor message: --broker-url, --token and --run-id are mutually exclusive with --bind-host and --bind-session")
+		}
+		c, bound, err := attachBoundRead(ctx, coords)
+		if err != nil {
+			return nil, fmt.Errorf("avenor message: %w", err)
+		}
+		defer c.Close()
+		url, token, runID = bound.BrokerURL, bound.RunToken, bound.RunID
+	}
 	if url == "" || token == "" || runID == "" {
 		return nil, usageErrorf("avenor message: --broker-url, --token and --run-id (or their environment variables) are required")
 	}
@@ -65,17 +84,17 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 	stdinEnabled := inv.Supplied["message-stdin"] && inv.Bools["message-stdin"]
 	switch {
 	case stdinEnabled:
-		text, err := readMessageStdin(os.Stdin)
+		text, err := readStdinText("message stdin", os.Stdin)
 		if err != nil {
 			return nil, fmt.Errorf("avenor message: %w", err)
 		}
-		if err := validateMessageText("message stdin", text); err != nil {
+		if err := validateText("message stdin", text); err != nil {
 			return nil, fmt.Errorf("avenor message: %w", err)
 		}
 		input["message"] = text
 	case inv.Supplied["message"]:
 		text := inv.Flags["message"]
-		if err := validateMessageText("--message", text); err != nil {
+		if err := validateText("--message", text); err != nil {
 			return nil, fmt.Errorf("avenor message: %w", err)
 		}
 		input["message"] = text
@@ -123,22 +142,24 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 // smaller.
 const messageStdinLimit = 1 << 20
 
-// readMessageStdin reads message text to EOF without truncating it.
-func readMessageStdin(r io.Reader) (string, error) {
+// readStdinText reads a command's text input to EOF without truncating it. The
+// bound is the message body's, which is the largest text a model-facing
+// command takes.
+func readStdinText(source string, r io.Reader) (string, error) {
 	buf, err := io.ReadAll(io.LimitReader(r, messageStdinLimit+1))
 	if err != nil {
 		return "", err
 	}
 	if len(buf) > messageStdinLimit {
-		return "", fmt.Errorf("message stdin exceeds 1 MiB")
+		return "", fmt.Errorf("%s exceeds 1 MiB", source)
 	}
 	return string(buf), nil
 }
 
-// validateMessageText rejects message text that is not valid UTF-8 before it
-// reaches the transport, where JSON encoding would silently replace invalid
-// bytes with the Unicode replacement character.
-func validateMessageText(source, text string) error {
+// validateText rejects invalid UTF-8 before the transport sees it. JSON
+// encoding would otherwise replace those bytes with the Unicode replacement
+// character.
+func validateText(source, text string) error {
 	if !utf8.ValidString(text) {
 		return fmt.Errorf("%s is not valid UTF-8", source)
 	}
