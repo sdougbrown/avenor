@@ -35,9 +35,9 @@ func feedCommand() *clicontract.Command {
 
 // handleFeedBroker emits only feed records on stdout.
 //
-// The feed is the one attachment that binds: a session configured with the
-// conversation's coordinates binds its native conversation there once, then
-// serves the inbox with the credentials that bind returned. Every other consumer
+// The feed is the one attachment that binds. A session configured with the
+// conversation's coordinates binds once, then serves the inbox with the
+// credentials that bind returned. Every other consumer
 // reads that binding instead of minting one, so the inbox and the registered
 // commands always address the same run.
 //

@@ -156,9 +156,9 @@ func readStdinText(source string, r io.Reader) (string, error) {
 	return string(buf), nil
 }
 
-// validateText rejects text that is not valid UTF-8 before it reaches the
-// transport, where JSON encoding would silently replace invalid bytes with the
-// Unicode replacement character.
+// validateText rejects invalid UTF-8 before the transport sees it. JSON
+// encoding would otherwise replace those bytes with the Unicode replacement
+// character.
 func validateText(source, text string) error {
 	if !utf8.ValidString(text) {
 		return fmt.Errorf("%s is not valid UTF-8", source)

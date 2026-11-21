@@ -29,9 +29,9 @@ func refuseBind(err error) (messaging.MessageBindResult, error) {
 	return messaging.MessageBindResult{}, &router.ToolError{Code: "refused", Message: err.Error()}
 }
 
-// bindCoordinates refuses a bind request the policy does not serve, before any
-// map or broker read: the owner connection, a host the bind policy serves, and a
-// native session id the broker's ask records can name.
+// bindCoordinates refuses a bind request the policy does not serve before any
+// map or broker read: the owner connection, a served host, and a native session
+// id the broker's ask records can name.
 func bindCoordinates(caller messaging.Caller, req messaging.MessageBindRequest) error {
 	if caller.Kind != messaging.CallerOwner {
 		return &router.ToolError{
@@ -117,8 +117,8 @@ func (s *Supervisor) MessageBind(caller messaging.Caller, req messaging.MessageB
 
 // MessageBindLookup implements control.StableHandler for the owner-only
 // message_bind_lookup verb: it answers the live binding one (host, native
-// session) pair already has on this supervisor, without minting one. The read
-// is what a registered command uses to reach the conversation its configured
+// session) pair already has, without minting one. A registered command reads it
+// to reach the conversation its configured
 // feed bound; it never reclaims, remints or rotates, because only a bind may. A
 // pair this supervisor does not hold, and a binding whose run the broker reports
 // removed, expired or retired, is refused so the caller reports the missing
