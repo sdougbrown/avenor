@@ -306,6 +306,46 @@ func TestBoundMessageKeepsTheCredentialPathWithoutCoordinates(t *testing.T) {
 	}
 }
 
+// TestBoundMessagePrefersCoordinatesOverInheritedCredentials pins the rule a
+// session that already holds a broker credential needs: only a credential the
+// caller supplies conflicts with the coordinates. An inherited one stays put,
+// and the call reaches the conversation through its binding.
+func TestBoundMessagePrefersCoordinatesOverInheritedCredentials(t *testing.T) {
+	handler := &boundHandler{bound: liveBinding()}
+	socket := startOwnerControlServer(t, handler)
+	t.Setenv("AVENOR_BROKER_URL", "http://127.0.0.1:1")
+	t.Setenv("AVENOR_RUN_ID", "rt_inherited")
+	t.Setenv("AVENOR_BROKER_TOKEN", "tok_inherited")
+	t.Setenv(envBindHost, "poo")
+	t.Setenv(envBindSession, "ses_configured")
+
+	var out, stderr bytes.Buffer
+	if code := runDeclared([]string{"message", "--socket", socket, "--action=tell", "--target=x", "--message=x"}, &out, &stderr); code == 2 {
+		t.Fatalf("message exit = %d, stderr = %s, want the binding path", code, &stderr)
+	}
+	if lookups, _, _ := handler.calls(); lookups != 1 {
+		t.Fatalf("lookups = %d, want the conversation's binding read", lookups)
+	}
+}
+
+// TestBoundStatusRefusesANonPositiveWait pins the wait bound: an explicit
+// timeout of zero would otherwise mean an unbounded wait.
+func TestBoundStatusRefusesANonPositiveWait(t *testing.T) {
+	handler := &boundHandler{bound: liveBinding()}
+	socket := startOwnerControlServer(t, handler)
+
+	var out, stderr bytes.Buffer
+	if code := runDeclared([]string{"status", "--socket", socket, "--bind-host", "poo", "--bind-session", "ses_configured", "--runtime", "rt_1", "--timeout-ms=0"}, &out, &stderr); code != 2 {
+		t.Fatalf("status exit = %d, stderr = %s, want the usage refusal", code, &stderr)
+	}
+	if !strings.Contains(stderr.String(), "--timeout-ms must be at least 1") {
+		t.Fatalf("stderr = %s, want the timeout refusal", &stderr)
+	}
+	if lookups, _, _ := handler.calls(); lookups != 0 {
+		t.Fatalf("lookups = %d, want none before the refusal", lookups)
+	}
+}
+
 // TestFeedBrokerBindsTheConfiguredConversation pins the feed's side: the feed is
 // the one consumer that binds, and it binds the configured conversation on the
 // configured supervisor before it serves anything.

@@ -467,10 +467,13 @@ conversation the feed has not bound yet fails closed with `must bind it first`; 
 binding whose run the broker reports expired or retired fails with `bind it
 again`.
 
-A command that names a host without a session (or the reverse), or that names
-both the coordinates and broker credentials, exits 2 without calling the
-supervisor. The coordinates are configuration — a manifest fixes them in its argv
-and its env map, and no model-facing argument chooses them.
+A command that names a host without a session (or the reverse), or that passes
+both the coordinates and an explicit `--broker-url`, `--token` or `--run-id`,
+exits 2 without calling the supervisor. Credentials inherited from the
+environment do not conflict: a session that already holds them still reaches its
+conversation through the binding. The coordinates are configuration — a manifest
+fixes them in its argv and its env map, and no model-facing argument chooses
+them.
 
 ## avenor spawn
 
@@ -503,7 +506,8 @@ avenor status --runtime rt_01J9ZTFROM --wait turn_complete --timeout-ms 120000
 ```
 
 `--wait` takes `turn_complete`, which waits through the supervisor's own
-bounded turn wait before the status is read. `--timeout-ms` defaults to 600000.
+bounded turn wait before the status is read. `--timeout-ms` defaults to 600000
+and must be at least 1 when given.
 The result is the supervisor's status snapshot as JSON: `status`, `phase`,
 `pending_permission`, `final_output` and the launch identity.
 

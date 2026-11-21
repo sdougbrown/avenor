@@ -55,8 +55,8 @@ func handleFeedBroker(ctx context.Context, inv clicontract.Invocation, stderr io
 		if err := coords.complete(); err != nil {
 			return nil, fmt.Errorf("avenor feed broker: %w", err)
 		}
-		if brokerURL != "" || runID != "" || token != "" {
-			return nil, usageErrorf("avenor feed broker: broker credentials and --bind-host/--bind-session are mutually exclusive")
+		if inv.Supplied["broker-url"] || inv.Supplied["run-id"] || inv.Supplied["token"] {
+			return nil, usageErrorf("avenor feed broker: --broker-url, --run-id and --token are mutually exclusive with --bind-host and --bind-session")
 		}
 		if coords.derived {
 			lifecycle, err := startOwnedConversationSupervisor(coords)

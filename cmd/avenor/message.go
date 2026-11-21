@@ -59,8 +59,8 @@ func handleMessage(ctx context.Context, inv clicontract.Invocation, _ io.Writer)
 		if err := coords.complete(); err != nil {
 			return nil, fmt.Errorf("avenor message: %w", err)
 		}
-		if url != "" || token != "" || runID != "" {
-			return nil, usageErrorf("avenor message: broker credentials and --bind-host/--bind-session are mutually exclusive")
+		if inv.Supplied["broker-url"] || inv.Supplied["token"] || inv.Supplied["run-id"] {
+			return nil, usageErrorf("avenor message: --broker-url, --token and --run-id are mutually exclusive with --bind-host and --bind-session")
 		}
 		c, bound, err := attachBoundRead(ctx, coords)
 		if err != nil {
