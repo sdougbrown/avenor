@@ -12,8 +12,9 @@ contract.
 - `pi` reuses the supervisor's own broker run. One conversation binds to the
   supervisor singleton; a second pi session is refused, never re-bound, and a
   lost supervisor run fails closed rather than reminting.
-- `opencode` mints one broker run per conversation. If the broker confirms a
-  bound run is gone, expired, or retired, the next bind mints a fresh identity.
+- `opencode` and `poo` mint one broker run per conversation. If the broker
+  confirms a bound run is gone, expired, or retired, the next bind mints a
+  fresh identity.
 - Any other host is refused, never guessed at.
 
 While a bound run remains available, repeat binds of the same `(host,
@@ -161,6 +162,21 @@ r = rpc(c3, 1, "message_bind", {"host": "pi", "session_id": "sess_unauth"})
 err = r.get("error") or {}
 check("unauthenticated-permission-denied", err.get("code") == -32010 and err.get("message") == "permission_denied" and "data" not in err, json.dumps(redact(r)))
 c3.close()
+
+# 8. poo binds one broker-owned run per native conversation, and a repeat bind
+#    returns that conversation's identity unchanged.
+r = rpc(c1, 7, "message_bind", {"host": "poo", "session_id": "sess_verify_poo_1"})
+poo_first = r.get("result") or {}
+check("poo-bind-mints-a-conversation-run", "error" not in r and poo_first.get("created") is True and poo_first.get("run_id") and poo_first.get("run_id") != "supervisor" and poo_first.get("run_token") and poo_first.get("broker_url") and poo_first.get("generation"), json.dumps(redact(r)))
+r = rpc(c1, 8, "message_bind", {"host": "poo", "session_id": "sess_verify_poo_1"})
+poo_repeat = r.get("result") or {}
+check("repeat-poo-bind-same-run-and-token", "error" not in r and poo_repeat.get("run_id") == poo_first.get("run_id") and poo_repeat.get("run_token") == poo_first.get("run_token") and poo_repeat.get("created") is False, json.dumps(redact(r)))
+
+# 9. A second poo conversation gets its own run: two conversations never share
+#    one bound inbox.
+r = rpc(c1, 9, "message_bind", {"host": "poo", "session_id": "sess_verify_poo_2"})
+poo_second = r.get("result") or {}
+check("second-poo-conversation-isolated", "error" not in r and poo_second.get("created") is True and poo_second.get("run_id") not in (None, "", "supervisor", poo_first.get("run_id")) and poo_second.get("run_token") != poo_first.get("run_token"), json.dumps(redact(r)))
 c1.close()
 
 ev.write(json.dumps({"direction": "summary", "frame": results}) + "\n")
@@ -172,7 +188,10 @@ sys.exit(1 if failed else 0)
 
 **Observable end state (the proof):** the driver's summary reports every
 check passing. Bind results carry all five fields, with the supervisor's
-`run_id` and `created: false`. Refusals carry `-32000` and the `data.code` from
+`run_id` and `created: false`. The poo checks show a per-conversation host:
+the first bind mints a run (`created: true`, a run id that is not
+`supervisor`), the repeat bind returns the same `run_id` and `run_token` with
+`created: false`, and a second session of the same host gets a different run. Refusals carry `-32000` and the `data.code` from
 the table. The unauthenticated call carries `-32010` with no `data`. The refusal `message` texts name the host or the session-id
 rule — they never echo a credential.
 

@@ -137,6 +137,39 @@ type MessageBindResult struct {
 	Created    bool
 }
 
+// BindSemantics names how the bind policy maps one native host's conversations
+// to broker runs.
+type BindSemantics string
+
+const (
+	// BindReusesSupervisorRun binds the host's one conversation to the
+	// supervisor's own broker run. That run is the host's whole inbox, so a
+	// second conversation of the host is refused instead of retargeted, and a
+	// lost run fails closed rather than reminting.
+	BindReusesSupervisorRun BindSemantics = "reuse_supervisor_run"
+	// BindMintsPerConversation mints one broker-owned run per native
+	// conversation, so each conversation has its own inbox and a dead binding
+	// is reclaimed and reminted under the broker's own peer lifecycle.
+	BindMintsPerConversation BindSemantics = "mint_per_conversation"
+)
+
+// bindHostSemantics is the one bind policy: every native host message_bind
+// serves, and how that host's conversations map to broker runs. A host absent
+// here is refused rather than guessed at, by the supervisor that owns the
+// mapping and by any surface that would declare a conversation binding.
+var bindHostSemantics = map[string]BindSemantics{
+	"pi":       BindReusesSupervisorRun,
+	"opencode": BindMintsPerConversation,
+	"poo":      BindMintsPerConversation,
+}
+
+// BindHostSemantics returns how the bind policy serves host, and whether it
+// serves it at all.
+func BindHostSemantics(host string) (BindSemantics, bool) {
+	semantics, ok := bindHostSemantics[host]
+	return semantics, ok
+}
+
 // PeerRecord is one peers `list` entry: the tool's projection of the broker's
 // SessionInfo. There is no name key — Label is the display name, so the list is
 // also the rename's read path — and last_seen is deliberately not part of the

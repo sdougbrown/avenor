@@ -76,12 +76,22 @@ func TestMessageBindPiReusesTheSupervisorRun(t *testing.T) {
 // each native conversation of a minting host gets its own broker-owned run,
 // a repeated bind reuses that run, and the minted run carries no display
 // label of its own — the peers list resolves it to the run id until a native
-// rename names the work.
+// rename names the work. Every host the bind policy mints for behaves the
+// same way; poo is the host a native MCP client binds per conversation.
 func TestMessageBindMintsOneRunPerConversation(t *testing.T) {
 	t.Parallel()
-	sup, _ := newStage2Supervisor(t, 2)
+	for _, host := range []string{"opencode", "poo"} {
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+			sup, _ := newStage2Supervisor(t, 2)
+			assertMintsOneRunPerConversation(t, sup, host)
+		})
+	}
+}
 
-	first, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_1"})
+func assertMintsOneRunPerConversation(t *testing.T, sup *Supervisor, host string) {
+	t.Helper()
+	first, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: host, SessionID: "ses_1"})
 	if err != nil {
 		t.Fatalf("message bind: %v", err)
 	}
@@ -108,7 +118,7 @@ func TestMessageBindMintsOneRunPerConversation(t *testing.T) {
 		t.Fatalf("minted run display name = %q, want the run id", sup.broker.DisplayName(first.RunID))
 	}
 
-	repeat, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_1"})
+	repeat, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: host, SessionID: "ses_1"})
 	if err != nil {
 		t.Fatalf("repeated bind: %v", err)
 	}
@@ -116,7 +126,7 @@ func TestMessageBindMintsOneRunPerConversation(t *testing.T) {
 		t.Fatalf("repeated bind = %+v, want the first run reused without minting", repeat)
 	}
 
-	second, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: "opencode", SessionID: "ses_2"})
+	second, err := sup.MessageBind(bindCaller(), messaging.MessageBindRequest{Host: host, SessionID: "ses_2"})
 	if err != nil {
 		t.Fatalf("second conversation bind: %v", err)
 	}

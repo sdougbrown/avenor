@@ -242,7 +242,7 @@ func TestReadMessageStdin(t *testing.T) {
 // TestMessageStdin exercises --message-stdin through the built binary against a
 // real broker, feeding each case's text over the process's own stdin.
 func TestMessageStdin(t *testing.T) {
-	bin := buildVerifyBinary(t)
+	bin := buildAvenorBinary(t)
 	b := broker.New("")
 	if err := b.Start(); err != nil {
 		t.Fatal(err)

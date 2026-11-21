@@ -170,6 +170,9 @@ func app() *clicontract.App {
 					{Name: "max-wait", Kind: clicontract.Duration, Usage: "approximate polling budget for blocking tools (0 disables)", Default: 25 * time.Second},
 					{Name: "allowed-host", Kind: clicontract.Repeat, Usage: "exact tailnet hostname accepted on the HTTP transport (repeatable)"},
 					{Name: "mcp-launch-wrapper-policy", Kind: clicontract.String, Usage: "path to a launch_wrapper policy file forwarded to a supervisor this command autostarts (default: $AVENOR_MCP_LAUNCH_WRAPPER_POLICY, else launch-wrapper-policy.json under the avenor config home (XDG_CONFIG_HOME/avenor or ~/.config/avenor)); ignored when attaching to an existing supervisor, though a named file that is missing or malformed still fails"},
+					{Name: "bind-host", Kind: clicontract.String, Usage: "native host conversation this server is launched for; its bound broker run is the children's parent (with --bind-session and --bind-output-fd)"},
+					{Name: "bind-session", Kind: clicontract.String, Usage: "native session id of the conversation --bind-host names"},
+					{Name: "bind-output-fd", Kind: clicontract.Int, Usage: "inherited writable descriptor, other than 0, 1 and 2, that the conversation's messaging credentials are handed over on as one JSON line; the server closes it"},
 				},
 				InputRules: []*clicontract.Rule{
 					clicontract.EnabledOn("auth-token-file", clicontract.Or(clicontract.Not(clicontract.Truthy("auth-token-file")), clicontract.Not(clicontract.Truthy("auth-token"))), "--auth-token and --auth-token-file cannot both be set"),

@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sdougbrown/avenor/client"
+	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/router"
 	"github.com/sdougbrown/avenor/internal/runstate"
@@ -89,6 +90,22 @@ type Options struct {
 	// Attaching to an already-running supervisor never changes its policy:
 	// the path is ignored on attach.
 	MCPLaunchWrapperPolicyPath string
+
+	// BindHost and BindSession declare the native host conversation this
+	// server was launched for, so that conversation's bound run is the
+	// children's broker parent. They come from the launch, never from a tool
+	// argument, and both are required together. Empty declares no
+	// conversation: the server spawns children exactly as it always has.
+	BindHost    string
+	BindSession string
+	// BindHandoff is the inherited private pipe the declared conversation's
+	// messaging credentials are written to, as one JSON line followed by EOF.
+	// It is required with BindHost and BindSession, and the server owns it:
+	// the handoff closes it, and its write must be deadline-bounded — a launch
+	// whose host stops reading fails rather than waits. The credentials appear
+	// on that pipe alone: never in a log, argv, file, MCP tool result or child
+	// environment.
+	BindHandoff io.WriteCloser
 }
 
 type Server struct {
@@ -123,6 +140,15 @@ type Server struct {
 	// oldest binding is evicted first.
 	messageSupervisors     map[string]string
 	messageSupervisorOrder []string
+
+	// hostBind is the trusted host conversation this server was launched for,
+	// nil when the launch declared none, together with the identity its one
+	// bind resolved to.
+	hostBind *hostBind
+	// unboundNoteGate deduplicates the note about a spawn this server cannot
+	// give a parent route, so a spawn loop aimed at another supervisor cannot
+	// flood stderr.
+	unboundNoteGate diagnote.Gate
 }
 
 type statusArgs struct {
@@ -247,6 +273,10 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.NoAutostart && opts.SupervisorSocket == "" && opts.ControlClient == nil {
 		return nil, fmt.Errorf("--no-autostart requires --supervisor-socket")
 	}
+	hostBind, err := newHostBind(opts.Transport, opts.BindHost, opts.BindSession, opts.BindHandoff)
+	if err != nil {
+		return nil, err
+	}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "avenor",
@@ -258,6 +288,7 @@ func NewServer(opts Options) (*Server, error) {
 		mcpServer:     mcpServer,
 		controlClient: opts.ControlClient,
 		registry:      NewRunRegistry(),
+		hostBind:      hostBind,
 		clock:         time.Now,
 		sleep:         sleepWithContext,
 		toolNames: []string{
@@ -371,13 +402,20 @@ func (s *Server) Close() error {
 	s.closed = true
 	s.supervisorMu.Unlock()
 
+	var handoffErr error
+	if s.hostBind != nil {
+		handoffErr = s.hostBind.closeHandoff()
+	}
+	var closeErr error
 	if lifecycle != nil {
-		return lifecycle.Close()
+		closeErr = lifecycle.Close()
+	} else if controlClient != nil {
+		closeErr = controlClient.Close()
 	}
-	if controlClient != nil {
-		return controlClient.Close()
+	if handoffErr != nil {
+		return errors.Join(handoffErr, closeErr)
 	}
-	return nil
+	return closeErr
 }
 
 func (s *Server) handleAvenorStatus(ctx context.Context, req *mcp.CallToolRequest, args statusArgs) (*mcp.CallToolResult, statusToolOutput, error) {
@@ -1208,6 +1246,14 @@ func (s *Server) handleAvenorSpawn(ctx context.Context, req *mcp.CallToolRequest
 	}
 	defer cleanup()
 
+	// The declared conversation's run is the children's broker parent, but only
+	// on the supervisor that holds it: elsewhere no consumer serves that run, so
+	// the child starts without a parent route. parent_run_id is broker identity;
+	// the runtime parent (parent_id) stays this supervisor's own bookkeeping.
+	if parentRunID := s.boundParentRun(supervisorPath); parentRunID != "" {
+		params["parent_run_id"] = parentRunID
+	}
+
 	if args.Label != "" && args.IdempotencyKey == "" {
 		// Keyed spawns skip the pre-check: a retry under the same key must be
 		// allowed to reach the idempotency gate and return the stored result,
@@ -1786,7 +1832,23 @@ func (s *Server) getSupervisorPath(supervisorID string) string {
 }
 
 func (s *Server) Run() error {
-	return s.mcpServer.Run(context.Background(), &mcp.StdioTransport{})
+	return s.ServeTransport(context.Background(), &mcp.StdioTransport{})
+}
+
+// ServeTransport serves the MCP protocol over transport until ctx is done. A
+// declared host conversation is bound and handed to the launching host before
+// the first call is served, so every spawn this server forwards names the run
+// the conversation consumes and the host already holds.
+func (s *Server) ServeTransport(ctx context.Context, transport mcp.Transport) error {
+	if err := s.bindHostConversation(ctx); err != nil {
+		// The launching host is reading the handoff pipe: close it so a failed
+		// launch reads EOF instead of waiting for this process to exit.
+		if s.hostBind != nil {
+			_ = s.hostBind.closeHandoff()
+		}
+		return err
+	}
+	return s.mcpServer.Run(ctx, transport)
 }
 
 func (s *Server) RunHTTP(addr string) error {

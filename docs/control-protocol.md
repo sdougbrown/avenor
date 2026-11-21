@@ -334,6 +334,14 @@ This is the MCP-gated variant: the supervisor enforces its launch wrapper policy
 
 Requires ownership.
 
+A non-empty `parent_run_id` on this verb is the conversation binding an MCP
+launch declared: the supervisor requires it to be one of its own live bindings
+and refuses a stale one with `parent run <id> is not a live conversation binding
+on this supervisor; reconnect the host conversation to bind it again` or
+`bound parent run <id> is expired or retired; reconnect the host conversation to
+bind it again`, rather than adopting the id into a fresh record. The trusted
+`spawn` verb keeps adopting a named parent run.
+
 #### `list`
 
 ```json
@@ -415,7 +423,7 @@ Success:
 {"jsonrpc":"2.0","id":1,"result":{"broker_url":"http://127.0.0.1:39039","run_id":"supervisor","run_token":"…","generation":"…","created":false}}
 ```
 
-- `host` — the native host the conversation belongs to. `pi` reuses the supervisor's own run: one conversation binds to the supervisor singleton, a second pi session is refused, and a lost supervisor run fails closed rather than reminting. `opencode` mints one run per conversation, reclaiming and reminting when the broker has confirmed a bound run dead. Any other host is refused.
+- `host` — the native host the conversation belongs to. `pi` reuses the supervisor's own run: one conversation binds to the supervisor singleton, a second pi session is refused, and a lost supervisor run fails closed rather than reminting. `opencode` and `poo` mint one run per conversation, reclaiming and reminting when the broker has confirmed a bound run dead. Any other host is refused.
 - `session_id` — the native session id: 1–200 bytes forming one safe filesystem path component, with no control or formatting characters.
 - `created` — whether the bind minted a new run. The pi host reuses the supervisor's existing run, so it reports `false`.
 
