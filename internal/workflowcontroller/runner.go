@@ -161,6 +161,13 @@ type dispatchFailEntry struct {
 	next  time.Time
 }
 
+// startFailKey deduplicates the unresolved-selection stderr log lines: one
+// line per candidate and distinct resolution detail.
+type startFailKey struct {
+	name   string
+	detail string
+}
+
 // wakeReason reports which wakeup ended the previous pass. Only a
 // capacity-change wakeup or an anti-entropy pass clears a persisted capacity
 // block; workflow changes and worker results must not.
@@ -394,10 +401,12 @@ type leaderState struct {
 	// dispatchFail holds the backoff state of candidates whose most recent
 	// dispatches failed, keyed by execution identity.
 	dispatchFail map[workflow.ExecutionIdentity]dispatchFailEntry
-	// startFailLogged holds the unresolved-selection details already
-	// written to the stderr log, so a persistently failing selection
-	// reports its cause once instead of once per reconcile pass.
-	startFailLogged map[string]bool
+	// startFailLogged holds the unresolved-selection log lines already
+	// written to stderr, keyed by the candidate's diagnostic name and the
+	// detail: a persistently failing selection reports its cause once per
+	// candidate instead of once per reconcile pass, and a candidate that
+	// recovers and later fails the same way logs again.
+	startFailLogged map[startFailKey]bool
 	// readyHold is the earliest future readiness time among the current
 	// pass's candidates (a retry backoff), or the zero time when none is.
 	// It wakes the loop at the hold's expiry and reports the held state;
@@ -461,7 +470,7 @@ func (s *leaderState) dropLeadership(r *Runner) {
 	s.leaseID = ""
 	s.blockedSource = ""
 	s.dispatchFail = map[workflow.ExecutionIdentity]dispatchFailEntry{}
-	s.startFailLogged = map[string]bool{}
+	s.startFailLogged = map[startFailKey]bool{}
 	s.readyHold = time.Time{}
 	r.clearLeadStatus()
 }
@@ -517,7 +526,7 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		// The dispatch worked, so any dispatch diagnostic on this
 		// candidate's identity names a cause that is gone; clear it so a
 		// healthy controller does not report a stale failure.
-		r.clearDispatchDiagnostics(res.identity)
+		r.clearDispatchDiagnostics(s, res.identity)
 		r.setStatus(func(st *RunnerStatus) {
 			st.LastOutcome = string(ResultDispatched)
 			st.CapacityBlocked = ""
@@ -550,7 +559,7 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		}
 		// The park succeeded, so any dispatch diagnostic on this
 		// candidate's identity names a cause that is gone.
-		r.clearDispatchDiagnostics(res.identity)
+		r.clearDispatchDiagnostics(s, res.identity)
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
 	case ResultUnresolvedBinding:
 		name := DiagnosticName(res.identity)
@@ -578,8 +587,8 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		} else {
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedSelection) })
 		}
-		if res.result.Detail != "" && !s.startFailLogged[res.result.Detail] {
-			s.startFailLogged[res.result.Detail] = true
+		if res.result.Detail != "" && !s.startFailLogged[startFailKey{name: name, detail: res.result.Detail}] {
+			s.startFailLogged[startFailKey{name: name, detail: res.result.Detail}] = true
 			log.Printf("workflow controller %s: unresolved selection %s: %s", r.controllerID, name, res.result.Detail)
 		}
 	default:
@@ -592,11 +601,18 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 // against this candidate's identity: a delivered success means their
 // causes are gone. Clearing an absent diagnostic is a no-op, so a
 // candidate that only ever failed one path pays one load.
-func (r *Runner) clearDispatchDiagnostics(identity workflow.ExecutionIdentity) {
+func (r *Runner) clearDispatchDiagnostics(s *leaderState, identity workflow.ExecutionIdentity) {
 	name := DiagnosticName(identity)
 	for _, kind := range []string{"unresolved_selection", "unresolved_binding"} {
 		if err := r.store.ClearDiagnostic(r.controllerID, kind, name); err != nil {
 			log.Printf("workflow controller %s: clear %s: %v", r.controllerID, kind, err)
+		}
+	}
+	// The candidate's episode is over: a recurrence of the same cause
+	// logs again instead of staying silent until a leadership loss.
+	for key := range s.startFailLogged {
+		if key.name == name {
+			delete(s.startFailLogged, key)
 		}
 	}
 }
@@ -1108,7 +1124,7 @@ func (r *Runner) loop() {
 		unreported:      map[workflow.ExecutionIdentity]unreportedEntry{},
 		pollInFlight:    map[string]bool{},
 		dispatchFail:    map[workflow.ExecutionIdentity]dispatchFailEntry{},
-		startFailLogged: map[string]bool{},
+		startFailLogged: map[startFailKey]bool{},
 	}
 	if !s.timer.Stop() {
 		<-s.timer.C

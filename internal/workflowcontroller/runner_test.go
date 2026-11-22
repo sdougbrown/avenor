@@ -1095,7 +1095,6 @@ func TestRunnerSuccessClearsBothDispatchDiagnostics(t *testing.T) {
 		if err != nil || !ok {
 			return false
 		}
-		rec, _, _ = store.Get("c1")
 		_, sel := rec.Diagnostics["unresolved_selection/"+name]
 		_, bind := rec.Diagnostics["unresolved_binding/"+name]
 		return !sel && !bind

@@ -749,10 +749,6 @@ func TestWorkflowReadyAdvisoryCandidates(t *testing.T) {
 	}
 }
 
-// TestControllerRenewFailureYieldsAndReacquires proves the leader loop's
-// renew-failure branch: when the lease is taken out-of-band (a CAS conflict
-// on the next renew), the loop yields (holding=false) instead of exiting,
-// keeps its map entry, and re-acquires once the lease is released.
 // TestWorkflowInspectSurfacesControllerDiagnostics proves a controller
 // diagnostic naming a workflow (workflow/node/activation, the shape the
 // runner records selection-resolution failures under) is visible on that workflow's
@@ -871,6 +867,10 @@ func TestWorkflowInspectSurfacesControllerDiagnostics(t *testing.T) {
 	}
 }
 
+// TestControllerRenewFailureYieldsAndReacquires proves the leader loop's
+// renew-failure branch: when the lease is taken out-of-band (a CAS conflict
+// on the next renew), the loop yields (holding=false) instead of exiting,
+// keeps its map entry, and re-acquires once the lease is released.
 func TestControllerRenewFailureYieldsAndReacquires(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "wfroot")

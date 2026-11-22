@@ -55,7 +55,8 @@ completion contract.
   `attempts` stays empty until the roster is fixed, then holds exactly one
   successful attempt.
 - Supervisor log: one `unresolved selection <identity>: <cause>` line per
-  distinct detail, never one per pass.
+  candidate and distinct detail, never one per pass; a candidate that
+  recovers and later fails the same way logs again.
 
 ## Gotchas
 
