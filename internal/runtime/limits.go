@@ -38,7 +38,7 @@ var quotaSignals = []string{
 }
 
 // authSignals are matched against the lowercased stop reason and terminal
-// failure text. They name a credential the provider refused: no in-run wait
+// failure text. They name a credential the provider refused. No in-run wait
 // or retry makes it acceptable, so the class tells the caller to refresh
 // credentials instead of spending the retry budget on the same refusal.
 var authSignals = []string{
@@ -94,8 +94,8 @@ func ClassifyProviderLimit(stopReason, message string) (string, int64) {
 	// with a reset hint describes a hard-capped account: retrying spends the
 	// budget on the same refusal, while quota_exhausted tells the caller to
 	// switch models.
-	// A rejected credential outranks any capacity wording in the same text:
-	// the refusal stays until the credential is refreshed, so the class
+	// A rejected credential outranks any capacity wording in the same text.
+	// The refusal stays until the credential is refreshed, so the class
 	// carries no retry-after hint.
 	if containsSignal(text, authSignals) || status401.MatchString(text) {
 		return AuthRejectedStopReason, 0

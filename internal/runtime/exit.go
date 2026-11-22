@@ -27,9 +27,9 @@ const DegenerateReasoningStreamStopReason = "degenerate_reasoning_stream"
 // identity conflicts are fatal: retrying could resume a provisional ID or let
 // an attempt finish without adopting the provider's authoritative session ID.
 // Messaging unavailability cannot clear inside the run either. A rate-limited
-// turn is transient, so it stays eligible for the configured retries; an
+// turn is transient, so it stays eligible for the configured retries. An
 // exhausted quota or a rejected credential needs new capacity or refreshed
-// credentials, not another call in the same run.
+// credentials — not another call in the same run.
 func IsRetryableFailure(exitCode int, stopReason string) bool {
 	if stopReason == SessionIDConflictStopReason || stopReason == MessagingUnavailableStopReason || stopReason == AuthRejectedStopReason {
 		return false
