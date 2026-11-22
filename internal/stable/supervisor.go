@@ -7487,19 +7487,11 @@ func attemptStartFailureMarker(startErr error, marker ...string) []string {
 // read is not treated as dispatchable, because unknown ownership must not be
 // assumed safe.
 func attemptStartRefusal(mgr *workflow.Manager, workflowID string) error {
-	status, err := mgr.WorkflowStatus(workflowID)
+	status, err := mgr.InstanceStatus(workflowID)
 	if err != nil {
 		return fmt.Errorf("read workflow %s status before attempt start: %w", workflowID, err)
 	}
-	fields, ok := status.(map[string]any)
-	if !ok {
-		return fmt.Errorf("workflow %s: unreadable status before attempt start", workflowID)
-	}
-	value, ok := fields["status"].(string)
-	if !ok {
-		return fmt.Errorf("workflow %s: unreadable status before attempt start", workflowID)
-	}
-	if workflow.WorkflowStatus(value) == workflow.WorkflowCanceled {
+	if status == workflow.WorkflowCanceled {
 		return fmt.Errorf("%w: %s", errAttemptWorkflowCanceled, workflowID)
 	}
 	return nil
