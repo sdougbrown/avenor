@@ -508,7 +508,13 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 	// consecutive-failure chain is broken. A failure-shaped result is also
 	// a failure — its own case below extends the chain — so it must not
 	// clear the entry it is about to increment.
-	failureShaped := res.result.Kind == ResultUnresolvedSelection || res.result.Kind == ResultUnresolvedBinding
+	failureShaped := false
+	for _, kind := range failureShapedKinds {
+		if res.result.Kind == kind {
+			failureShaped = true
+			break
+		}
+	}
 	if currentLease && !failureShaped {
 		if _, ok := s.dispatchFail[res.identity]; ok {
 			delete(s.dispatchFail, res.identity)
@@ -563,8 +569,8 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
 	case ResultUnresolvedBinding:
 		name := DiagnosticName(res.identity)
-		if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_binding", name, res.result.Detail); err != nil {
-			log.Printf("workflow controller %s: record unresolved_binding: %v", r.controllerID, err)
+		if _, err := r.store.RecordDiagnostic(r.controllerID, string(ResultUnresolvedBinding), name, res.result.Detail); err != nil {
+			log.Printf("workflow controller %s: record %s: %v", r.controllerID, ResultUnresolvedBinding, err)
 		}
 		// The park candidate stays dispatchable, so it is held in the
 		// same per-candidate backoff as a dispatch error; otherwise every
@@ -576,8 +582,8 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		}
 	case ResultUnresolvedSelection:
 		name := DiagnosticName(res.identity)
-		if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_selection", name, res.result.Detail); err != nil {
-			log.Printf("workflow controller %s: record unresolved_selection: %v", r.controllerID, err)
+		if _, err := r.store.RecordDiagnostic(r.controllerID, string(ResultUnresolvedSelection), name, res.result.Detail); err != nil {
+			log.Printf("workflow controller %s: record %s: %v", r.controllerID, ResultUnresolvedSelection, err)
 		}
 		// The candidate stays dispatchable, so it is held in the same
 		// per-candidate backoff as a dispatch error; otherwise every pass
@@ -597,14 +603,20 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 	return lostLead
 }
 
+// failureShapedKinds are the delivered dispatch outcomes that are
+// themselves failures: the runner records a diagnostic under the same
+// kind, holds the candidate in the dispatch backoff, and clears exactly
+// these kinds on a success-shaped outcome.
+var failureShapedKinds = []DispatchResultKind{ResultUnresolvedBinding, ResultUnresolvedSelection}
+
 // clearDispatchDiagnostics removes the dispatch diagnostics recorded
 // against this candidate's identity: a delivered success means their
 // causes are gone. Clearing an absent diagnostic is a no-op, so a
 // candidate that only ever failed one path pays one load.
 func (r *Runner) clearDispatchDiagnostics(s *leaderState, identity workflow.ExecutionIdentity) {
 	name := DiagnosticName(identity)
-	for _, kind := range []string{"unresolved_selection", "unresolved_binding"} {
-		if err := r.store.ClearDiagnostic(r.controllerID, kind, name); err != nil {
+	for _, kind := range failureShapedKinds {
+		if err := r.store.ClearDiagnostic(r.controllerID, string(kind), name); err != nil {
 			log.Printf("workflow controller %s: clear %s: %v", r.controllerID, kind, err)
 		}
 	}
