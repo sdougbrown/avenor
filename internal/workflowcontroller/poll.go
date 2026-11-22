@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/workflow"
 )
 
 // PollCursor is one gate's persisted poll checkpoint.
@@ -57,6 +59,15 @@ func DerivePollID(controllerID string, c PollCursor, count int64) string {
 
 // diagnosticKey builds the record's diagnostics map key.
 func diagnosticKey(kind, name string) string { return kind + "/" + name }
+
+// DiagnosticName renders the identity a dispatch diagnostic is about: the
+// workflow/node/activation path the runner records under a diagnostic kind
+// and the workflow surface parses back. Both sides must go through this
+// helper, or the prefix match in controllerDiagnosticsForWorkflow loses
+// the diagnostic.
+func DiagnosticName(id workflow.ExecutionIdentity) string {
+	return string(id.WorkflowID) + "/" + string(id.NodeID) + "/" + string(id.ActivationID)
+}
 
 // pollBaseDelay is the interval before the first poll after a gate parks;
 // it doubles on every consecutive pending or transient-failed poll.

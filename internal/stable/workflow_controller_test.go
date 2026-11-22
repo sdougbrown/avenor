@@ -830,7 +830,7 @@ func TestWorkflowInspectSurfacesControllerDiagnostics(t *testing.T) {
 		t.Fatalf("controller store: %v", err)
 	}
 	detail := `entry "donkey": thinking: invalid thinking value "none"`
-	name := wfID + "/start/" + string(actID)
+	name := workflowcontroller.DiagnosticName(workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(wfID), NodeID: "start", ActivationID: actID})
 	if _, err := store.RecordDiagnostic("c1", "unresolved_selection", name, detail); err != nil {
 		t.Fatalf("record diagnostic: %v", err)
 	}
@@ -858,7 +858,7 @@ func TestWorkflowInspectSurfacesControllerDiagnostics(t *testing.T) {
 	// Diagnostics naming another workflow — including a prefix-colliding
 	// ID (this workflow's ID with a suffix) — must not surface here: the
 	// filter matches whole path components, not string prefixes.
-	if _, err := store.RecordDiagnostic("c1", "unresolved_selection", wfID+"x/start/act_other", detail); err != nil {
+	if _, err := store.RecordDiagnostic("c1", "unresolved_selection", workflowcontroller.DiagnosticName(workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(wfID + "x"), NodeID: "start", ActivationID: "act_other"}), detail); err != nil {
 		t.Fatalf("record cross-workflow diagnostic: %v", err)
 	}
 	insp, err = (lazyWorkflowHandler{sup}).WorkflowInspect(wfID)

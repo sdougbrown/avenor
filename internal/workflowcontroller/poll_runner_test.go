@@ -531,9 +531,11 @@ func TestRunnerUnresolvedBindingDiagnosticDeduped(t *testing.T) {
 		return r.Status().LastOutcome == string(ResultUnresolvedBinding)
 	})
 
-	// Further dispatches of the same unresolved binding append no events.
-	waitUntil(t, "second dispatch", func() bool { return deps.dispatchCount() > 1 })
+	// Further dispatches of the same unresolved binding append no events;
+	// the candidate is held in the dispatch backoff between them.
 	clock.Advance(30 * time.Second)
+	waitUntil(t, "second dispatch", func() bool { return deps.dispatchCount() > 1 })
+	clock.Advance(60 * time.Second)
 	waitUntil(t, "third dispatch", func() bool { return deps.dispatchCount() > 2 })
 	if n := countDiagEvents(); n != 1 {
 		t.Fatalf("diagnostic_recorded events = %d, want deduplicated 1", n)

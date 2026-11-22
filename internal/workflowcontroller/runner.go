@@ -491,22 +491,16 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		// per consecutive failure, so a persistently failing dispatch
 		// degrades to a bounded retry cadence instead of a hot loop.
 		if currentLease {
-			e := s.dispatchFail[res.identity]
-			e.count++
-			e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
-			s.dispatchFail[res.identity] = e
-			r.setStatus(func(st *RunnerStatus) {
-				st.LastOutcome = "dispatch_error"
-				st.DispatchBackoffUntil = e.next
-			})
+			r.backOffCandidate(s, res.identity, "dispatch_error")
 		}
 		return false
 	}
 	// A delivered result means the dispatch worked; the candidate's
-	// consecutive-failure chain is broken. An unresolved_selection result is
-	// also a failure — its own case below extends the chain — so it must
-	// not clear the entry it is about to increment.
-	if currentLease && res.result.Kind != ResultUnresolvedSelection {
+	// consecutive-failure chain is broken. A failure-shaped result is also
+	// a failure — its own case below extends the chain — so it must not
+	// clear the entry it is about to increment.
+	failureShaped := res.result.Kind == ResultUnresolvedSelection || res.result.Kind == ResultUnresolvedBinding
+	if currentLease && !failureShaped {
 		if _, ok := s.dispatchFail[res.identity]; ok {
 			delete(s.dispatchFail, res.identity)
 			if len(s.dispatchFail) == 0 {
@@ -520,11 +514,10 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		if _, _, err := r.store.ClearCapacityBlocked(r.controllerID); err != nil {
 			log.Printf("workflow controller %s: clear capacity blocked: %v", r.controllerID, err)
 		}
-		// The dispatch worked, so any unresolved_selection diagnostic on
+		// The dispatch worked, so an unresolved_selection diagnostic on
 		// this candidate's identity names a cause that is gone; clear it
 		// so a healthy controller does not report a stale failure.
-		name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
-		if err := r.store.ClearDiagnostic(r.controllerID, "unresolved_selection", name); err != nil {
+		if err := r.store.ClearDiagnostic(r.controllerID, "unresolved_selection", DiagnosticName(res.identity)); err != nil {
 			log.Printf("workflow controller %s: clear unresolved_selection: %v", r.controllerID, err)
 		}
 		r.setStatus(func(st *RunnerStatus) {
@@ -557,15 +550,27 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 				log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
 			}
 		}
+		// The park succeeded, so an unresolved_binding diagnostic on this
+		// candidate's identity names a cause that is gone.
+		if err := r.store.ClearDiagnostic(r.controllerID, "unresolved_binding", DiagnosticName(res.identity)); err != nil {
+			log.Printf("workflow controller %s: clear unresolved_binding: %v", r.controllerID, err)
+		}
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
 	case ResultUnresolvedBinding:
-		name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
+		name := DiagnosticName(res.identity)
 		if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_binding", name, res.result.Detail); err != nil {
 			log.Printf("workflow controller %s: record unresolved_binding: %v", r.controllerID, err)
 		}
-		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
+		// The park candidate stays dispatchable, so it is held in the
+		// same per-candidate backoff as a dispatch error; otherwise every
+		// pass re-runs the park on unresolved gate pins.
+		if currentLease {
+			r.backOffCandidate(s, res.identity, string(ResultUnresolvedBinding))
+		} else {
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
+		}
 	case ResultUnresolvedSelection:
-		name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
+		name := DiagnosticName(res.identity)
 		if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_selection", name, res.result.Detail); err != nil {
 			log.Printf("workflow controller %s: record unresolved_selection: %v", r.controllerID, err)
 		}
@@ -573,14 +578,7 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		// per-candidate backoff as a dispatch error; otherwise every pass
 		// re-dispatches it in a hot loop.
 		if currentLease {
-			e := s.dispatchFail[res.identity]
-			e.count++
-			e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
-			s.dispatchFail[res.identity] = e
-			r.setStatus(func(st *RunnerStatus) {
-				st.LastOutcome = string(ResultUnresolvedSelection)
-				st.DispatchBackoffUntil = e.next
-			})
+			r.backOffCandidate(s, res.identity, string(ResultUnresolvedSelection))
 		} else {
 			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedSelection) })
 		}
@@ -659,6 +657,21 @@ const (
 	// stepExit leaves the leader loop.
 	stepExit
 )
+
+// backOffCandidate extends a candidate's consecutive-failure chain: its
+// next dispatch is deferred, doubling per consecutive failure, so a
+// persistently failing dispatch degrades to a bounded retry cadence
+// instead of a hot loop. outcome names the recorded LastOutcome.
+func (r *Runner) backOffCandidate(s *leaderState, identity workflow.ExecutionIdentity, outcome string) {
+	e := s.dispatchFail[identity]
+	e.count++
+	e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
+	s.dispatchFail[identity] = e
+	r.setStatus(func(st *RunnerStatus) {
+		st.LastOutcome = outcome
+		st.DispatchBackoffUntil = e.next
+	})
+}
 
 // dispatchBackoffDelay is the per-candidate dispatch-failure backoff: the
 // base after the first consecutive error, doubling per consecutive

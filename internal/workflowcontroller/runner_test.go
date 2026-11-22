@@ -965,7 +965,7 @@ func TestRunnerUnresolvedSelectionRecordsDiagnosticAndBacksOff(t *testing.T) {
 	// 100ms backoff base makes the schedule observable.
 	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond, nil, nil)
 
-	key := "unresolved_selection/wf1/start/a1"
+	key := "unresolved_selection/" + DiagnosticName(runnerCand("wf1", "start", "a1").Identity)
 	waitUntil(t, "unresolved_selection diagnostic recorded with the resolution detail", func() bool {
 		rec, ok, err := store.Get("c1")
 		if err != nil || !ok {
@@ -1005,6 +1005,59 @@ func TestRunnerUnresolvedSelectionRecordsDiagnosticAndBacksOff(t *testing.T) {
 	// The resolved cause is gone with it: a healthy controller must not
 	// keep reporting a failure whose cause was fixed.
 	waitUntil(t, "unresolved_selection diagnostic cleared after recovery", func() bool {
+		rec, ok, err := store.Get("c1")
+		if err != nil || !ok {
+			return false
+		}
+		_, held := rec.Diagnostics[key]
+		return !held
+	})
+}
+
+// TestRunnerUnresolvedBindingRecordsDiagnosticAndBacksOff proves an
+// unresolved_binding result gets the same lifecycle as a selection
+// failure: the detail is recorded as a deduplicated diagnostic, the park
+// candidate is held in the per-candidate dispatch backoff, and a later
+// successful park clears both the backoff and the diagnostic.
+func TestRunnerUnresolvedBindingRecordsDiagnosticAndBacksOff(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	cand := runnerCand("wf1", "review", "a1")
+	deps.setCandidates([]Candidate{cand})
+	deps.setDefaultResult(DispatchResult{Kind: ResultUnresolvedBinding, Detail: "gate pr-review binds unknown adapter"})
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond, nil, nil)
+
+	key := "unresolved_binding/" + DiagnosticName(cand.Identity)
+	waitUntil(t, "unresolved_binding diagnostic recorded", func() bool {
+		rec, ok, err := store.Get("c1")
+		if err != nil || !ok {
+			return false
+		}
+		return rec.Diagnostics[key] != ""
+	})
+	waitUntil(t, "candidate held in backoff", func() bool {
+		return !r.Status().DispatchBackoffUntil.IsZero()
+	})
+
+	// The park candidate re-parks only after the backoff expires.
+	waitUntil(t, "three dispatches", func() bool { return deps.dispatchCount() >= 3 })
+	recs := deps.allDispatches()
+	if d := recs[1].at.Sub(recs[0].at); d < 80*time.Millisecond {
+		t.Fatalf("second dispatch after %v, want the ~100ms backoff honored", d)
+	}
+
+	// A successful park (the gate pins resolved) clears the streak and
+	// the stale diagnostic.
+	deps.setDefaultResult(DispatchResult{Kind: ResultParked})
+	waitUntil(t, "park succeeds after the pins resolve", func() bool {
+		return r.Status().LastOutcome == string(ResultParked)
+	})
+	if s := r.Status(); !s.DispatchBackoffUntil.IsZero() {
+		t.Fatalf("backoff state not cleared after a successful park: next=%v", s.DispatchBackoffUntil)
+	}
+	waitUntil(t, "unresolved_binding diagnostic cleared after recovery", func() bool {
 		rec, ok, err := store.Get("c1")
 		if err != nil || !ok {
 			return false
