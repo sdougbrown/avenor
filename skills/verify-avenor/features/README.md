@@ -24,6 +24,7 @@ state named in each file is the acceptance bar for that feature.
 | Workflow instantiate idempotency | [workflow-instantiate-idempotency.md](workflow-instantiate-idempotency.md) | `avenor stable` + `avenor workflow` → same-key retry convergence + conflict |
 | Workflow completion command | [workflow-command-completion.md](workflow-command-completion.md) | `avenor stable` + `avenor workflow` → supervisor-side check argv, stdout evidence, pointer output |
 | Workflow retry backoff | [retry-backoff.md](retry-backoff.md) | `avenor stable` + `avenor workflow` → held activation + timed second attempt |
+| Workflow controller diagnostics | [workflow-controller-diagnostics.md](workflow-controller-diagnostics.md) | `avenor stable` + `avenor workflow` → unresolved_selection diagnostic + bounded re-dispatch |
 | Claude peer layer | [claude-peers.md](claude-peers.md) | plugin `hooks/` mods layer → `SendMessage({to:"avenor:*"})`, inbound prompt turn, blocking `ask` |
 | Top-level Pi–Claude peers | [top-level-peers.md](top-level-peers.md) | independent sessions → central broker over outbound polling, combined local-child peers, identity lifecycle |
 | Codex peer layer | [codex-peers.md](codex-peers.md) | plugin `hooks/codex.json` command hooks → identity-bound `message`/`peers`, `codex queue` idle delivery |

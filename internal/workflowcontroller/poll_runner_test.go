@@ -524,16 +524,29 @@ func TestRunnerUnresolvedBindingDiagnosticDeduped(t *testing.T) {
 	if !open || detail != deps.unresolvedDetail {
 		t.Fatalf("diagnostic unresolved_binding/wf-1/review/act-1 = %q open=%v, want detail %q", detail, open, deps.unresolvedDetail)
 	}
-	// The leader commits the diagnostic, then sets its in-memory status. The
-	// event log being visible does not mean the outcome is published yet, so
-	// wait for the outcome instead of reading it once.
-	waitUntil(t, "unresolved_binding last outcome", func() bool {
-		return r.Status().LastOutcome == string(ResultUnresolvedBinding)
+	// The leader processes the result when the candidate is held in
+	// backoff. The outcome label itself is not a stable pin: the next
+	// reconcile pass folds it over to dispatch_backoff once the candidate
+	// is suppressed, so pin the deadline instead.
+	waitUntil(t, "first failure held in backoff", func() bool {
+		return !r.Status().DispatchBackoffUntil.IsZero()
 	})
+	firstDeadline := r.Status().DispatchBackoffUntil
+	if firstDeadline.IsZero() {
+		t.Fatal("first failure recorded no dispatch backoff deadline")
+	}
 
-	// Further dispatches of the same unresolved binding append no events.
-	waitUntil(t, "second dispatch", func() bool { return deps.dispatchCount() > 1 })
+	// Further dispatches of the same unresolved binding append no events;
+	// the candidate is held in the dispatch backoff between them. Advance
+	// the clock only after each result's deadline is stamped, so the next
+	// advance always moves past the live deadline regardless of when the
+	// leader goroutine drained the result.
 	clock.Advance(30 * time.Second)
+	waitUntil(t, "second dispatch", func() bool { return deps.dispatchCount() > 1 })
+	waitUntil(t, "second failure held in backoff", func() bool {
+		return r.Status().DispatchBackoffUntil.After(firstDeadline)
+	})
+	clock.Advance(60 * time.Second)
 	waitUntil(t, "third dispatch", func() bool { return deps.dispatchCount() > 2 })
 	if n := countDiagEvents(); n != 1 {
 		t.Fatalf("diagnostic_recorded events = %d, want deduplicated 1", n)

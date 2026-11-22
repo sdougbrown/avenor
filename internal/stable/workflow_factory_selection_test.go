@@ -7,8 +7,8 @@ package stable
 // digest on the activation; retries inherit the pinned selection and
 // conflicting selections are rejected; a declared reroute creates a fresh
 // activation that can pin a different selection while the rerouted
-// activation keeps its own; and a resolution failure is a start_failed-class
-// outcome with no attempt recorded.
+// activation keeps its own; and a resolution failure is an
+// unresolved_selection outcome with no attempt recorded.
 
 import (
 	"context"
@@ -337,11 +337,12 @@ func TestFactoryDispatchPinsRosterSelection(t *testing.T) {
 	assertSelection(t, "assessment activation", f.activationByNode(t, "assessment").Selection, f.selection, f.rosterPath)
 }
 
-// TestFactoryDispatchResolutionFailureIsStartFailed proves a dispatch whose
-// assignment cannot resolve (the roster file the assignment references is
-// gone) is a start_failed-class outcome with no reservation held, no attempt
-// recorded, and no workflow event appended: the activation stays pending.
-func TestFactoryDispatchResolutionFailureIsStartFailed(t *testing.T) {
+// TestFactoryDispatchResolutionFailureIsUnresolvedSelection proves a
+// dispatch whose assignment cannot resolve (the roster file the assignment
+// references is gone) is an unresolved_selection outcome with no reservation
+// held, no attempt recorded, and no workflow event appended: the activation
+// stays pending.
+func TestFactoryDispatchResolutionFailureIsUnresolvedSelection(t *testing.T) {
 	t.Parallel()
 	f := newFactorySelectionFixture(t, "sel-fail", 900)
 	f.completeIntake(t)
@@ -364,8 +365,8 @@ func TestFactoryDispatchResolutionFailureIsStartFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatchWorkflowNode: %v", err)
 	}
-	if out.Kind != DispatchStartFailed {
-		t.Fatalf("dispatch outcome = %s (%s), want start_failed", out.Kind, out.Detail)
+	if out.Kind != DispatchUnresolvedSelection {
+		t.Fatalf("dispatch outcome = %s (%s), want unresolved_selection", out.Kind, out.Detail)
 	}
 	fresh := f.activationByNode(t, "assessment")
 	if fresh.Status != workflow.ActivationPending || len(fresh.AttemptIDs) != 0 {

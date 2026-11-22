@@ -41,6 +41,12 @@ const (
 	// fully resolved; the activation stays ready and a deduplicated
 	// diagnostic is recorded.
 	ResultUnresolvedBinding DispatchResultKind = "unresolved_binding"
+	// ResultUnresolvedSelection means the candidate's execution selection
+	// could not be resolved (a roster the assignment references is missing
+	// or invalid). No attempt was recorded and the activation stays ready,
+	// so a deduplicated diagnostic is recorded and the candidate is held in
+	// the dispatch backoff instead of being re-dispatched every pass.
+	ResultUnresolvedSelection DispatchResultKind = "unresolved_selection"
 )
 
 // DispatchResult is the outcome of one host dispatch attempt.
@@ -153,6 +159,13 @@ type unreportedEntry struct {
 type dispatchFailEntry struct {
 	count int
 	next  time.Time
+}
+
+// startFailKey deduplicates the unresolved-selection stderr log lines: one
+// line per candidate and distinct resolution detail.
+type startFailKey struct {
+	name   string
+	detail string
 }
 
 // wakeReason reports which wakeup ended the previous pass. Only a
@@ -388,6 +401,12 @@ type leaderState struct {
 	// dispatchFail holds the backoff state of candidates whose most recent
 	// dispatches failed, keyed by execution identity.
 	dispatchFail map[workflow.ExecutionIdentity]dispatchFailEntry
+	// startFailLogged holds the unresolved-selection log lines already
+	// written to stderr, keyed by the candidate's diagnostic name and the
+	// detail: a persistently failing selection reports its cause once per
+	// candidate instead of once per reconcile pass, and a candidate that
+	// recovers and later fails the same way logs again.
+	startFailLogged map[startFailKey]bool
 	// readyHold is the earliest future readiness time among the current
 	// pass's candidates (a retry backoff), or the zero time when none is.
 	// It wakes the loop at the hold's expiry and reports the held state;
@@ -451,6 +470,7 @@ func (s *leaderState) dropLeadership(r *Runner) {
 	s.leaseID = ""
 	s.blockedSource = ""
 	s.dispatchFail = map[workflow.ExecutionIdentity]dispatchFailEntry{}
+	s.startFailLogged = map[startFailKey]bool{}
 	s.readyHold = time.Time{}
 	r.clearLeadStatus()
 }
@@ -480,20 +500,22 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		// per consecutive failure, so a persistently failing dispatch
 		// degrades to a bounded retry cadence instead of a hot loop.
 		if currentLease {
-			e := s.dispatchFail[res.identity]
-			e.count++
-			e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
-			s.dispatchFail[res.identity] = e
-			r.setStatus(func(st *RunnerStatus) {
-				st.LastOutcome = "dispatch_error"
-				st.DispatchBackoffUntil = e.next
-			})
+			r.backOffCandidate(s, res.identity, "dispatch_error")
 		}
 		return false
 	}
 	// A delivered result means the dispatch worked; the candidate's
-	// consecutive-failure chain is broken.
-	if currentLease {
+	// consecutive-failure chain is broken. A failure-shaped result is also
+	// a failure — its own case below extends the chain — so it must not
+	// clear the entry it is about to increment.
+	failureShaped := false
+	for _, kind := range failureShapedKinds {
+		if res.result.Kind == kind {
+			failureShaped = true
+			break
+		}
+	}
+	if currentLease && !failureShaped {
 		if _, ok := s.dispatchFail[res.identity]; ok {
 			delete(s.dispatchFail, res.identity)
 			if len(s.dispatchFail) == 0 {
@@ -507,6 +529,10 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		if _, _, err := r.store.ClearCapacityBlocked(r.controllerID); err != nil {
 			log.Printf("workflow controller %s: clear capacity blocked: %v", r.controllerID, err)
 		}
+		// The dispatch worked, so any dispatch diagnostic on this
+		// candidate's identity names a cause that is gone; clear it so a
+		// healthy controller does not report a stale failure.
+		r.clearDispatchDiagnostics(s, res.identity)
 		r.setStatus(func(st *RunnerStatus) {
 			st.LastOutcome = string(ResultDispatched)
 			st.CapacityBlocked = ""
@@ -537,17 +563,70 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 				log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
 			}
 		}
+		// The park succeeded, so any dispatch diagnostic on this
+		// candidate's identity names a cause that is gone.
+		r.clearDispatchDiagnostics(s, res.identity)
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
 	case ResultUnresolvedBinding:
-		name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
-		if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_binding", name, res.result.Detail); err != nil {
-			log.Printf("workflow controller %s: record unresolved_binding: %v", r.controllerID, err)
+		name := DiagnosticName(res.identity)
+		if _, err := r.store.RecordDiagnostic(r.controllerID, string(ResultUnresolvedBinding), name, res.result.Detail); err != nil {
+			log.Printf("workflow controller %s: record %s: %v", r.controllerID, ResultUnresolvedBinding, err)
 		}
-		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
+		// The park candidate stays dispatchable, so it is held in the
+		// same per-candidate backoff as a dispatch error; otherwise every
+		// pass re-runs the park on unresolved gate pins.
+		if currentLease {
+			r.backOffCandidate(s, res.identity, string(ResultUnresolvedBinding))
+		} else {
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
+		}
+	case ResultUnresolvedSelection:
+		name := DiagnosticName(res.identity)
+		if _, err := r.store.RecordDiagnostic(r.controllerID, string(ResultUnresolvedSelection), name, res.result.Detail); err != nil {
+			log.Printf("workflow controller %s: record %s: %v", r.controllerID, ResultUnresolvedSelection, err)
+		}
+		// The candidate stays dispatchable, so it is held in the same
+		// per-candidate backoff as a dispatch error; otherwise every pass
+		// re-dispatches it in a hot loop.
+		if currentLease {
+			r.backOffCandidate(s, res.identity, string(ResultUnresolvedSelection))
+		} else {
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedSelection) })
+		}
+		if res.result.Detail != "" && !s.startFailLogged[startFailKey{name: name, detail: res.result.Detail}] {
+			s.startFailLogged[startFailKey{name: name, detail: res.result.Detail}] = true
+			log.Printf("workflow controller %s: unresolved selection %s: %s", r.controllerID, name, res.result.Detail)
+		}
 	default:
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(res.result.Kind) })
 	}
 	return lostLead
+}
+
+// failureShapedKinds are the delivered dispatch outcomes that are
+// themselves failures: the runner records a diagnostic under the same
+// kind, holds the candidate in the dispatch backoff, and clears exactly
+// these kinds on a success-shaped outcome.
+var failureShapedKinds = []DispatchResultKind{ResultUnresolvedBinding, ResultUnresolvedSelection}
+
+// clearDispatchDiagnostics removes the dispatch diagnostics recorded
+// against this candidate's identity: a delivered success means their
+// causes are gone. Clearing an absent diagnostic is a no-op, so a
+// candidate that only ever failed one path pays one load.
+func (r *Runner) clearDispatchDiagnostics(s *leaderState, identity workflow.ExecutionIdentity) {
+	name := DiagnosticName(identity)
+	for _, kind := range failureShapedKinds {
+		if err := r.store.ClearDiagnostic(r.controllerID, string(kind), name); err != nil {
+			log.Printf("workflow controller %s: clear %s: %v", r.controllerID, kind, err)
+		}
+	}
+	// The candidate's episode is over: a recurrence of the same cause
+	// logs again instead of staying silent until a leadership loss.
+	for key := range s.startFailLogged {
+		if key.name == name {
+			delete(s.startFailLogged, key)
+		}
+	}
 }
 
 // receiveResult accounts for one delivered worker result.
@@ -615,6 +694,21 @@ const (
 	// stepExit leaves the leader loop.
 	stepExit
 )
+
+// backOffCandidate extends a candidate's consecutive-failure chain: its
+// next dispatch is deferred, doubling per consecutive failure, so a
+// persistently failing dispatch degrades to a bounded retry cadence
+// instead of a hot loop. outcome names the recorded LastOutcome.
+func (r *Runner) backOffCandidate(s *leaderState, identity workflow.ExecutionIdentity, outcome string) {
+	e := s.dispatchFail[identity]
+	e.count++
+	e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
+	s.dispatchFail[identity] = e
+	r.setStatus(func(st *RunnerStatus) {
+		st.LastOutcome = outcome
+		st.DispatchBackoffUntil = e.next
+	})
+}
 
 // dispatchBackoffDelay is the per-candidate dispatch-failure backoff: the
 // base after the first consecutive error, doubling per consecutive
@@ -1038,10 +1132,11 @@ func (r *Runner) loop() {
 	defer r.clearLeadStatus()
 
 	s := &leaderState{
-		timer:        time.NewTimer(0),
-		unreported:   map[workflow.ExecutionIdentity]unreportedEntry{},
-		pollInFlight: map[string]bool{},
-		dispatchFail: map[workflow.ExecutionIdentity]dispatchFailEntry{},
+		timer:           time.NewTimer(0),
+		unreported:      map[workflow.ExecutionIdentity]unreportedEntry{},
+		pollInFlight:    map[string]bool{},
+		dispatchFail:    map[workflow.ExecutionIdentity]dispatchFailEntry{},
+		startFailLogged: map[startFailKey]bool{},
 	}
 	if !s.timer.Stop() {
 		<-s.timer.C

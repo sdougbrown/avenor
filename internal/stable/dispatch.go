@@ -48,6 +48,12 @@ const (
 	// attempt intent was durably recorded; kernel attempt/retry semantics
 	// apply.
 	DispatchStartFailed DispatchOutcomeKind = "start_failed"
+	// DispatchUnresolvedSelection means the node's execution selection could
+	// not be resolved (a roster the assignment references is missing or
+	// invalid). No reservation is held, no attempt is recorded, and no
+	// event is appended; the activation stays a ready candidate and the
+	// resolution error travels in Detail.
+	DispatchUnresolvedSelection DispatchOutcomeKind = "unresolved_selection"
 )
 
 // DispatchRequest asks the supervisor to dispatch one ready workflow node on
@@ -100,14 +106,15 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 
 	// Resolve the effective selection before anything is reserved: a pinned
 	// selection (a retry) is used unchanged, otherwise the node's declared
-	// assignment resolves through the roster path. A resolution failure is a
-	// start_failed-class outcome with no reservation held and no event
-	// appended; the node stays a candidate for operator attention.
+	// assignment resolves through the roster path. A resolution failure is
+	// an unresolved_selection outcome with no reservation held and no event
+	// appended; the node stays a candidate and the resolution error travels
+	// in Detail for the controller's diagnostic and backoff.
 	selection := req.Selection
 	if selection == nil {
 		selection, err = s.resolveDispatchSelection(mgr, req.WorkflowID, req.NodeID, req.ActivationID)
 		if err != nil {
-			out.Kind = DispatchStartFailed
+			out.Kind = DispatchUnresolvedSelection
 			out.Detail = err.Error()
 			return out, nil
 		}
@@ -410,6 +417,7 @@ func (d *stableRunnerDeps) Dispatch(ctx context.Context, dec workflowcontroller.
 	return workflowcontroller.DispatchResult{
 		Kind:   translateDispatchOutcome(out.Kind),
 		Source: out.Source,
+		Detail: out.Detail,
 	}, nil
 }
 
@@ -429,6 +437,8 @@ func translateDispatchOutcome(kind DispatchOutcomeKind) workflowcontroller.Dispa
 		return workflowcontroller.ResultNotLeader
 	case DispatchStartFailed:
 		return workflowcontroller.ResultStartFailed
+	case DispatchUnresolvedSelection:
+		return workflowcontroller.ResultUnresolvedSelection
 	default:
 		return workflowcontroller.ResultCanceled
 	}

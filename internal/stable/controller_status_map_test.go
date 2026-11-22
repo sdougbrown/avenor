@@ -75,3 +75,33 @@ func TestControllerStatusMapRetryBackoffStatus(t *testing.T) {
 		}
 	})
 }
+
+// TestControllerStatusMapDiagnostics asserts the diagnostics visibility
+// contract: a controller record's recorded diagnostics surface under
+// `diagnostics` keyed kind/name, and a record with none reports nil.
+func TestControllerStatusMapDiagnostics(t *testing.T) {
+	detail := `entry "donkey": thinking: invalid thinking value "none"`
+
+	t.Run("surfaces recorded diagnostics", func(t *testing.T) {
+		rec := workflowcontroller.ControllerRecord{
+			ControllerID: "c1",
+			Diagnostics:  map[string]string{"unresolved_selection/wf1/start/a1": detail},
+		}
+		got := controllerStatusMap(rec, "self", nil, nil)
+		diags, ok := got["diagnostics"].(map[string]string)
+		if !ok || diags["unresolved_selection/wf1/start/a1"] != detail {
+			t.Fatalf("diagnostics = %#v, want the recorded diagnostic", got["diagnostics"])
+		}
+	})
+
+	t.Run("nil when no diagnostics are recorded", func(t *testing.T) {
+		got := controllerStatusMap(workflowcontroller.ControllerRecord{ControllerID: "c1"}, "self", nil, nil)
+		v, ok := got["diagnostics"]
+		if !ok {
+			t.Fatal("diagnostics key missing from the status map; want present with a nil value")
+		}
+		if v != nil {
+			t.Fatalf("diagnostics = %#v, want nil", v)
+		}
+	})
+}

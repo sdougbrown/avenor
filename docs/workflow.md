@@ -367,6 +367,19 @@ contract, and no worker handoff exists. A
 [command contract](#completion-command) is declared only on an auto provider
 node, since the supervisor is its only evaluator.
 
+A selection that cannot resolve at dispatch time — the roster file an
+assignment references is missing, or an entry in it is invalid — never
+dispatches and never records an attempt. The controller records an
+`unresolved_selection` diagnostic naming the blocked
+`workflow/node/activation` with the resolution error, holds that candidate
+in the dispatch backoff instead of re-dispatching it on every pass, and
+logs the distinct error once. The diagnostic surfaces in
+`controller status` under `diagnostics` and on that workflow's
+`workflow inspect` under `controller_diagnostics`. Fixing the cause lets
+the candidate dispatch on the first pass after its dispatch backoff
+expires (`dispatch_backoff_until` names that time) and clears the
+diagnostic; no supervisor restart is needed.
+
 ### Messaging
 
 An assignment may set `messaging` to enable or disable poo messaging for a

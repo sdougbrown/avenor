@@ -749,6 +749,124 @@ func TestWorkflowReadyAdvisoryCandidates(t *testing.T) {
 	}
 }
 
+// TestWorkflowInspectSurfacesControllerDiagnostics proves a controller
+// diagnostic naming a workflow (workflow/node/activation, the shape the
+// runner records selection-resolution failures under) is visible on that workflow's
+// inspect result, so a dispatch-side failure cause can be read without
+// reading the controller store, and a workflow with none carries no key.
+func TestWorkflowInspectSurfacesControllerDiagnostics(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "wfroot")
+	if err := workflow.New(root).CreateRoot(); err != nil {
+		t.Fatalf("CreateRoot: %v", err)
+	}
+	sup := newTestSupervisor(t, Config{ControlSocket: newStableSocketPath(t, "wfctl-inspdiag"), WorkflowRoot: root})
+	stopLoopsAtCleanup(t, sup)
+
+	if _, err := sup.WorkflowControllerCreate(createControllerParams(t, "c1", 5)); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	template := map[string]any{
+		"schema_version":   1,
+		"template_id":      "inspdiag-tmpl",
+		"template_version": "1",
+		"entry_nodes":      []string{"start"},
+		"nodes": []any{map[string]any{
+			"id":       "start",
+			"action":   map[string]any{"type": "run", "prompt": "do the thing"},
+			"dispatch": map[string]any{"mode": "auto", "controller_id": "c1"},
+		}},
+		"terminal_outcomes": []string{"done"},
+	}
+	tmplJSON, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("marshal template: %v", err)
+	}
+	if _, err := (lazyWorkflowHandler{sup}).WorkflowCreate(tmplJSON); err != nil {
+		t.Fatalf("workflow create: %v", err)
+	}
+	payload, err := json.Marshal(map[string]string{"template_id": "inspdiag-tmpl", "template_version": "1"})
+	if err != nil {
+		t.Fatalf("marshal instantiate: %v", err)
+	}
+	out, err := (lazyWorkflowHandler{sup}).WorkflowInstantiate(payload)
+	if err != nil {
+		t.Fatalf("workflow instantiate: %v", err)
+	}
+	wfID, ok := out.(map[string]any)["workflow_id"].(string)
+	if !ok || wfID == "" {
+		t.Fatalf("instantiate result = %#v, want workflow_id", out)
+	}
+
+	// A workflow with no recorded diagnostics carries no key.
+	clean, err := (lazyWorkflowHandler{sup}).WorkflowInspect(wfID)
+	if err != nil {
+		t.Fatalf("inspect before recording: %v", err)
+	}
+	if _, ok := clean.(map[string]any)["controller_diagnostics"]; ok {
+		t.Fatalf("inspect before recording = %#v, want no controller_diagnostics key", clean)
+	}
+
+	insp, err := (lazyWorkflowHandler{sup}).WorkflowInspect(wfID)
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	acts, ok := insp.(map[string]any)["activations"].([]workflow.Activation)
+	if !ok || len(acts) == 0 {
+		t.Fatalf("activations = %#v, want the start activation", insp)
+	}
+	actID := acts[0].ID
+
+	// Record the diagnostic the runner writes for a start failure, then
+	// inspect again: the diagnostic must surface attributed to the
+	// controller, the activation, and the resolution detail.
+	store, err := sup.controllerBarrierStore()
+	if err != nil {
+		t.Fatalf("controller store: %v", err)
+	}
+	detail := `entry "donkey": thinking: invalid thinking value "none"`
+	name := workflowcontroller.DiagnosticName(workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(wfID), NodeID: "start", ActivationID: actID})
+	if _, err := store.RecordDiagnostic("c1", "unresolved_selection", name, detail); err != nil {
+		t.Fatalf("record diagnostic: %v", err)
+	}
+
+	insp, err = (lazyWorkflowHandler{sup}).WorkflowInspect(wfID)
+	if err != nil {
+		t.Fatalf("inspect after recording: %v", err)
+	}
+	raw, ok := insp.(map[string]any)["controller_diagnostics"].([]map[string]any)
+	if !ok || len(raw) != 1 {
+		t.Fatalf("controller_diagnostics = %#v, want one entry", insp.(map[string]any)["controller_diagnostics"])
+	}
+	entry := raw[0]
+	for field, want := range map[string]string{
+		"controller_id": "c1",
+		"kind":          "unresolved_selection",
+		"name":          name,
+		"detail":        detail,
+	} {
+		if got, _ := entry[field].(string); got != want {
+			t.Fatalf("controller_diagnostics[0][%s] = %q, want %q", field, got, want)
+		}
+	}
+
+	// Diagnostics naming another workflow — including a prefix-colliding
+	// ID (this workflow's ID with a suffix) — must not surface here: the
+	// filter matches whole path components, not string prefixes.
+	if _, err := store.RecordDiagnostic("c1", "unresolved_selection", workflowcontroller.DiagnosticName(workflow.ExecutionIdentity{WorkflowID: workflow.WorkflowID(wfID + "x"), NodeID: "start", ActivationID: "act_other"}), detail); err != nil {
+		t.Fatalf("record cross-workflow diagnostic: %v", err)
+	}
+	insp, err = (lazyWorkflowHandler{sup}).WorkflowInspect(wfID)
+	if err != nil {
+		t.Fatalf("inspect after cross-workflow diagnostic: %v", err)
+	}
+	raw, ok = insp.(map[string]any)["controller_diagnostics"].([]map[string]any)
+	if !ok || len(raw) != 1 {
+		t.Fatalf("controller_diagnostics = %#v, want only this workflow's entry", insp.(map[string]any)["controller_diagnostics"])
+	}
+}
+
 // TestControllerRenewFailureYieldsAndReacquires proves the leader loop's
 // renew-failure branch: when the lease is taken out-of-band (a CAS conflict
 // on the next renew), the loop yields (holding=false) instead of exiting,
