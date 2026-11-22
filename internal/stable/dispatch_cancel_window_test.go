@@ -25,6 +25,8 @@ package stable
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -313,5 +315,75 @@ func TestCancelAfterRegisteredRuntimeStopsTheAttempt(t *testing.T) {
 	attempts := attemptsForNode(&inst, "start")
 	if len(attempts) != 1 || attempts[0].Status != workflow.AttemptCanceled {
 		t.Fatalf("attempts = %+v, want one canceled attempt", attempts)
+	}
+}
+
+// TestDispatchStartsNoProviderWhenCancelCommitsInsideRegistrationLock commits
+// the cancel while the registration critical section is held, through the
+// manager directly (the supervisor's own cancel handler would deadlock on the
+// held lock). This pins where the refusal read lives: the hook runs after the
+// lock is acquired and before the status read, so a read placed anywhere
+// earlier — outside the lock, or before it is acquired — sees an uncanceled
+// instance, starts the provider, and fails this test.
+func TestDispatchStartsNoProviderWhenCancelCommitsInsideRegistrationLock(t *testing.T) {
+	t.Parallel()
+	f := newDispatchFixture(t, "dispatch-cancel-in-lock", 4, 4, "")
+	provider, providerCalls := installCancelWindowProvider(f)
+
+	var (
+		seamAttemptID string
+		cancelErr     error
+		cancelResult  any
+	)
+	f.sup.testHooks.insideAttemptRegistration = func(attemptID string) {
+		seamAttemptID = attemptID
+		cancelResult, cancelErr = f.mgr.WorkflowCancel(f.wf, mustJSON(t, map[string]string{
+			"actor":  "ops",
+			"reason": "cancel committed inside the registration critical section",
+		}))
+	}
+	out, err := f.sup.dispatchWorkflowNode(t.Context(), f.dispatchRequest(nil))
+	if err != nil {
+		t.Fatalf("dispatchWorkflowNode: %v", err)
+	}
+	if seamAttemptID == "" || seamAttemptID != out.AttemptID {
+		t.Fatalf("insideAttemptRegistration attempt = %q, dispatch attempt = %q, want the committed attempt", seamAttemptID, out.AttemptID)
+	}
+	if cancelErr != nil {
+		t.Fatalf("cancel inside the registration lock: %v", cancelErr)
+	}
+	if got := cancelResult.(map[string]any)["status"]; got != string(workflow.WorkflowCanceled) {
+		t.Fatalf("cancel result status = %v, want %q (result %#v)", got, workflow.WorkflowCanceled, cancelResult)
+	}
+	if got := providerCalls.Load(); got != 0 {
+		t.Fatalf("provider executed for a cancel committed inside the registration lock: provider factory calls = %d, "+
+			"session starts = %d, prompts = %d, dispatch outcome = %s (runtime %q)",
+			got, provider.starts.Load(), provider.prompts.Load(), out.Kind, out.RuntimeID)
+	}
+	if out.Kind != DispatchCanceled {
+		t.Fatalf("dispatch outcome = %s (%s), want %s", out.Kind, out.Detail, DispatchCanceled)
+	}
+	if got := activeRuntimeCount(f.sup); got != 0 {
+		t.Fatalf("live runtimes = %d after the canceled dispatch, want 0", got)
+	}
+}
+
+// TestAttemptStartFailureMarkerClassifiesTheRefusal pins the marker
+// classification shared by every workflow executor's start-failure path: a
+// refusal error must still match through wrapping (the executors receive it
+// from spawn), and a plain start failure keeps the executor's own marker.
+func TestAttemptStartFailureMarkerClassifiesTheRefusal(t *testing.T) {
+	refusal := fmt.Errorf("start attempt: %w", errAttemptWorkflowCanceled)
+	for _, startErr := range []error{errAttemptWorkflowCanceled, refusal} {
+		got := attemptStartFailureMarker(startErr, "loop", "")
+		if got[0] != dispatchCanceledMarkerKind || got[1] != dispatchCanceledMarkerLabel {
+			t.Fatalf("refusal %v: marker = %v, want %s/%s", startErr, got, dispatchCanceledMarkerKind, dispatchCanceledMarkerLabel)
+		}
+	}
+	if got := attemptStartFailureMarker(errors.New("provider unavailable"), "loop", ""); got[0] != "loop" || got[1] != "" {
+		t.Fatalf("plain start failure: marker = %v, want the executor's loop marker", got)
+	}
+	if got := attemptStartFailureMarker(errors.New("provider unavailable")); got != nil {
+		t.Fatalf("plain start failure without a marker: marker = %v, want none", got)
 	}
 }

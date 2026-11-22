@@ -225,8 +225,8 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 			AttemptID:     begin.AttemptID,
 			LeaseID:       begin.LeaseID,
 			FailureStatus: workflow.AttemptFailed,
-			MarkerKind:    "dispatch",
-			MarkerLabel:   "dispatch_canceled",
+			MarkerKind:    dispatchCanceledMarkerKind,
+			MarkerLabel:   dispatchCanceledMarkerLabel,
 		}); ferr != nil {
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: record canceled dispatch: %v\n",
 				req.WorkflowID, req.NodeID, begin.AttemptID, ferr)
@@ -254,7 +254,7 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 	startErr := mgr.DispatchExecutor(begin.Action.Kind, ec)
 	kind, label := workflowMarkerForKind(begin.Action.Kind)
 	if startErr != nil {
-		if errors.Is(startErr, errAttemptWorkflowCanceled) {
+		if isAttemptStartRefusal(startErr) {
 			// A cancel won the registration race: nothing ran for this attempt,
 			// the executor already recorded the pre-start cancellation fact, and
 			// the dispatch reports the same canceled outcome the post-intent
