@@ -854,6 +854,21 @@ func TestWorkflowInspectSurfacesControllerDiagnostics(t *testing.T) {
 			t.Fatalf("controller_diagnostics[0][%s] = %q, want %q", field, got, want)
 		}
 	}
+
+	// Diagnostics naming another workflow — including a prefix-colliding
+	// ID (this workflow's ID with a suffix) — must not surface here: the
+	// filter matches whole path components, not string prefixes.
+	if _, err := store.RecordDiagnostic("c1", "unresolved_selection", wfID+"x/start/act_other", detail); err != nil {
+		t.Fatalf("record cross-workflow diagnostic: %v", err)
+	}
+	insp, err = (lazyWorkflowHandler{sup}).WorkflowInspect(wfID)
+	if err != nil {
+		t.Fatalf("inspect after cross-workflow diagnostic: %v", err)
+	}
+	raw, ok = insp.(map[string]any)["controller_diagnostics"].([]map[string]any)
+	if !ok || len(raw) != 1 {
+		t.Fatalf("controller_diagnostics = %#v, want only this workflow's entry", insp.(map[string]any)["controller_diagnostics"])
+	}
 }
 
 func TestControllerRenewFailureYieldsAndReacquires(t *testing.T) {

@@ -7,8 +7,8 @@ package stable
 // digest on the activation; retries inherit the pinned selection and
 // conflicting selections are rejected; a declared reroute creates a fresh
 // activation that can pin a different selection while the rerouted
-// activation keeps its own; and a resolution failure is a start_failed-class
-// outcome with no attempt recorded.
+// activation keeps its own; and a resolution failure is an
+// unresolved_selection outcome with no attempt recorded.
 
 import (
 	"context"

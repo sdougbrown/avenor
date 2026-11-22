@@ -375,9 +375,10 @@ dispatches and never records an attempt. The controller records an
 in the dispatch backoff instead of re-dispatching it on every pass, and
 logs the distinct error once. The diagnostic surfaces in
 `controller status` under `diagnostics` and on that workflow's
-`workflow inspect` under `controller_diagnostics`. Fixing the cause —
-repairing the roster, for example — lets the waiting candidate dispatch on
-the next pass; no supervisor restart is needed.
+`workflow inspect` under `controller_diagnostics`. Fixing the cause lets
+the candidate dispatch on the first pass after its dispatch backoff
+expires (`dispatch_backoff_until` names that time) and clears the
+diagnostic; no supervisor restart is needed.
 
 ### Messaging
 
