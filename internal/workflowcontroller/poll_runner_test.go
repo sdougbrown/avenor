@@ -530,11 +530,21 @@ func TestRunnerUnresolvedBindingDiagnosticDeduped(t *testing.T) {
 	waitUntil(t, "unresolved_binding last outcome", func() bool {
 		return r.Status().LastOutcome == string(ResultUnresolvedBinding)
 	})
+	firstDeadline := r.Status().DispatchBackoffUntil
+	if firstDeadline.IsZero() {
+		t.Fatal("first failure recorded no dispatch backoff deadline")
+	}
 
 	// Further dispatches of the same unresolved binding append no events;
-	// the candidate is held in the dispatch backoff between them.
+	// the candidate is held in the dispatch backoff between them. Advance
+	// the clock only after each result's deadline is stamped, so the next
+	// advance always moves past the live deadline regardless of when the
+	// leader goroutine drained the result.
 	clock.Advance(30 * time.Second)
 	waitUntil(t, "second dispatch", func() bool { return deps.dispatchCount() > 1 })
+	waitUntil(t, "second failure held in backoff", func() bool {
+		return r.Status().DispatchBackoffUntil.After(firstDeadline)
+	})
 	clock.Advance(60 * time.Second)
 	waitUntil(t, "third dispatch", func() bool { return deps.dispatchCount() > 2 })
 	if n := countDiagEvents(); n != 1 {
