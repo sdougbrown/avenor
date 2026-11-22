@@ -656,14 +656,17 @@ func applyAttemptIdentified(next *Snapshot, act *Activation, event Event) error 
 	return nil
 }
 
-// neverRetryableStopReasons holds the one provider stop reason the kernel
-// never re-arms a node after: a rejected credential cannot clear inside the
-// run, so the remaining retry budget must not be spent on it. It mirrors the
-// non-retryable set in runtime.IsRetryableFailure. session_id_conflict and
-// messaging_unavailable never appear there because they are Avenor-side
-// verdicts that never ride a provider turn's terminal record. A reason added
-// to that set must be added here too; TestNeverRetryableStopReasons pins the
-// membership.
+// neverRetryableStopReasons holds the provider stop reasons the kernel never
+// re-arms a node after: the refusal cannot clear inside the run, so the
+// remaining retry budget must not be spent on it. It mirrors the non-retryable
+// set in runtime.IsRetryableFailure for reasons that ride a provider terminal
+// record, with one documented divergence: quota_exhausted is fatal at the run
+// level, while the kernel still re-arms per the node's retry policy, whose
+// backoff can wait out a quota window. session_id_conflict and
+// messaging_unavailable are Avenor-side verdicts that never ride a provider
+// turn's terminal record, so the kernel never sees them here. A reason made
+// non-retryable in that set must be decided here too;
+// TestNeverRetryableStopReasons pins the membership and the divergence.
 var neverRetryableStopReasons = map[string]bool{
 	"auth_rejected": true,
 }

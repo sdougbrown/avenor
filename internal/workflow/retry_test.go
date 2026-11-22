@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 // retryTemplateJSON builds a single-node template whose run node carries the
@@ -1153,17 +1155,23 @@ func authRejectedScenario(t *testing.T, exhaustion RetryExhaustionKind, wantActi
 	}
 }
 
-// TestNeverRetryableStopReasons pins the kernel's never-retryable set: every
-// reason a provider turn can report that cannot clear inside the run is a
-// member, and the set holds exactly the reasons this test names. A reason
-// added to runtime.IsRetryableFailure's fatal set must be added here too.
+// TestNeverRetryableStopReasons pins the kernel's never-retryable set against
+// the runtime's. Every member must be a reason runtime.IsRetryableFailure
+// rejects, and quota_exhausted — run-level fatal, but deliberately re-armed by
+// the kernel per the node's retry policy — must stay out, so the documented
+// divergence cannot silently regress in either direction.
 func TestNeverRetryableStopReasons(t *testing.T) {
-	for _, reason := range []string{"auth_rejected"} {
-		if !neverRetryableStopReasons[reason] {
-			t.Errorf("stop reason %q cannot clear inside the run but the kernel would re-arm it", reason)
+	for reason := range neverRetryableStopReasons {
+		exitCode := runtime.ExitCodeForStopReason(reason)
+		if runtime.IsRetryableFailure(exitCode, reason) {
+			t.Errorf("kernel never re-arms %q, but the runtime calls exit %d retryable", reason, exitCode)
 		}
 	}
-	if len(neverRetryableStopReasons) != 1 {
-		t.Errorf("neverRetryableStopReasons = %v, want exactly the reasons the test names", neverRetryableStopReasons)
+	// The documented divergence (see neverRetryableStopReasons).
+	if neverRetryableStopReasons[runtime.QuotaExhaustedStopReason] {
+		t.Errorf("quota_exhausted is re-armed per the retry policy by design; remove it from the never-retryable set or change that policy")
+	}
+	if runtime.IsRetryableFailure(runtime.ExitCodeForStopReason(runtime.QuotaExhaustedStopReason), runtime.QuotaExhaustedStopReason) {
+		t.Errorf("quota_exhausted is expected to be run-level fatal; update the kernel's documented divergence to match")
 	}
 }

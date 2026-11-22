@@ -1007,7 +1007,7 @@ type Attempt struct {
 	StopReason   string `json:"stop_reason,omitempty"`
 	ErrorText    string `json:"error_text,omitempty"`
 	FailureClass string `json:"failure_class,omitempty"`
-	Corrections      int               `json:"corrections,omitempty"`
+	Corrections  int    `json:"corrections,omitempty"`
 	// Diagnostics records inert dispatch provenance (controller, leader lease,
 	// concurrency key) captured with the attempt intent. It never affects
 	// kernel transitions.
@@ -1112,8 +1112,8 @@ type Command struct {
 	// StopReason and ErrorText record, on a terminate command, the terminal
 	// stop reason the run reported and a bounded provider error excerpt.
 	// Inert evidence copied onto the attempt and its event.
-	StopReason string     `json:"stop_reason,omitempty"`
-	ErrorText  string     `json:"error_text,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	ErrorText  string `json:"error_text,omitempty"`
 	// WorkingDirectory records, on a terminate command, the working directory
 	// the attempt's runtime ran in. Inert evidence copied onto the attempt.
 	WorkingDirectory string        `json:"working_directory,omitempty"`

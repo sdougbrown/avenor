@@ -1305,9 +1305,9 @@ func (m *Manager) RecordAttemptTerminated(wf WorkflowID, nodeID NodeID, activati
 // attempt's runtime ran in (recorded when known). Any inspection evidence the
 // supervisor captured for it is carried too.
 type AttemptTermination struct {
-	Status           AttemptStatus
-	MarkerKind       string
-	MarkerLabel      string
+	Status      AttemptStatus
+	MarkerKind  string
+	MarkerLabel string
 	// StopReason and ErrorText carry the terminal stop reason the run reported
 	// and a bounded provider error excerpt. They are recorded on the attempt
 	// and its event; StopReason additionally steers the retry decision (see
