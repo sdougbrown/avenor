@@ -656,11 +656,17 @@ func applyAttemptIdentified(next *Snapshot, act *Activation, event Event) error 
 	return nil
 }
 
-// authRejectedStopReason mirrors runtime.AuthRejectedStopReason. The kernel
-// holds only this one provider stop reason because it alone changes retry
-// semantics: a rejected credential cannot clear inside the run, so the node's
-// remaining retry budget must not be spent on it.
-const authRejectedStopReason = "auth_rejected"
+// neverRetryableStopReasons holds the one provider stop reason the kernel
+// never re-arms a node after: a rejected credential cannot clear inside the
+// run, so the remaining retry budget must not be spent on it. It mirrors the
+// non-retryable set in runtime.IsRetryableFailure (session_id_conflict and
+// messaging_unavailable are Avenor-side verdicts that never ride a provider
+// turn's terminal record, so the kernel never sees them here); a reason added
+// there must be added here too, and TestNeverRetryableStopReasons pins the
+// membership.
+var neverRetryableStopReasons = map[string]bool{
+	"auth_rejected": true,
+}
 
 // applyAttemptTerminated records the outcome of an attempt. It never satisfies
 // the activation on its own: retry and retry-exhaustion are handled here, but
@@ -758,7 +764,7 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event, polici
 	// rejection cannot clear inside the run, so re-arming spends the budget
 	// on the same refusal and the exhaustion path surfaces the stop instead.
 	policy := retryPolicyFor(policies, next, act.NodeID)
-	if event.StopReason != authRejectedStopReason && policy != nil && len(act.AttemptIDs) < policy.MaximumAttempts {
+	if !neverRetryableStopReasons[event.StopReason] && policy != nil && len(act.AttemptIDs) < policy.MaximumAttempts {
 		// Re-arm the same activation for a new attempt; the stale lease was
 		// already released above so the new attempt is freshly claimed. A
 		// declared backoff stamps a not-before readiness time derived from

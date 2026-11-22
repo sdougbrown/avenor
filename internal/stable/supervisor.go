@@ -479,8 +479,8 @@ type childRuntime struct {
 	// lastStopReason mirrors the stop_reason of the most recent session.end
 	// observed on this runtime's event path (runtimeFanoutWriter.writeLocked).
 	lastStopReason string
-	// lastErrorText mirrors the message of the most recent error event on the
-	// same path, bounded at capture. It is the provider error excerpt a
+	// lastErrorText mirrors the message of the most recent prompt error event
+	// on the same path, bounded at capture. It is the provider error excerpt a
 	// workflow attempt records beside its stop reason.
 	lastErrorText string
 	latestSeq      int64
@@ -5765,8 +5765,13 @@ func (w *runtimeFanoutWriter) writeLockedTerminal(ev events.Event, diagnostics *
 				w.child.finalOutputTruncated = events.FinalOutputTruncated(fullFinalOutput)
 			}
 		case "avenor.error":
-			if message, _ := presentation.Fields["message"].(string); message != "" {
-				w.child.lastErrorText = boundedRunes(message, maxAttemptErrorText)
+			// Only the prompt error names the provider failure a turn died of;
+			// cli-sourced diagnostics (permission, cancel, teardown) must not
+			// overwrite the provider excerpt the attempt records.
+			if source, _ := presentation.Fields["source"].(string); source == "prompt" {
+				if message, _ := presentation.Fields["message"].(string); message != "" {
+					w.child.lastErrorText = events.BoundedRunes(message, maxAttemptErrorText)
+				}
 			}
 		}
 		w.child.mu.Unlock()
@@ -7432,18 +7437,6 @@ func (child *childRuntime) terminalMarkerLabel() string {
 // records, so a verbose provider dump cannot flood the durable event log.
 const maxAttemptErrorText = 512
 
-// boundedRunes cuts text to at most limit runes without splitting one.
-func boundedRunes(text string, limit int) string {
-	count := 0
-	for index := range text {
-		if count == limit {
-			return text[:index]
-		}
-		count++
-	}
-	return text
-}
-
 // workflowTerminator returns the termination callback a workflow attempt's
 // runtime carries from construction. It runs finishWorkflowAttempt: on a
 // successful auto-provider exit the lease heartbeat keeps running through the
@@ -7481,7 +7474,10 @@ func (s *Supervisor) recordWorkflowTermination(child *childRuntime, panicked boo
 	case exitCode == 0:
 		status = workflow.AttemptSucceeded
 	}
-	if stopReason == "" {
+	if stopReason == "" && exitCode != 0 {
+		// A child that died before any session.end carries its reason in the
+		// exit-code map. A zero exit (a panic path) names no stop reason: an
+		// AttemptPanicked fact must not read as end_turn.
 		stopReason = runtime.StopReasonForExitCode(exitCode)
 	}
 	cb(status, stopReason, errorText)

@@ -109,6 +109,21 @@ func goldenSnapshot() Snapshot {
 					Agent:   "reviewer",
 					Model:   "claude",
 				},
+				{
+					ID: "att_review_2",
+					Identity: ExecutionIdentity{
+						WorkflowID:   "wf_golden",
+						NodeID:       "review",
+						ActivationID: "act_review_1",
+						AttemptID:    "att_review_2",
+					},
+					Status:     AttemptFailed,
+					StopReason: "auth_rejected",
+					ErrorText:  "prompt: turn failed for session 01a1: Your authentication token has expired. Please try refreshing it.",
+					Backend:    "pi",
+					Agent:      "reviewer",
+					Model:      "claude",
+				},
 			},
 			Evidence: []Evidence{
 				{

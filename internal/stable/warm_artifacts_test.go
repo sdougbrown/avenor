@@ -31,7 +31,7 @@ func TestWarmResumeRotatesArtifactsAndRejectsConcurrentAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	child := &childRuntime{id: "rt", eventWriter: sink, onEvent: oldPath, sentinelFile: oldSentinel, promptCh: make(chan struct{}, 1), session: runtime.Session{SessionID: "session"}, fullFinalOutput: "old", lastStopReason: "end_turn"}
+	child := &childRuntime{id: "rt", eventWriter: sink, onEvent: oldPath, sentinelFile: oldSentinel, promptCh: make(chan struct{}, 1), session: runtime.Session{SessionID: "session"}, fullFinalOutput: "old", lastStopReason: "end_turn", lastErrorText: "stale provider excerpt"}
 	initializeTestLifecycle(t, child, testLifecycleOptions{exec: execParked})
 	sup := &Supervisor{}
 	writer := &runtimeFanoutWriter{base: sink, child: child, supervisor: sup}
@@ -48,7 +48,7 @@ func TestWarmResumeRotatesArtifactsAndRejectsConcurrentAdmission(t *testing.T) {
 	if got.OnEvent != nextPath || got.SentinelFile != nextSentinel || got.RunID != "new-run" || got.SessionID != "session" {
 		t.Fatalf("result: %+v", got)
 	}
-	if child.fullFinalOutput != "" || child.lastStopReason != "" || len(child.promptQueue) != 1 {
+	if child.fullFinalOutput != "" || child.lastStopReason != "" || child.lastErrorText != "" || len(child.promptQueue) != 1 {
 		t.Fatalf("stale state: %+v", child)
 	}
 	if err := writer.Write(events.Event{Event: "test.new"}); err != nil {

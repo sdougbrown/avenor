@@ -8401,3 +8401,42 @@ func TestRecordWorkflowTerminationCarriesStopReason(t *testing.T) {
 		t.Fatalf("stop reason from exit code = %+v, want %q", got, runtime.QuotaExhaustedStopReason)
 	}
 }
+
+// TestFanoutCaptureAttemptsProviderErrorText drives the real capture path the
+// feature depends on: an avenor.error event with the prompt source written
+// through the fanout writer must land bounded on child.lastErrorText, and a
+// cli-sourced diagnostic must not overwrite it.
+func TestFanoutCaptureAttemptsProviderErrorText(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-fanout-error.sock", MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_err_capture", done: make(chan struct{}), promptCh: make(chan struct{}, 1)}
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass})
+	finishUnrunChildAtCleanup(t, sup, child)
+
+	writer := &runtimeFanoutWriter{base: stableTestSink{}, runtimeID: child.id, child: child, supervisor: sup}
+	if err := writer.Write(events.Event{Event: "avenor.error", Fields: map[string]any{
+		"source": "prompt", "message": "prompt: turn failed for session 01a1f083: Your authentication token has expired. Please try refreshing it.",
+	}}); err != nil {
+		t.Fatalf("write prompt error: %v", err)
+	}
+	child.mu.Lock()
+	got := child.lastErrorText
+	child.mu.Unlock()
+	if !strings.Contains(got, "authentication token has expired") {
+		t.Fatalf("lastErrorText = %q, want the provider's auth failure text", got)
+	}
+
+	// A cli-sourced error on the same path must not replace the provider
+	// excerpt the attempt records.
+	if err := writer.Write(events.Event{Event: "avenor.error", Fields: map[string]any{
+		"source": "permission", "message": "permission answer timed out",
+	}}); err != nil {
+		t.Fatalf("write cli error: %v", err)
+	}
+	child.mu.Lock()
+	got = child.lastErrorText
+	child.mu.Unlock()
+	if !strings.Contains(got, "authentication token has expired") {
+		t.Fatalf("lastErrorText after cli error = %q, want the provider text kept", got)
+	}
+}

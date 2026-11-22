@@ -1009,12 +1009,34 @@ func TestRetryBackoffCarriesNotBeforeToCandidates(t *testing.T) {
 // TestAuthRejectedAttemptStopsRetry drives the durable path for the
 // auth_rejected stop reason. A plain failed attempt re-arms while the retry
 // budget remains; a failed attempt whose termination records auth_rejected
-// exhausts the budget immediately — the activation blocks instead of spending
-// the remaining slots on a credential refusal that cannot clear, and the stop
-// reason and bounded error excerpt are recorded on the attempt.
+// exhausts the budget immediately — the configured exhaustion applies instead
+// of spending the remaining slots on a credential refusal that cannot clear,
+// and the stop reason and bounded error excerpt are recorded on the attempt.
 func TestAuthRejectedAttemptStopsRetry(t *testing.T) {
 	t.Parallel()
-	m, s, wf := newRetryFixture(t, retryTemplateJSON("retry-auth", 3, RetryExhaustionBlock, ""), "retry-auth")
+	scenarios := []struct {
+		name           string
+		exhaustion     RetryExhaustionKind
+		wantActivation ActivationStatus
+		wantWorkflow   WorkflowStatus
+	}{
+		{"block", RetryExhaustionBlock, ActivationBlocked, WorkflowBlocked},
+		{"fail", RetryExhaustionFail, ActivationAttemptFailed, WorkflowFailed},
+	}
+	for _, sc := range scenarios {
+		sc := sc
+		t.Run(sc.name, func(t *testing.T) {
+			authRejectedScenario(t, sc.exhaustion, sc.wantActivation, sc.wantWorkflow)
+		})
+	}
+}
+
+// authRejectedScenario drives one exhaustion kind through the same sequence:
+// a plain failure that re-arms, then an auth_rejected termination that must
+// not.
+func authRejectedScenario(t *testing.T, exhaustion RetryExhaustionKind, wantActivation ActivationStatus, wantWorkflow WorkflowStatus) {
+	templateID := "retry-auth-" + string(exhaustion)
+	m, s, wf := newRetryFixture(t, retryTemplateJSON(templateID, 3, exhaustion, ""), templateID)
 	node := NodeID("start")
 
 	snap, _, err := s.loadCurrent(wf)
@@ -1074,11 +1096,11 @@ func TestAuthRejectedAttemptStopsRetry(t *testing.T) {
 		t.Fatalf("reload after auth_rejected termination: %v", err)
 	}
 	act = activationByNode(&snap.Instance, node)
-	if act.Status != ActivationBlocked {
-		t.Fatalf("status after auth_rejected = %s, want blocked (no re-arm)", act.Status)
+	if act.Status != wantActivation {
+		t.Fatalf("status after auth_rejected = %s, want %s (no re-arm)", act.Status, wantActivation)
 	}
-	if snap.Instance.Status != WorkflowBlocked {
-		t.Fatalf("workflow status after auth_rejected = %s, want blocked", snap.Instance.Status)
+	if snap.Instance.Status != wantWorkflow {
+		t.Fatalf("workflow status after auth_rejected = %s, want %s", snap.Instance.Status, wantWorkflow)
 	}
 	if len(act.AttemptIDs) != 2 {
 		t.Fatalf("attempt ids = %v, want 2 (no third attempt)", act.AttemptIDs)
@@ -1128,5 +1150,20 @@ func TestAuthRejectedAttemptStopsRetry(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no attempt_terminated event found for attempt %s", attempt2)
+	}
+}
+
+// TestNeverRetryableStopReasons pins the kernel's never-retryable set: every
+// reason a provider turn can report that cannot clear inside the run is a
+// member, and the set holds exactly the reasons this test names. A reason
+// added to runtime.IsRetryableFailure's fatal set must be added here too.
+func TestNeverRetryableStopReasons(t *testing.T) {
+	for _, reason := range []string{"auth_rejected"} {
+		if !neverRetryableStopReasons[reason] {
+			t.Errorf("stop reason %q cannot clear inside the run but the kernel would re-arm it", reason)
+		}
+	}
+	if len(neverRetryableStopReasons) != 1 {
+		t.Errorf("neverRetryableStopReasons = %v, want exactly the reasons the test names", neverRetryableStopReasons)
 	}
 }
