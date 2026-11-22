@@ -269,6 +269,7 @@ func (s *Supervisor) rotateWarmResumeTurn(child *childRuntime, p SpawnParams, re
 	}
 	child.task, child.taskFile = p.Prompt, p.PromptFile
 	child.lastStopReason = ""
+	child.lastErrorText = ""
 	child.finalOutput, child.fullFinalOutput = "", ""
 	child.finalOutputTruncated = false
 	child.usage = nil

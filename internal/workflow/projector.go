@@ -88,7 +88,7 @@ func ProjectWorkflowMD(snap Snapshot) string {
 	writeTable(&b, []string{"Gate Instance", "Node", "Activation", "Status", "Outcome", "Actor"}, gateRows(snap))
 
 	b.WriteString("\n## Attempts\n\n")
-	writeTable(&b, []string{"Attempt", "Node", "Activation", "Status", "Backend", "Model"}, attemptRows(snap.Instance.Attempts))
+	writeTable(&b, []string{"Attempt", "Node", "Activation", "Status", "Stop Reason", "Backend", "Model"}, attemptRows(snap.Instance.Attempts))
 
 	return b.String()
 }
@@ -109,10 +109,10 @@ func ProjectExecutionMD(snap Snapshot, nodeID NodeID) string {
 	rows := make([][]string, 0, len(snap.Instance.Attempts))
 	for _, a := range snap.Instance.Attempts {
 		if a.Identity.NodeID == nodeID {
-			rows = append(rows, []string{string(a.ID), string(a.Identity.ActivationID), string(a.Status), a.Backend, a.Model})
+			rows = append(rows, []string{string(a.ID), string(a.Identity.ActivationID), string(a.Status), a.StopReason, a.Backend, a.Model})
 		}
 	}
-	writeTable(&b, []string{"Attempt", "Activation", "Status", "Backend", "Model"}, rows)
+	writeTable(&b, []string{"Attempt", "Activation", "Status", "Stop Reason", "Backend", "Model"}, rows)
 
 	b.WriteString("\n## Evidence\n\n")
 	evRows := make([][]string, 0, len(snap.Instance.Evidence))
@@ -254,7 +254,7 @@ func gateRows(snap Snapshot) [][]string {
 func attemptRows(attempts []Attempt) [][]string {
 	rows := make([][]string, 0, len(attempts))
 	for _, a := range attempts {
-		rows = append(rows, []string{string(a.ID), string(a.Identity.NodeID), string(a.Identity.ActivationID), string(a.Status), a.Backend, a.Model})
+		rows = append(rows, []string{string(a.ID), string(a.Identity.NodeID), string(a.Identity.ActivationID), string(a.Status), a.StopReason, a.Backend, a.Model})
 	}
 	return rows
 }

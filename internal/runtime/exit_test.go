@@ -13,7 +13,7 @@ func TestIsRetryableFailure(t *testing.T) {
 	if !IsRetryableFailure(1, "") {
 		t.Fatal("generic exit code 1 should be retryable")
 	}
-	for _, reason := range []string{SessionIDConflictStopReason, MessagingUnavailableStopReason} {
+	for _, reason := range []string{SessionIDConflictStopReason, MessagingUnavailableStopReason, AuthRejectedStopReason} {
 		if IsRetryableFailure(1, reason) {
 			t.Errorf("stop reason %q should be fatal even with retryable exit code 1", reason)
 		}
@@ -21,8 +21,8 @@ func TestIsRetryableFailure(t *testing.T) {
 	if IsRetryableFailure(0, "end_turn") {
 		t.Fatal("successful attempt should not be retryable")
 	}
-	if !IsRetryableFailure(7, RateLimitedStopReason) || IsRetryableFailure(6, QuotaExhaustedStopReason) {
-		t.Fatal("a rate limit stays retryable; an exhausted quota is not retried in the same run")
+	if !IsRetryableFailure(7, RateLimitedStopReason) || IsRetryableFailure(6, QuotaExhaustedStopReason) || IsRetryableFailure(8, AuthRejectedStopReason) {
+		t.Fatal("a rate limit stays retryable; an exhausted quota or a rejected credential is not retried in the same run")
 	}
 }
 
@@ -35,6 +35,7 @@ func TestStopReasonForExitCode(t *testing.T) {
 		5:   "blocked",
 		6:   QuotaExhaustedStopReason,
 		7:   RateLimitedStopReason,
+		8:   AuthRejectedStopReason,
 		124: "timeout",
 		130: "cancelled",
 		1:   "",
@@ -56,6 +57,7 @@ func TestExitCodeForStopReason(t *testing.T) {
 		"blocked":                5,
 		QuotaExhaustedStopReason: 6,
 		RateLimitedStopReason:    7,
+		AuthRejectedStopReason:   8,
 		"cancelled":              130,
 		"timeout":                124,
 		"progress_timeout":       124,

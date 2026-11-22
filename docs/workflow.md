@@ -908,7 +908,11 @@ the retry budget: the activation re-arms while attempts remain and applies
 the configured exhaustion when the budget is gone. A `canceled` attempt — a
 deliberate operator kill or supervisor teardown — never re-arms and never
 retries: the activation parks in `blocked`, the canceled attempt still
-occupies one retry-budget slot, and `workflow.unblock` re-arms it.
+occupies one retry-budget slot, and `workflow.unblock` re-arms it. The same
+holds for a failed attempt whose terminal stop reason is `auth_rejected`: the
+provider refused the credentials, so no in-run retry can clear it and the
+exhaustion path applies immediately, leaving the reason and a bounded error
+excerpt on the attempt for `inspect`.
 
 `retry_policy.backoff_seconds` delays each re-arm: the activation stays
 `ready` but is not dispatchable until its not-before readiness time passes

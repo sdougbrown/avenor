@@ -8,9 +8,9 @@
 
 ## Attempts
 
-| Attempt | Activation | Status | Backend | Model |
-| --- | --- | --- | --- | --- |
-| att_review_1 | act_review_1 | succeeded | pi | claude |
+| Attempt | Activation | Status | Stop Reason | Backend | Model |
+| --- | --- | --- | --- | --- | --- |
+| att_review_1 | act_review_1 | succeeded |  | pi | claude |
 
 ## Evidence
 

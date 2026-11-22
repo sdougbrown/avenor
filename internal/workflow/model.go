@@ -1001,7 +1001,12 @@ type Attempt struct {
 	EndedAt          *time.Time        `json:"ended_at,omitempty"`
 	MarkerKind       string            `json:"marker_kind,omitempty"`
 	MarkerLabel      string            `json:"marker_label,omitempty"`
-	FailureClass     string            `json:"failure_class,omitempty"`
+	// StopReason and ErrorText carry the terminal stop reason the run reported
+	// and a bounded provider error excerpt. Inert evidence except for
+	// auth_rejected, which the retry decision reads.
+	StopReason   string `json:"stop_reason,omitempty"`
+	ErrorText    string `json:"error_text,omitempty"`
+	FailureClass string `json:"failure_class,omitempty"`
 	Corrections      int               `json:"corrections,omitempty"`
 	// Diagnostics records inert dispatch provenance (controller, leader lease,
 	// concurrency key) captured with the attempt intent. It never affects
@@ -1104,6 +1109,11 @@ type Command struct {
 	AttemptStatus    AttemptStatus     `json:"attempt_status,omitempty"`
 	MarkerKind       string            `json:"marker_kind,omitempty"`
 	MarkerLabel      string            `json:"marker_label,omitempty"`
+	// StopReason and ErrorText record, on a terminate command, the terminal
+	// stop reason the run reported and a bounded provider error excerpt.
+	// Inert evidence copied onto the attempt and its event.
+	StopReason string     `json:"stop_reason,omitempty"`
+	ErrorText  string     `json:"error_text,omitempty"`
 	// WorkingDirectory records, on a terminate command, the working directory
 	// the attempt's runtime ran in. Inert evidence copied onto the attempt.
 	WorkingDirectory string        `json:"working_directory,omitempty"`

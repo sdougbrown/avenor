@@ -61,6 +61,12 @@ type Event struct {
 	AttemptStatus  AttemptStatus     `json:"attempt_status,omitempty"`
 	MarkerKind     string            `json:"marker_kind,omitempty"`
 	MarkerLabel    string            `json:"marker_label,omitempty"`
+	// StopReason and ErrorText record, on an attempt_terminated event, the
+	// terminal stop reason the run reported and a bounded provider error
+	// excerpt. Inert evidence except for auth_rejected, which applyAttempt-
+	// Terminated reads to skip the retry re-arm.
+	StopReason string `json:"stop_reason,omitempty"`
+	ErrorText  string `json:"error_text,omitempty"`
 	// WorkingDirectory records, on an attempt_terminated event, the working
 	// directory the attempt's runtime ran in. Inert evidence.
 	WorkingDirectory string        `json:"working_directory,omitempty"`

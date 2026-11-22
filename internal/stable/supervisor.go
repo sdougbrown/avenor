@@ -240,7 +240,7 @@ type SpawnParams struct {
 	// installed on the runtime at construction, before the runtime can run,
 	// so a runtime that finishes before its executor returns still records
 	// its terminal fact. Set only by workflow executors.
-	workflowTerminate func(child *childRuntime, status workflow.AttemptStatus)
+	workflowTerminate func(child *childRuntime, status workflow.AttemptStatus, stopReason, errorText string)
 	// permissionDeciderRun marks the spawn as a supervisor-spawned permission
 	// decider for one pending request. It carries no JSON tag and is set only
 	// by spawnPermissionDecider, so a caller-supplied label cannot make an
@@ -479,6 +479,10 @@ type childRuntime struct {
 	// lastStopReason mirrors the stop_reason of the most recent session.end
 	// observed on this runtime's event path (runtimeFanoutWriter.writeLocked).
 	lastStopReason string
+	// lastErrorText mirrors the message of the most recent error event on the
+	// same path, bounded at capture. It is the provider error excerpt a
+	// workflow attempt records beside its stop reason.
+	lastErrorText string
 	latestSeq      int64
 	usage          map[string]any
 	// finalOutput is a bounded status preview; fullFinalOutput is returned
@@ -566,7 +570,7 @@ type childRuntime struct {
 	permissionDeciderSlotKey string
 	// onWorkflowTerminate records the terminal workflow attempt fact before the
 	// child's runtime state is cleaned up. Nil for non-workflow direct runs.
-	onWorkflowTerminate func(workflow.AttemptStatus)
+	onWorkflowTerminate func(status workflow.AttemptStatus, stopReason, errorText string)
 
 	// treeToken is the current tree-budget admission token held by this runtime.
 	// It is non-empty while the runtime is actively executing a turn and empty
@@ -1963,7 +1967,9 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		lc: lifecycleState{class: childAttemptClass(params)},
 	}
 	if terminate := params.workflowTerminate; terminate != nil {
-		child.onWorkflowTerminate = func(status workflow.AttemptStatus) { terminate(child, status) }
+		child.onWorkflowTerminate = func(status workflow.AttemptStatus, stopReason, errorText string) {
+			terminate(child, status, stopReason, errorText)
+		}
 	}
 	treeToken := res.consumeLocked()
 	if treeToken != "" {
@@ -5758,6 +5764,10 @@ func (w *runtimeFanoutWriter) writeLockedTerminal(ev events.Event, diagnostics *
 				w.child.fullFinalOutput = fullFinalOutput
 				w.child.finalOutputTruncated = events.FinalOutputTruncated(fullFinalOutput)
 			}
+		case "avenor.error":
+			if message, _ := presentation.Fields["message"].(string); message != "" {
+				w.child.lastErrorText = boundedRunes(message, maxAttemptErrorText)
+			}
 		}
 		w.child.mu.Unlock()
 	}
@@ -7418,15 +7428,31 @@ func (child *childRuntime) terminalMarkerLabel() string {
 	return child.workflowMarkerLabel
 }
 
+// maxAttemptErrorText bounds the provider error excerpt a workflow attempt
+// records, so a verbose provider dump cannot flood the durable event log.
+const maxAttemptErrorText = 512
+
+// boundedRunes cuts text to at most limit runes without splitting one.
+func boundedRunes(text string, limit int) string {
+	count := 0
+	for index := range text {
+		if count == limit {
+			return text[:index]
+		}
+		count++
+	}
+	return text
+}
+
 // workflowTerminator returns the termination callback a workflow attempt's
 // runtime carries from construction. It runs finishWorkflowAttempt: on a
 // successful auto-provider exit the lease heartbeat keeps running through the
 // terminal fact and the supervisor's completion, so the lease cannot expire in
 // between; on every other path it stops the heartbeat before recording the
 // terminal fact.
-func (s *Supervisor) workflowTerminator(ec workflow.ExecutorContext, hb *leaseHeartbeat) func(*childRuntime, workflow.AttemptStatus) {
-	return func(child *childRuntime, status workflow.AttemptStatus) {
-		s.finishWorkflowAttempt(ec, hb, status, child)
+func (s *Supervisor) workflowTerminator(ec workflow.ExecutorContext, hb *leaseHeartbeat) func(*childRuntime, workflow.AttemptStatus, string, string) {
+	return func(child *childRuntime, status workflow.AttemptStatus, stopReason, errorText string) {
+		s.finishWorkflowAttempt(ec, hb, status, stopReason, errorText, child)
 	}
 }
 
@@ -7438,6 +7464,8 @@ func (s *Supervisor) recordWorkflowTermination(child *childRuntime, panicked boo
 	cb := child.onWorkflowTerminate
 	workflowID := child.workflowID
 	exitCode := child.exitCode
+	stopReason := child.lastStopReason
+	errorText := child.lastErrorText
 	child.mu.Unlock()
 	if workflowID == "" || cb == nil {
 		return
@@ -7453,7 +7481,10 @@ func (s *Supervisor) recordWorkflowTermination(child *childRuntime, panicked boo
 	case exitCode == 0:
 		status = workflow.AttemptSucceeded
 	}
-	cb(status)
+	if stopReason == "" {
+		stopReason = runtime.StopReasonForExitCode(exitCode)
+	}
+	cb(status, stopReason, errorText)
 }
 
 func (h lazyWorkflowHandler) WorkflowCreate(p json.RawMessage) (any, error) {

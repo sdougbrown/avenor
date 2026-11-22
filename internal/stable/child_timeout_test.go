@@ -91,7 +91,7 @@ func TestRunChildTimeoutProducesTimeoutSentinel(t *testing.T) {
 
 	sentinel := filepath.Join(t.TempDir(), "sentinel.env")
 	terminated := make(chan workflow.AttemptStatus, 1)
-	child := &childRuntime{id: "rt_run_timeout", workflowID: "wf1", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}, provider: provider, onWorkflowTerminate: func(status workflow.AttemptStatus) { terminated <- status }}
+	child := &childRuntime{id: "rt_run_timeout", workflowID: "wf1", done: make(chan struct{}), promptCh: make(chan struct{}, 1), eventWriter: stableTestSink{}, sentinelFile: sentinel, cancelFn: func() {}, provider: provider, onWorkflowTerminate: func(status workflow.AttemptStatus, _, _ string) { terminated <- status }}
 	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execStarting, class: directAttemptClass})
 	go sup.runChild(context.Background(), child, "work", 1, 0)
 

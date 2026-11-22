@@ -1308,6 +1308,12 @@ type AttemptTermination struct {
 	Status           AttemptStatus
 	MarkerKind       string
 	MarkerLabel      string
+	// StopReason and ErrorText carry the terminal stop reason the run reported
+	// and a bounded provider error excerpt. They are recorded on the attempt
+	// and its event; StopReason additionally steers the retry decision (see
+	// applyAttemptTerminated).
+	StopReason       string
+	ErrorText        string
 	WorkingDirectory string
 	// Evidence is inspection evidence captured for this terminal fact, such as a
 	// failed completion check's bounded streams and run summary. It is staged and
@@ -1376,6 +1382,8 @@ func (m *Manager) RecordAttemptTermination(wf WorkflowID, nodeID NodeID, activat
 			AttemptStatus:    t.Status,
 			MarkerKind:       t.MarkerKind,
 			MarkerLabel:      t.MarkerLabel,
+			StopReason:       t.StopReason,
+			ErrorText:        t.ErrorText,
 			WorkingDirectory: t.WorkingDirectory,
 			Evidence:         records,
 		})
