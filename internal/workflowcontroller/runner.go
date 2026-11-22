@@ -32,7 +32,8 @@ const (
 	// ResultStartFailed means the runtime start failed after the attempt was
 	// durably recorded; kernel attempt/retry semantics apply.
 	ResultStartFailed DispatchResultKind = "start_failed"
-	// ResultCanceled means the dispatch was canceled through its context.
+	// ResultCanceled means the dispatch was canceled through its context, or
+	// the attempt's workflow was canceled before its runtime registered.
 	ResultCanceled DispatchResultKind = "canceled"
 	// ResultParked means the candidate was an auto external activation parked
 	// kernel-locally; its poll seeds schedule the gate's polling cursors.

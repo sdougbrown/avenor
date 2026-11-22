@@ -586,6 +586,24 @@ func (m *Manager) WorkflowStatus(id string) (any, error) {
 	}, nil
 }
 
+// InstanceStatus returns the workflow instance's durable status. It reads the
+// same current snapshot WorkflowStatus reads, so callers that need the typed
+// status do not re-parse the API map's string field.
+func (m *Manager) InstanceStatus(id string) (WorkflowStatus, error) {
+	wf, err := m.checkWorkflowID(id)
+	if err != nil {
+		return "", err
+	}
+	snap, exists, err := m.store.loadCurrent(wf)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", fmt.Errorf("workflow not found: %s", id)
+	}
+	return snap.Instance.Status, nil
+}
+
 // inspectMap builds the full-detail inspect shape for a snapshot.
 func inspectMap(snap Snapshot) map[string]any {
 	inst := snap.Instance

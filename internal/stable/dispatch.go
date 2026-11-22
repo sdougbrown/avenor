@@ -39,10 +39,11 @@ const (
 	// DispatchNotLeader means the caller's controller leader lease did not
 	// validate.
 	DispatchNotLeader DispatchOutcomeKind = "not_leader"
-	// DispatchCanceled means the dispatch was canceled through its context.
-	// Before the attempt intent is committed nothing is reserved and no event
-	// is appended; after the commit the granted lease stays authoritative and
-	// the attempt is finalized as canceled (retry semantics apply).
+	// DispatchCanceled means the dispatch was canceled through its context, or
+	// by a workflow cancel that committed before the attempt's runtime was
+	// registered. Before the attempt intent is committed no event is appended;
+	// after it is committed, the attempt is finalized as a pre-start failure
+	// with the dispatch_canceled marker.
 	DispatchCanceled DispatchOutcomeKind = "canceled"
 	// DispatchStartFailed means the executor's runtime start failed after the
 	// attempt intent was durably recorded; kernel attempt/retry semantics
@@ -94,9 +95,11 @@ type DispatchOutcome struct {
 // Order: selection validation → cancellation check → admission reservation
 // (no locks held) → cancellation check → controller lease validation → root
 // dispatch lock + claim/attempt-intent commit → cancellation check → executor
-// start with the reservation handed off → finalization. Cancellation is
-// honored only between these boundaries; the executor start itself runs
-// uninterruptibly.
+// start with the reservation handed off → registration-time workflow authority
+// check (inside spawnReserved, before any provider exists) → finalization.
+// Cancellation is honored only between these boundaries; once the executor
+// creates the attempt's runtime the start runs uninterruptibly and the cancel
+// surface stops that runtime instead.
 func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchRequest) (DispatchOutcome, error) {
 	out := DispatchOutcome{WorkflowID: req.WorkflowID, NodeID: req.NodeID, ActivationID: req.ActivationID}
 	mgr, controllerStore, err := s.workflowBarrierResult()
@@ -204,6 +207,9 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 		}
 	}
 	out.AttemptID = string(begin.AttemptID)
+	if h := s.testHooks.afterBeginDispatch; h != nil {
+		h(string(begin.AttemptID))
+	}
 
 	// A cancel after the attempt intent was committed: the workflow-node lease
 	// is already granted and stays authoritative, so the attempt is finalized
@@ -219,8 +225,8 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 			AttemptID:     begin.AttemptID,
 			LeaseID:       begin.LeaseID,
 			FailureStatus: workflow.AttemptFailed,
-			MarkerKind:    "dispatch",
-			MarkerLabel:   "dispatch_canceled",
+			MarkerKind:    dispatchCanceledMarkerKind,
+			MarkerLabel:   dispatchCanceledMarkerLabel,
 		}); ferr != nil {
 			fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: record canceled dispatch: %v\n",
 				req.WorkflowID, req.NodeID, begin.AttemptID, ferr)
@@ -248,6 +254,14 @@ func (s *Supervisor) dispatchWorkflowNode(ctx context.Context, req DispatchReque
 	startErr := mgr.DispatchExecutor(begin.Action.Kind, ec)
 	kind, label := workflowMarkerForKind(begin.Action.Kind)
 	if startErr != nil {
+		if isAttemptStartRefusal(startErr) {
+			// A cancel won the registration race: nothing ran for this attempt,
+			// the executor already recorded the pre-start cancellation fact, and
+			// the dispatch reports the same canceled outcome the post-intent
+			// cancellation boundary reports.
+			out.Kind = DispatchCanceled
+			return out, nil
+		}
 		// Pre-start failure: record the terminal attempt fact (idempotent
 		// with the executor's own termination record) and release the
 		// reservation (deferred). Provider/session startup failures keep
