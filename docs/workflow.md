@@ -683,6 +683,14 @@ terminal instance (`completed`, `failed`) is a clear error; re-canceling the
 same instance is an idempotent no-op. A cancel covers only the targeted
 instance: attached child instances keep running.
 
+The cancel's runtime teardown is supervisor-local, and that is intentional at
+this time. A supervisor terminates the attempt runtimes it owns; it does not
+signal runtimes owned by other supervisors. With multiple supervisors sharing
+one workflow root, a cancel sent to supervisor A durably cancels the instance.
+An attempt dispatched by supervisor B keeps running until the same cancel is
+sent to B. The orphaned attempt's terminal facts land harmlessly on
+the already-canceled instance.
+
 ```sh
 avenor workflow cancel --socket /tmp/avenor.sock wf_... \
   --actor review-pr-auto --reason "PR head moved; run superseded"
