@@ -520,6 +520,13 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		if _, _, err := r.store.ClearCapacityBlocked(r.controllerID); err != nil {
 			log.Printf("workflow controller %s: clear capacity blocked: %v", r.controllerID, err)
 		}
+		// The dispatch worked, so any unresolved_selection diagnostic on
+		// this candidate's identity names a cause that is gone; clear it
+		// so a healthy controller does not report a stale failure.
+		name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
+		if err := r.store.ClearDiagnostic(r.controllerID, "unresolved_selection", name); err != nil {
+			log.Printf("workflow controller %s: clear unresolved_selection: %v", r.controllerID, err)
+		}
 		r.setStatus(func(st *RunnerStatus) {
 			st.LastOutcome = string(ResultDispatched)
 			st.CapacityBlocked = ""

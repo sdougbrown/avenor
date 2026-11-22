@@ -1002,6 +1002,16 @@ func TestRunnerUnresolvedSelectionRecordsDiagnosticAndBacksOff(t *testing.T) {
 	if s := r.Status(); !s.Leading {
 		t.Fatal("runner dropped leadership across a start failure and recovery")
 	}
+	// The resolved cause is gone with it: a healthy controller must not
+	// keep reporting a failure whose cause was fixed.
+	waitUntil(t, "unresolved_selection diagnostic cleared after recovery", func() bool {
+		rec, ok, err := store.Get("c1")
+		if err != nil || !ok {
+			return false
+		}
+		_, held := rec.Diagnostics[key]
+		return !held
+	})
 }
 
 // TestRunnerDispatchBackoffIsPerCandidate verifies the map keying: while
