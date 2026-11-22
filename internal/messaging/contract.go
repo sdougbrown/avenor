@@ -153,21 +153,40 @@ const (
 	BindMintsPerConversation BindSemantics = "mint_per_conversation"
 )
 
-// bindHostSemantics is the one bind policy: every native host message_bind
-// serves, and how that host's conversations map to broker runs. A host absent
-// here is refused rather than guessed at, by the supervisor that owns the
-// mapping and by any surface that would declare a conversation binding.
-var bindHostSemantics = map[string]BindSemantics{
-	"pi":       BindReusesSupervisorRun,
-	"opencode": BindMintsPerConversation,
-	"poo":      BindMintsPerConversation,
+// BindHost is everything the bind policy says about one native host: how its
+// conversations map to broker runs, and the backend that runs them.
+type BindHost struct {
+	// Semantics maps the host's conversations to broker runs.
+	Semantics BindSemantics
+	// Backend is the backend the host's own conversations run, so a child
+	// spawned from one starts on the same harness, the way the host's own
+	// tooling spawns.
+	Backend string
+}
+
+// bindHosts is the one bind policy: every native host message_bind serves,
+// with how that host's conversations map to broker runs and the harness that
+// runs them. A host absent here is refused rather than guessed at, by the
+// supervisor that owns the mapping and by any surface that would declare a
+// conversation binding.
+var bindHosts = map[string]BindHost{
+	"pi":       {Semantics: BindReusesSupervisorRun, Backend: "pi"},
+	"opencode": {Semantics: BindMintsPerConversation, Backend: "opencode-acp"},
+	"poo":      {Semantics: BindMintsPerConversation, Backend: "poo"},
 }
 
 // BindHostSemantics returns how the bind policy serves host, and whether it
 // serves it at all.
 func BindHostSemantics(host string) (BindSemantics, bool) {
-	semantics, ok := bindHostSemantics[host]
-	return semantics, ok
+	entry, ok := bindHosts[host]
+	return entry.Semantics, ok
+}
+
+// BindHostBackend returns the backend a host's conversations run on, and
+// whether the host names one.
+func BindHostBackend(host string) (string, bool) {
+	entry, ok := bindHosts[host]
+	return entry.Backend, ok
 }
 
 // PeerRecord is one peers `list` entry: the tool's projection of the broker's

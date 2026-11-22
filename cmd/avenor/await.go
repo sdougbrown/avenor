@@ -16,6 +16,7 @@ import (
 	"github.com/sdougbrown/avenor/client"
 	"github.com/sdougbrown/avenor/internal/diagnote"
 	"github.com/sdougbrown/avenor/internal/runstate"
+	"github.com/sdougbrown/avenor/internal/supervisor"
 	clicontract "github.com/sdougbrown/cli-contract"
 )
 
@@ -227,31 +228,39 @@ func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target st
 }
 
 func awaitResolveTargetFromSockets(ctx context.Context, stderr io.Writer, target string) (awaitResolvedTarget, error) {
-	home, err := os.UserHomeDir()
+	dirs, err := supervisor.SocketDirs()
 	if err != nil {
 		return awaitResolvedTarget{}, err
 	}
-	dir := filepath.Join(home, ".avenor", "sockets")
-	entries, err := os.ReadDir(dir)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return awaitResolvedTarget{}, ctxErr
-	}
-	if err != nil {
-		return awaitResolvedTarget{}, err
+	var candidates []string
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return awaitResolvedTarget{}, ctxErr
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return awaitResolvedTarget{}, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sock") {
+				continue
+			}
+			candidates = append(candidates, filepath.Join(dir, entry.Name()))
+		}
 	}
 	var best *awaitResolvedTarget
 	var bestStartedAt time.Time
-	for _, entry := range entries {
+	for _, candidate := range candidates {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if best != nil {
 				_ = best.client.Close()
 			}
 			return awaitResolvedTarget{}, ctxErr
 		}
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sock") {
-			continue
-		}
-		c, err := client.Dial(filepath.Join(dir, entry.Name()))
+		c, err := client.Dial(candidate)
 		if err != nil {
 			continue
 		}

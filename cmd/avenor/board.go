@@ -7,13 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/board"
-	"github.com/sdougbrown/cli-contract"
+	"github.com/sdougbrown/avenor/internal/supervisor"
+	clicontract "github.com/sdougbrown/cli-contract"
 )
 
 // handleBoard serves the board UI until a signal arrives; the handler owns
@@ -28,10 +28,12 @@ func handleBoard(ctx context.Context, inv clicontract.Invocation, stderr io.Writ
 				scanDirs = append(scanDirs, board.ResolveHome(d))
 			}
 		}
-		// If no --scan and no --socket, default to ~/.avenor/sockets
+		// If no --scan and no --socket, default to the sockets roots every
+		// supervisor publishes under.
 		if len(scanDirs) == 0 {
-			home, _ := os.UserHomeDir()
-			scanDirs = []string{filepath.Join(home, ".avenor", "sockets")}
+			if dirs, err := supervisor.SocketDirs(); err == nil {
+				scanDirs = dirs
+			}
 		}
 	}
 

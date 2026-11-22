@@ -2212,12 +2212,23 @@ type mockStableHandler struct {
 	bindReq    messaging.MessageBindRequest
 	bindResult messaging.MessageBindResult
 	bindErr    error
+
+	lookupCaller messaging.Caller
+	lookupReq    messaging.MessageBindRequest
+	lookupResult messaging.MessageBindResult
+	lookupErr    error
 }
 
 func (m *mockStableHandler) MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
 	m.bindCaller = caller
 	m.bindReq = req
 	return m.bindResult, m.bindErr
+}
+
+func (m *mockStableHandler) MessageBindLookup(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	m.lookupCaller = caller
+	m.lookupReq = req
+	return m.lookupResult, m.lookupErr
 }
 
 func (m *mockStableHandler) Spawn(params json.RawMessage) (any, error) {

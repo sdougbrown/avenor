@@ -1160,6 +1160,19 @@ func (c *Client) MessageBindContext(ctx context.Context, req messaging.MessageBi
 	return result.MessageBindResult(), nil
 }
 
+// MessageBindLookupContext reads the live binding one native host conversation
+// already has, without binding it: a registered command uses it to reach the
+// conversation its configured feed bound. A pair the supervisor does not hold —
+// or one whose run the broker reports expired or retired — is refused instead of
+// minted.
+func (c *Client) MessageBindLookupContext(ctx context.Context, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	var result control.MessageBindResult
+	if err := c.CallContext(ctx, "message_bind_lookup", control.NewMessageBindParams(req), &result); err != nil {
+		return messaging.MessageBindResult{}, err
+	}
+	return result.MessageBindResult(), nil
+}
+
 // Resume continues a prior run in a new one.
 func (c *Client) Resume(req messaging.ResumeRequest) (messaging.ResumeResult, error) {
 	return c.ResumeContext(context.Background(), req)

@@ -22,6 +22,10 @@ type bindHandler struct {
 	req    messaging.MessageBindRequest
 	result messaging.MessageBindResult
 	fail   error
+
+	lookupReq    messaging.MessageBindRequest
+	lookupResult messaging.MessageBindResult
+	lookupFail   error
 }
 
 func (h *bindHandler) MessageBind(caller messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
@@ -30,6 +34,27 @@ func (h *bindHandler) MessageBind(caller messaging.Caller, req messaging.Message
 	h.caller = caller
 	h.req = req
 	return h.result, h.fail
+}
+
+func (h *bindHandler) MessageBindLookup(_ messaging.Caller, req messaging.MessageBindRequest) (messaging.MessageBindResult, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lookupReq = req
+	return h.lookupResult, h.lookupFail
+}
+
+// setLookup stages the answer the non-minting read gives.
+func (h *bindHandler) setLookup(result messaging.MessageBindResult, fail error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lookupResult = result
+	h.lookupFail = fail
+}
+
+func (h *bindHandler) observedLookup() messaging.MessageBindRequest {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lookupReq
 }
 
 func (h *bindHandler) set(result messaging.MessageBindResult, fail error) {

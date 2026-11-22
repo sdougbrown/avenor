@@ -103,6 +103,8 @@ forward their asks to the parent.
 
 The `avenor_message` registry entry invokes `avenor message` as the child, with the entry's `message` argument delivered through stdin (`--message-stdin`) so the text stays out of the command's arguments. See [poo messaging](backends.md#messaging) for the switch, launch checks and credential visibility.
 
+A host session Avenor did not launch has no broker credentials in its environment. Its feed instead binds the conversation on the supervisor that serves it — the one the operator configured with `--socket`/`AVENOR_SOCKET`, or the per-conversation socket derived from `--bind-host`/`--bind-session` (or their environment variables), which the feed starts and stops itself. The registered `spawn`, `status`, `result` and `message` entries read that binding per call instead of carrying a credential, and never start a supervisor. Only the feed binds. See [bound conversations](cli.md#bound-conversations).
+
 ## OpenCode conversations
 
 A bound OpenCode conversation runs the same pieces a poo child does, as the

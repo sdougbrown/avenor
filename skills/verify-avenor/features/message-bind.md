@@ -3,8 +3,11 @@
 `message_bind` is how a trusted host adapter turns one native conversation
 (host + native session id) into exactly one broker-owned messaging identity.
 It is owner-only: a connection without the owner grant is refused before the
-handler runs. There is no CLI verb. A JSON-RPC client dials the control socket,
-authenticates from the published owner record, and calls `message_bind`. See `docs/control-protocol.md` for the wire
+handler runs. A JSON-RPC client dials the control socket, authenticates from
+the published owner record, and calls `message_bind`. The CLI has no bind verb;
+the feed of a host session Avenor did not launch binds its conversation with
+`avenor feed broker --bind-host --bind-session`, and every other configured
+command reads the result. See `docs/control-protocol.md` for the wire
 contract.
 
 ## Host semantics

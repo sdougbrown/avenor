@@ -66,11 +66,18 @@ func startOwnerControlServer(t *testing.T, handler control.StableHandler) string
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	socket := filepath.Join(dir, "control.sock")
+	startOwnerControlServerAt(t, srv, socket)
+	return socket
+}
+
+// startOwnerControlServerAt serves handler on socket, which the caller chose — a
+// derived conversation socket, for example.
+func startOwnerControlServerAt(t *testing.T, srv *control.ControlServer, socket string) {
+	t.Helper()
 	if err := srv.Start(socket); err != nil {
 		t.Fatalf("start control server: %v", err)
 	}
 	t.Cleanup(func() { _ = srv.Stop() })
-	return socket
 }
 
 // TestControlReadVerbsNeedNoOwnerRecord proves the read-only verbs reach a

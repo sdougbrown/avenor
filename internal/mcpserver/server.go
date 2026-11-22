@@ -1697,8 +1697,6 @@ func withDefaultCancelActor(raw json.RawMessage) json.RawMessage {
 	return out
 }
 
-var startSupervisorFunc = startSupervisor
-
 // dialSupervisorClient and attachSupervisorClient are the two seams for
 // acquiring a supervisor control client. Read-only handlers dial anonymously
 // so they never read or transmit the owner record; owner-gated handlers attach
@@ -1815,9 +1813,16 @@ func (s *Server) acquireSupervisor(supervisorID string, access supervisorAccess)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("autostart supervisor: %w", err)
 		}
+		// The lifecycle holds the owner connection the launcher started; the MCP
+		// server's tools need the whole control surface on it.
+		ownerClient, ok := lc.Client.(ControlClient)
+		if !ok {
+			_ = lc.Close()
+			return nil, nil, "", fmt.Errorf("autostart supervisor: the launcher's connection does not serve the MCP control surface")
+		}
 		s.lifecycle = lc
-		s.controlClient = lc.client
-		s.defaultSupervisorPath = lc.socketPath
+		s.controlClient = ownerClient
+		s.defaultSupervisorPath = lc.SocketPath
 	}
 	return s.controlClient, func() {}, s.defaultSupervisorPath, nil
 }
