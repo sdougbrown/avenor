@@ -947,6 +947,63 @@ func TestRunnerDispatchErrorBacksOffAndRecovers(t *testing.T) {
 	}
 }
 
+// TestRunnerUnresolvedSelectionRecordsDiagnosticAndBacksOff proves an
+// unresolved_selection result is contained: the resolution detail (a roster
+// entry the assignment cannot resolve) is recorded as a controller
+// diagnostic under the candidate's identity, the candidate is held in the
+// per-candidate dispatch backoff instead of being re-dispatched on every
+// pass, and a later successful delivery (a fixed roster) breaks the streak
+// so the candidate dispatches again without a leadership restart.
+func TestRunnerUnresolvedSelectionRecordsDiagnosticAndBacksOff(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	detail := `entry "donkey": thinking: invalid thinking value "none"`
+	deps.setCandidates([]Candidate{runnerCand("wf1", "start", "a1")})
+	deps.setDefaultResult(DispatchResult{Kind: ResultUnresolvedSelection, Detail: detail})
+
+	// 100ms backoff base makes the schedule observable.
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond, nil, nil)
+
+	key := "unresolved_selection/wf1/start/a1"
+	waitUntil(t, "unresolved_selection diagnostic recorded with the resolution detail", func() bool {
+		rec, ok, err := store.Get("c1")
+		if err != nil || !ok {
+			return false
+		}
+		return rec.Diagnostics[key] == detail
+	})
+	waitUntil(t, "candidate held in backoff", func() bool {
+		return !r.Status().DispatchBackoffUntil.IsZero()
+	})
+
+	// No hot loop: the second and third dispatches are delayed by the
+	// per-candidate backoff (100ms base, doubled per consecutive
+	// failure), mirroring the dispatch-error schedule assertions.
+	waitUntil(t, "three dispatches", func() bool { return deps.dispatchCount() >= 3 })
+	recs := deps.allDispatches()
+	if d := recs[1].at.Sub(recs[0].at); d < 80*time.Millisecond {
+		t.Fatalf("second dispatch after %v, want the ~100ms backoff honored", d)
+	}
+	if d := recs[2].at.Sub(recs[1].at); d < 160*time.Millisecond {
+		t.Fatalf("third dispatch after %v, want the ~200ms doubled backoff honored", d)
+	}
+
+	// Fixing the host: a delivered success clears the streak, so the
+	// candidate dispatches again on cadence and the backoff state is gone
+	// rather than merely expired, with leadership held throughout.
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+	waitUntil(t, "dispatch succeeds after the host is fixed", func() bool {
+		return r.Status().LastOutcome == string(ResultDispatched)
+	})
+	if s := r.Status(); !s.DispatchBackoffUntil.IsZero() {
+		t.Fatalf("backoff state not cleared after a successful delivery: next=%v", s.DispatchBackoffUntil)
+	}
+	if s := r.Status(); !s.Leading {
+		t.Fatal("runner dropped leadership across a start failure and recovery")
+	}
+}
+
 // TestRunnerDispatchBackoffIsPerCandidate verifies the map keying: while
 // one failing candidate is held in backoff, a non-failing sibling
 // candidate must keep dispatching on cadence. If the map were keyed too

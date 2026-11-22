@@ -41,6 +41,12 @@ const (
 	// fully resolved; the activation stays ready and a deduplicated
 	// diagnostic is recorded.
 	ResultUnresolvedBinding DispatchResultKind = "unresolved_binding"
+	// ResultUnresolvedSelection means the candidate's execution selection
+	// could not be resolved (a roster the assignment references is missing
+	// or invalid). No attempt was recorded and the activation stays ready,
+	// so a deduplicated diagnostic is recorded and the candidate is held in
+	// the dispatch backoff instead of being re-dispatched every pass.
+	ResultUnresolvedSelection DispatchResultKind = "unresolved_selection"
 )
 
 // DispatchResult is the outcome of one host dispatch attempt.
@@ -388,6 +394,10 @@ type leaderState struct {
 	// dispatchFail holds the backoff state of candidates whose most recent
 	// dispatches failed, keyed by execution identity.
 	dispatchFail map[workflow.ExecutionIdentity]dispatchFailEntry
+	// startFailLogged holds the unresolved-selection details already
+	// written to the stderr log, so a persistently failing selection
+	// reports its cause once instead of once per reconcile pass.
+	startFailLogged map[string]bool
 	// readyHold is the earliest future readiness time among the current
 	// pass's candidates (a retry backoff), or the zero time when none is.
 	// It wakes the loop at the hold's expiry and reports the held state;
@@ -451,6 +461,7 @@ func (s *leaderState) dropLeadership(r *Runner) {
 	s.leaseID = ""
 	s.blockedSource = ""
 	s.dispatchFail = map[workflow.ExecutionIdentity]dispatchFailEntry{}
+	s.startFailLogged = map[string]bool{}
 	s.readyHold = time.Time{}
 	r.clearLeadStatus()
 }
@@ -492,8 +503,10 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		return false
 	}
 	// A delivered result means the dispatch worked; the candidate's
-	// consecutive-failure chain is broken.
-	if currentLease {
+	// consecutive-failure chain is broken. An unresolved_selection result is
+	// also a failure — its own case below extends the chain — so it must
+	// not clear the entry it is about to increment.
+	if currentLease && res.result.Kind != ResultUnresolvedSelection {
 		if _, ok := s.dispatchFail[res.identity]; ok {
 			delete(s.dispatchFail, res.identity)
 			if len(s.dispatchFail) == 0 {
@@ -544,6 +557,30 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 			log.Printf("workflow controller %s: record unresolved_binding: %v", r.controllerID, err)
 		}
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedBinding) })
+	case ResultUnresolvedSelection:
+		name := string(res.identity.WorkflowID) + "/" + string(res.identity.NodeID) + "/" + string(res.identity.ActivationID)
+		if _, err := r.store.RecordDiagnostic(r.controllerID, "unresolved_selection", name, res.result.Detail); err != nil {
+			log.Printf("workflow controller %s: record unresolved_selection: %v", r.controllerID, err)
+		}
+		// The candidate stays dispatchable, so it is held in the same
+		// per-candidate backoff as a dispatch error; otherwise every pass
+		// re-dispatches it in a hot loop.
+		if currentLease {
+			e := s.dispatchFail[res.identity]
+			e.count++
+			e.next = r.now().Add(dispatchBackoffDelay(r.dispatchBackoff, e.count))
+			s.dispatchFail[res.identity] = e
+			r.setStatus(func(st *RunnerStatus) {
+				st.LastOutcome = string(ResultUnresolvedSelection)
+				st.DispatchBackoffUntil = e.next
+			})
+		} else {
+			r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultUnresolvedSelection) })
+		}
+		if res.result.Detail != "" && !s.startFailLogged[res.result.Detail] {
+			s.startFailLogged[res.result.Detail] = true
+			log.Printf("workflow controller %s: unresolved selection %s: %s", r.controllerID, name, res.result.Detail)
+		}
 	default:
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(res.result.Kind) })
 	}
@@ -1038,10 +1075,11 @@ func (r *Runner) loop() {
 	defer r.clearLeadStatus()
 
 	s := &leaderState{
-		timer:        time.NewTimer(0),
-		unreported:   map[workflow.ExecutionIdentity]unreportedEntry{},
-		pollInFlight: map[string]bool{},
-		dispatchFail: map[workflow.ExecutionIdentity]dispatchFailEntry{},
+		timer:           time.NewTimer(0),
+		unreported:      map[workflow.ExecutionIdentity]unreportedEntry{},
+		pollInFlight:    map[string]bool{},
+		dispatchFail:    map[workflow.ExecutionIdentity]dispatchFailEntry{},
+		startFailLogged: map[string]bool{},
 	}
 	if !s.timer.Stop() {
 		<-s.timer.C

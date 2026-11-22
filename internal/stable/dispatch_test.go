@@ -2044,6 +2044,7 @@ func TestTranslateDispatchOutcome(t *testing.T) {
 		{DispatchKeyHeld, workflowcontroller.ResultKeyHeld},
 		{DispatchNotLeader, workflowcontroller.ResultNotLeader},
 		{DispatchStartFailed, workflowcontroller.ResultStartFailed},
+		{DispatchUnresolvedSelection, workflowcontroller.ResultUnresolvedSelection},
 		{DispatchCanceled, workflowcontroller.ResultCanceled},
 		{DispatchOutcomeKind("unknown_kind"), workflowcontroller.ResultCanceled},
 	}

@@ -7022,6 +7022,40 @@ func (s *Supervisor) WorkflowReady(id string, limit int) (any, error) {
 	}, nil
 }
 
+// controllerDiagnosticsForWorkflow returns the controllers' recorded
+// diagnostics that name workflowID (the runner records start failures under
+// workflow/node/activation), sorted for stable output.
+func (s *Supervisor) controllerDiagnosticsForWorkflow(workflowID string) []map[string]any {
+	store, err := s.controllerBarrierStore()
+	if err != nil {
+		return nil
+	}
+	listed, err := store.List()
+	if err != nil {
+		return nil
+	}
+	prefix := workflowID + "/"
+	var out []map[string]any
+	for _, rec := range listed.Records {
+		for key, detail := range rec.Diagnostics {
+			kind, name, ok := strings.Cut(key, "/")
+			if !ok || !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			out = append(out, map[string]any{
+				"controller_id": rec.ControllerID,
+				"kind":          kind,
+				"name":          name,
+				"detail":        detail,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i]["name"].(string)+out[i]["kind"].(string) < out[j]["name"].(string)+out[j]["kind"].(string)
+	})
+	return out
+}
+
 // controllerLeaderMap renders a record's lease for RPC results, or nil when
 // the controller holds no lease.
 func controllerLeaderMap(rec workflowcontroller.ControllerRecord, ownIdentity string) any {
@@ -7050,6 +7084,10 @@ func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 	var lastOutcome any
 	inflight := 0
 	var capacityBlocked any
+	var diagnostics any
+	if len(rec.Diagnostics) > 0 {
+		diagnostics = rec.Diagnostics
+	}
 	if runner != nil {
 		if !runner.LastReconcile.IsZero() {
 			lastReconcile = runner.LastReconcile
@@ -7084,6 +7122,7 @@ func controllerStatusMap(rec workflowcontroller.ControllerRecord, ownIdentity st
 		"capacity_blocked":       capacityBlocked,
 		"dispatch_backoff_until": dispatchBackoffUntil,
 		"retry_backoff_until":    retryBackoffUntil,
+		"diagnostics":            diagnostics,
 		"next_poll_at":           nextPollAt,
 	}
 }
@@ -7430,7 +7469,18 @@ func (h lazyWorkflowHandler) WorkflowWait(id string, d time.Duration) (any, erro
 	return h.s.workflowManager().WorkflowWait(id, d)
 }
 func (h lazyWorkflowHandler) WorkflowInspect(id string) (any, error) {
-	return h.s.workflowManager().WorkflowInspect(id)
+	result, err := h.s.workflowManager().WorkflowInspect(id)
+	if err != nil {
+		return nil, err
+	}
+	// Surface the controllers' diagnostics that name this workflow, so a
+	// start failure's cause is readable on the workflow it blocks.
+	if diags := h.s.controllerDiagnosticsForWorkflow(id); len(diags) > 0 {
+		if m, ok := result.(map[string]any); ok {
+			m["controller_diagnostics"] = diags
+		}
+	}
+	return result, nil
 }
 func (h lazyWorkflowHandler) WorkflowEvents(id string, afterSeq int64, limit int) (any, error) {
 	return h.s.workflowManager().WorkflowEvents(id, afterSeq, limit)
