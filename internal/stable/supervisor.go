@@ -708,11 +708,10 @@ type testHooks struct {
 	beforeAttemptRegistration func(attemptID string)
 	// insideAttemptRegistration, when non-nil (set by tests), runs in
 	// spawnReserved for a workflow attempt while the registration lock is held,
-	// immediately before the durable instance status read, so a test can commit
-	// a cancel inside the critical section the refusal read serializes against
-	// and so pin that the read stays inside it: a status read placed anywhere
-	// earlier sees an uncanceled instance and starts the provider, failing the
-	// test. nil in production.
+	// immediately before the durable instance status read. A test commits a cancel
+	// there to pin that the read stays inside the critical section: a status read
+	// placed anywhere earlier sees an uncanceled instance and starts the provider,
+	// failing the test. nil in production.
 	insideAttemptRegistration func(attemptID string)
 	// afterAttemptSpawn, when non-nil (set by tests), runs in a workflow
 	// executor right after the attempt's runtime is spawned, with its runtime
@@ -1910,12 +1909,12 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		s.controlMu.Unlock()
 		return SpawnResult{}, fmt.Errorf("supervisor is shutting down")
 	}
-	// The cancel surface commits the instance cancel durably and only then
-	// snapshots s.runtimes under this lock (cancelWorkflowRuntimes). Reading the
-	// durable status here, inside the same critical section that publishes the
-	// child, makes the two orderings exhaustive: a cancel committed before this
-	// section is visible to this read, and one committed after it finds the
-	// published child and begins its shutdown.
+	// The cancel surface commits the instance cancel durably, then snapshots
+	// s.runtimes under this lock (cancelWorkflowRuntimes). This read of the
+	// durable status sits inside the same critical section that publishes the
+	// child, so the two orderings are exhaustive. A cancel committed before this
+	// section is visible to this read. One committed after it finds the published
+	// child and begins its shutdown.
 	if attemptMgr != nil {
 		if h := s.testHooks.insideAttemptRegistration; h != nil {
 			h(string(params.AttemptID))
@@ -7482,8 +7481,8 @@ func attemptStartFailureMarker(startErr error, marker ...string) []string {
 }
 
 // attemptStartRefusal reports why a workflow attempt must not start its
-// provider, or nil when the start may proceed. The caller reads it inside the
-// registration critical section, which is what serializes it against
+// provider, or nil when the start can proceed. The caller reads it inside the
+// registration critical section, which serializes it against
 // cancelWorkflowRuntimes. It is fail-closed: an instance whose status cannot be
 // read is not treated as dispatchable, because unknown ownership must not be
 // assumed safe.

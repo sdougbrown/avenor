@@ -320,7 +320,7 @@ func TestCancelAfterRegisteredRuntimeStopsTheAttempt(t *testing.T) {
 
 // TestDispatchStartsNoProviderWhenCancelCommitsInsideRegistrationLock commits
 // the cancel while the registration critical section is held, through the
-// manager directly (the supervisor's own cancel handler would deadlock on the
+// manager directly (the supervisor's own cancel handler deadlocks on the
 // held lock). This pins where the refusal read lives: the hook runs after the
 // lock is acquired and before the status read, so a read placed anywhere
 // earlier — outside the lock, or before it is acquired — sees an uncanceled
