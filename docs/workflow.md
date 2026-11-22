@@ -678,7 +678,12 @@ released, and every non-terminal activation parks in the `canceled` status so
 no command can ever advance it again. The supervisor surface then terminates
 the instance's in-flight attempt runtimes; their late `attempt_terminated`
 facts land harmlessly on the already-canceled instance (the attempt fact is
-recorded; leases, retries, and statuses never regress). Canceling an already
+recorded; leases, retries, and statuses never regress). A dispatch whose
+attempt intent is already committed but whose runtime has not registered
+checks the instance status inside its registration critical section and
+finalizes the attempt as canceled instead of starting its provider; an
+attempt whose status cannot be read holds rather than starts.
+Canceling an already
 terminal instance (`completed`, `failed`) is a clear error; re-canceling the
 same instance is an idempotent no-op. A cancel covers only the targeted
 instance: attached child instances keep running.
