@@ -605,6 +605,10 @@ function controllerStatusLines(details: unknown, args: WorkflowControllerStatusA
   if (backoff) lines.push(`Dispatch backoff: ${backoff}`)
   const retryBackoff = selectedOptional(status, 'retry_backoff_until')
   if (retryBackoff) lines.push(`Retry backoff: ${retryBackoff}`)
+  const diagnostics = asRecord(status.diagnostics)
+  for (const [key, detail] of Object.entries(diagnostics ?? {})) {
+    lines.push(`Diagnostic ${key}: ${optionalScalar(detail)}`)
+  }
   const nextPoll = selectedOptional(status, 'next_poll_at')
   if (nextPoll) lines.push(`Next external poll: ${nextPoll}`)
   lines.push(
