@@ -53,9 +53,16 @@ func FinalOutputTruncated(text string) bool {
 }
 
 func BoundedFinalOutput(text string) string {
+	return BoundedRunes(text, MaxFinalOutputRunes)
+}
+
+// BoundedRunes cuts text to at most limit whole runes, never splitting one.
+// Every bounded preview (terminal replies, provider error excerpts) shares
+// this one rune-safe bound.
+func BoundedRunes(text string, limit int) string {
 	count := 0
 	for index := range text {
-		if count == MaxFinalOutputRunes {
+		if count == limit {
 			return text[:index]
 		}
 		count++

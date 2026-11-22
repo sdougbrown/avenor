@@ -76,3 +76,31 @@ func TestFinalOutputBoundIsPinned(t *testing.T) {
 		t.Fatalf("MaxFinalOutputRunes = %d, want 4096, the bound packages/core/src/messaging-text.ts applies", MaxFinalOutputRunes)
 	}
 }
+
+// TestBoundedRunes pins the shared rune-safe bound every bounded preview
+// delegates to: whole-rune cutting at exactly the limit, no multibyte splits.
+func TestBoundedRunes(t *testing.T) {
+	tests := []struct {
+		name  string
+		text  string
+		limit int
+		want  string
+	}{
+		{"short text unchanged", "hello", 512, "hello"},
+		{"empty", "", 512, ""},
+		{"zero limit", "hello", 0, ""},
+		{"cut at exactly the limit", strings.Repeat("a", 600), 512, strings.Repeat("a", 512)},
+		{"multibyte cut at whole runes", strings.Repeat("é", 600), 512, strings.Repeat("é", 512)},
+		{"multibyte boundary not split", strings.Repeat("a", 511) + "é", 512, strings.Repeat("a", 511) + "é"},
+		{"emoji never split", strings.Repeat("🔥", 300), 512, strings.Repeat("🔥", 300)},
+		{"emoji cut at whole runes", strings.Repeat("🔥", 300), 5, strings.Repeat("🔥", 5)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := BoundedRunes(tt.text, tt.limit); got != tt.want {
+				t.Errorf("BoundedRunes(%d runes, limit %d) = %d runes, want %d",
+					utf8.RuneCountInString(tt.text), tt.limit, utf8.RuneCountInString(got), utf8.RuneCountInString(tt.want))
+			}
+		})
+	}
+}

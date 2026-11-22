@@ -15,6 +15,7 @@ import (
 const (
 	QuotaExhaustedStopReason = "quota_exhausted"
 	RateLimitedStopReason    = "rate_limited"
+	AuthRejectedStopReason   = "auth_rejected"
 )
 
 // retryWaitCeiling bounds a provider's retry hint: a longer wait is not a retry
@@ -34,6 +35,18 @@ var quotaSignals = []string{
 	"billing hard limit",
 	"spend limit",
 	"hit your limit",
+}
+
+// authSignals are matched against the lowercased stop reason and terminal
+// failure text. They name a credential the provider refused. No in-run wait
+// or retry makes it acceptable, so the class tells the caller to refresh
+// credentials instead of spending the retry budget on the same refusal.
+var authSignals = []string{
+	"authentication token has expired",
+	"token_expired",
+	"invalid_grant",
+	"refresh_token_reused",
+	"not logged in",
 }
 
 var rateLimitSignals = []string{
@@ -57,12 +70,13 @@ var retryAfterHint = regexp.MustCompile(`(?i)(?:retry[- ]?after|try again in|ret
 var (
 	status429 = regexp.MustCompile(`(?:^|[\s(=])429(?:$|[\s:),.])`)
 	status402 = regexp.MustCompile(`(?:^|[\s(=])402(?:$|[\s:),.])`)
+	status401 = regexp.MustCompile(`(?:^|[\s(=])401(?:$|[\s:),.])`)
 )
 
-// ClassifyProviderLimit maps a provider's usage-limit or rate-limit failure
-// onto a stop reason, and returns the provider's retry-after hint in whole
-// seconds when the text carries one. An empty stop reason means the text has
-// no limit signal.
+// ClassifyProviderLimit maps a provider's usage-limit, rate-limit, or
+// credential-rejection failure onto a stop reason, and returns the provider's
+// retry-after hint in whole seconds when the text carries one. An empty stop
+// reason means the text has no limit signal.
 //
 // An explicit stop reason wins: only generic failures (no dedicated exit code)
 // are reclassified. Session identity conflicts and degenerate reasoning
@@ -80,6 +94,12 @@ func ClassifyProviderLimit(stopReason, message string) (string, int64) {
 	// with a reset hint describes a hard-capped account: retrying spends the
 	// budget on the same refusal, while quota_exhausted tells the caller to
 	// switch models.
+	// A rejected credential outranks any capacity wording in the same text.
+	// The refusal stays until the credential is refreshed, so the class
+	// carries no retry-after hint.
+	if containsSignal(text, authSignals) || status401.MatchString(text) {
+		return AuthRejectedStopReason, 0
+	}
 	if containsSignal(text, rateLimitSignals) || status429.MatchString(text) {
 		return RateLimitedStopReason, retryAfterSeconds(message)
 	}

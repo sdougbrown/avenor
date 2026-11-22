@@ -9,10 +9,10 @@
 
 ## Attempts
 
-| Attempt | Activation | Status | Backend | Model |
-| --- | --- | --- | --- | --- |
-| att_build_1 | act_build_1 | succeeded | pi | qwen |
-| att_build_2 | act_build_2 | running | pi | qwen |
+| Attempt | Activation | Status | Stop Reason | Backend | Model |
+| --- | --- | --- | --- | --- | --- |
+| att_build_1 | act_build_1 | succeeded |  | pi | qwen |
+| att_build_2 | act_build_2 | running |  | pi | qwen |
 
 ## Evidence
 

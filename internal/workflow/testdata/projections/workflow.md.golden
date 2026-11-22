@@ -38,8 +38,9 @@
 
 ## Attempts
 
-| Attempt | Node | Activation | Status | Backend | Model |
-| --- | --- | --- | --- | --- | --- |
-| att_build_1 | build | act_build_1 | succeeded | pi | qwen |
-| att_build_2 | build | act_build_2 | running | pi | qwen |
-| att_review_1 | review | act_review_1 | succeeded | pi | claude |
+| Attempt | Node | Activation | Status | Stop Reason | Backend | Model |
+| --- | --- | --- | --- | --- | --- | --- |
+| att_build_1 | build | act_build_1 | succeeded |  | pi | qwen |
+| att_build_2 | build | act_build_2 | running |  | pi | qwen |
+| att_review_1 | review | act_review_1 | succeeded |  | pi | claude |
+| att_review_2 | review | act_review_1 | failed | auth_rejected | pi | claude |

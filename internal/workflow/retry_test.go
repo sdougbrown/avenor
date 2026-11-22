@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/sdougbrown/avenor/internal/runtime"
 )
 
 // retryTemplateJSON builds a single-node template whose run node carries the
@@ -1003,5 +1005,173 @@ func TestRetryBackoffCarriesNotBeforeToCandidates(t *testing.T) {
 	wantReady := terminatedAt.Add(backoffSeconds * time.Second)
 	if !cands[0].ReadyAt.Equal(wantReady) {
 		t.Fatalf("candidate ready_at = %v, want %v", cands[0].ReadyAt, wantReady)
+	}
+}
+
+// TestAuthRejectedAttemptStopsRetry drives the durable path for the
+// auth_rejected stop reason. A plain failed attempt re-arms while the retry
+// budget remains; a failed attempt whose termination records auth_rejected
+// exhausts the budget immediately — the configured exhaustion applies instead
+// of spending the remaining slots on a credential refusal that cannot clear,
+// and the stop reason and bounded error excerpt are recorded on the attempt.
+func TestAuthRejectedAttemptStopsRetry(t *testing.T) {
+	t.Parallel()
+	scenarios := []struct {
+		name           string
+		exhaustion     RetryExhaustionKind
+		wantActivation ActivationStatus
+		wantWorkflow   WorkflowStatus
+	}{
+		{"block", RetryExhaustionBlock, ActivationBlocked, WorkflowBlocked},
+		{"fail", RetryExhaustionFail, ActivationAttemptFailed, WorkflowFailed},
+	}
+	for _, sc := range scenarios {
+		sc := sc
+		t.Run(sc.name, func(t *testing.T) {
+			authRejectedScenario(t, sc.exhaustion, sc.wantActivation, sc.wantWorkflow)
+		})
+	}
+}
+
+// authRejectedScenario drives one exhaustion kind through the same sequence:
+// a plain failure that re-arms, then an auth_rejected termination that must
+// not.
+func authRejectedScenario(t *testing.T, exhaustion RetryExhaustionKind, wantActivation ActivationStatus, wantWorkflow WorkflowStatus) {
+	templateID := "retry-auth-" + string(exhaustion)
+	m, s, wf := newRetryFixture(t, retryTemplateJSON(templateID, 3, exhaustion, ""), templateID)
+	node := NodeID("start")
+
+	snap, _, err := s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("loadCurrent: %v", err)
+	}
+	act := activationByNode(&snap.Instance, node)
+	if act == nil {
+		t.Fatal("start activation not found")
+	}
+	actID := act.ID
+	wantActivations := len(snap.Instance.Activations)
+
+	// Attempt 1: a plain failed termination re-arms the activation (budget
+	// remains) — the auth_rejected rule changes nothing for ordinary failures.
+	res := claimActivation(t, m, wf, "start", string(actID), "alice")
+	lease1, _ := res["lease_id"].(string)
+	token1, _ := res["owner_token"].(string)
+	first := startWithToken(t, m, wf, "start", string(actID), lease1, token1)
+	attempt1, _ := first["attempt_id"].(string)
+	if attempt1 == "" {
+		t.Fatalf("first start result missing attempt_id: %#v", first)
+	}
+	mustTerminate(t, m, wf, node, actID, attempt1, lease1)
+
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after first termination: %v", err)
+	}
+	act = activationByNode(&snap.Instance, node)
+	if act.Status != ActivationReady {
+		t.Fatalf("status after plain failure = %s, want ready (budget remains)", act.Status)
+	}
+
+	// Attempt 2: the termination records stop reason auth_rejected with a
+	// bounded provider error excerpt. The activation must not re-arm even
+	// though two budget slots remain.
+	res = claimActivation(t, m, wf, "start", string(actID), "alice")
+	lease2, _ := res["lease_id"].(string)
+	token2, _ := res["owner_token"].(string)
+	second := startWithToken(t, m, wf, "start", string(actID), lease2, token2)
+	attempt2, _ := second["attempt_id"].(string)
+	if attempt2 == "" || attempt2 == attempt1 {
+		t.Fatalf("second start attempt = %q (first %q), want a distinct attempt", attempt2, attempt1)
+	}
+	const excerpt = "turn failed for session 01a1f083: Your authentication token has expired. Please try refreshing it."
+	if err := m.RecordAttemptTermination(wf, node, actID, AttemptID(attempt2), LeaseID(lease2), AttemptTermination{
+		Status:     AttemptFailed,
+		StopReason: "auth_rejected",
+		ErrorText:  excerpt,
+	}); err != nil {
+		t.Fatalf("RecordAttemptTermination(auth_rejected): %v", err)
+	}
+
+	snap, _, err = s.loadCurrent(wf)
+	if err != nil {
+		t.Fatalf("reload after auth_rejected termination: %v", err)
+	}
+	act = activationByNode(&snap.Instance, node)
+	if act.Status != wantActivation {
+		t.Fatalf("status after auth_rejected = %s, want %s (no re-arm)", act.Status, wantActivation)
+	}
+	if snap.Instance.Status != wantWorkflow {
+		t.Fatalf("workflow status after auth_rejected = %s, want %s", snap.Instance.Status, wantWorkflow)
+	}
+	if len(act.AttemptIDs) != 2 {
+		t.Fatalf("attempt ids = %v, want 2 (no third attempt)", act.AttemptIDs)
+	}
+	if n := len(snap.Instance.Activations); n != wantActivations {
+		t.Fatalf("activations = %d, want %d (no new activation)", n, wantActivations)
+	}
+
+	// The stop reason and error excerpt are recorded on the attempt, so
+	// inspect output names why it failed.
+	var recorded *Attempt
+	for i := range snap.Instance.Attempts {
+		if snap.Instance.Attempts[i].ID == AttemptID(attempt2) {
+			recorded = &snap.Instance.Attempts[i]
+		}
+	}
+	if recorded == nil {
+		t.Fatalf("attempt %s not found on the instance", attempt2)
+	}
+	if recorded.StopReason != "auth_rejected" {
+		t.Fatalf("attempt stop reason = %q, want auth_rejected", recorded.StopReason)
+	}
+	if recorded.ErrorText != excerpt {
+		t.Fatalf("attempt error text = %q, want %q", recorded.ErrorText, excerpt)
+	}
+
+	// The durable attempt_terminated event carries both fields, so replay
+	// reproduces them.
+	out, err := m.WorkflowEvents(string(wf), 0, 0)
+	if err != nil {
+		t.Fatalf("WorkflowEvents: %v", err)
+	}
+	found := false
+	events := out.(map[string]any)["events"].([]map[string]any)
+	for _, raw := range events {
+		if raw["kind"] != string(EventAttemptTerminated) {
+			continue
+		}
+		identity, _ := raw["identity"].(map[string]any)
+		if identity == nil || identity["attempt_id"] != string(attempt2) {
+			continue
+		}
+		found = true
+		if raw["stop_reason"] != "auth_rejected" || raw["error_text"] != excerpt {
+			t.Fatalf("attempt_terminated event = (%v, %v), want (auth_rejected, %q)", raw["stop_reason"], raw["error_text"], excerpt)
+		}
+	}
+	if !found {
+		t.Fatalf("no attempt_terminated event found for attempt %s", attempt2)
+	}
+}
+
+// TestNeverRetryableStopReasons pins the kernel's never-retryable set against
+// the runtime's. Every member must be a reason runtime.IsRetryableFailure
+// rejects, and quota_exhausted — run-level fatal, but deliberately re-armed by
+// the kernel per the node's retry policy — must stay out, so the documented
+// divergence cannot silently regress in either direction.
+func TestNeverRetryableStopReasons(t *testing.T) {
+	for reason := range neverRetryableStopReasons {
+		exitCode := runtime.ExitCodeForStopReason(reason)
+		if runtime.IsRetryableFailure(exitCode, reason) {
+			t.Errorf("kernel never re-arms %q, but the runtime calls exit %d retryable", reason, exitCode)
+		}
+	}
+	// The documented divergence (see neverRetryableStopReasons).
+	if neverRetryableStopReasons[runtime.QuotaExhaustedStopReason] {
+		t.Errorf("quota_exhausted is re-armed per the retry policy by design; remove it from the never-retryable set or change that policy")
+	}
+	if runtime.IsRetryableFailure(runtime.ExitCodeForStopReason(runtime.QuotaExhaustedStopReason), runtime.QuotaExhaustedStopReason) {
+		t.Errorf("quota_exhausted is expected to be run-level fatal; update the kernel's documented divergence to match")
 	}
 }

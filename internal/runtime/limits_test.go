@@ -27,6 +27,15 @@ func TestClassifyProviderLimit(t *testing.T) {
 		// A reset hint describes a hard-capped account: the class wins.
 		{name: "quota wording with reset hint stays exhausted", stopReason: "error", message: "You exceeded your current quota; try again in 2.5s", wantReason: QuotaExhaustedStopReason, wantRetry: 3},
 		{name: "quota wording with 429 is throttling", stopReason: "error", message: "quota exceeded: 429 Too Many Requests", wantReason: RateLimitedStopReason},
+		// The incident text: a revoked OAuth token forwarded verbatim by pi.
+		{name: "pi expired token", stopReason: "error", message: "turn failed for session 01a1f083: Your authentication token has expired. Please try refreshing it.", wantReason: AuthRejectedStopReason},
+		{name: "codex token_expired code", stopReason: "error", message: "token_expired: the session token is no longer valid", wantReason: AuthRejectedStopReason},
+		{name: "oauth invalid_grant payload", stopReason: "error", message: `{"error":"invalid_grant","error_description":"refresh_token_reused"}`, wantReason: AuthRejectedStopReason},
+		{name: "not logged in", stopReason: "error", message: "backend is not logged in; run the login command", wantReason: AuthRejectedStopReason},
+		{name: "401 with boundaries", stopReason: "error", message: "request failed with status=401: unauthorized", wantReason: AuthRejectedStopReason},
+		{name: "401 in parens", stopReason: "error", message: "API error (401)", wantReason: AuthRejectedStopReason},
+		{name: "line number is not a 401", stopReason: "error", message: "error at /src/foo.go:401: invalid request"},
+		{name: "expired token ignores a retry hint", stopReason: "error", message: "authentication token has expired; try again in 20s", wantReason: AuthRejectedStopReason},
 		{name: "line number is not a 429", stopReason: "error", message: "error at /src/foo.go:429: invalid request"},
 		{name: "line number is not a 402", stopReason: "error", message: "error at /src/foo.go:402: invalid request"},
 		{name: "no limit signal", stopReason: "error", message: "400: invalid model name passed in model=definitely-not-a-model"},

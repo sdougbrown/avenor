@@ -23,14 +23,14 @@ import (
 // successful auto-provider attempt keeps the heartbeat running through
 // evaluation and completion, so the lease cannot expire between the
 // terminal fact and the complete command landing.
-func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leaseHeartbeat, status workflow.AttemptStatus, child *childRuntime) {
+func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leaseHeartbeat, status workflow.AttemptStatus, stopReason, errorText string, child *childRuntime) {
 	kind, label := workflowMarkerForKind(ec.Action.Kind)
 	if stashed := child.terminalMarkerLabel(); stashed != "" {
 		label = stashed
 	}
 	if status != workflow.AttemptSucceeded {
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, child.dir, string(status), kind, label, nil)
+		s.recordAttemptTerminal(ec, child.dir, string(status), stopReason, errorText, kind, label, nil)
 		return
 	}
 
@@ -50,7 +50,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 	}
 	if !decision.Eligible {
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, child.dir, string(status), kind, label, nil)
+		s.recordAttemptTerminal(ec, child.dir, string(status), stopReason, errorText, kind, label, nil)
 		return
 	}
 	if decision.Plan == nil {
@@ -67,7 +67,7 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 		fmt.Fprintf(s.stderrWriter(), "avenor stable: workflow %s node %s attempt %s: auto-completion contract unmet: %s\n",
 			ec.WorkflowID, ec.NodeID, ec.AttemptID, decision.Rejection)
 		hb.StopAndWait()
-		s.recordAttemptTerminal(ec, child.dir, string(status), kind, marker, decision.FailureEvidence)
+		s.recordAttemptTerminal(ec, child.dir, string(status), stopReason, errorText, kind, marker, decision.FailureEvidence)
 		return
 	}
 	plan := decision.Plan
@@ -122,12 +122,14 @@ func (s *Supervisor) finishWorkflowAttempt(ec workflow.ExecutorContext, hb *leas
 // does not auto-complete: manual nodes, external nodes, non-success exits, and an
 // unmet contract. It carries the working directory the attempt's runtime ran in
 // and any inspection evidence captured for it.
-func (s *Supervisor) recordAttemptTerminal(ec workflow.ExecutorContext, dir, status string, kind, label string, evidence []workflow.CommandCapture) {
+func (s *Supervisor) recordAttemptTerminal(ec workflow.ExecutorContext, dir, status, stopReason, errorText, kind, label string, evidence []workflow.CommandCapture) {
 	if err := s.workflowManager().RecordAttemptTermination(
 		ec.WorkflowID, ec.NodeID, ec.ActivationID, ec.AttemptID, ec.LeaseID, workflow.AttemptTermination{
 			Status:           workflow.AttemptStatus(status),
 			MarkerKind:       kind,
 			MarkerLabel:      label,
+			StopReason:       stopReason,
+			ErrorText:        errorText,
 			WorkingDirectory: dir,
 			Evidence:         evidence,
 		}); err != nil {

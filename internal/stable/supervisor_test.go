@@ -2411,7 +2411,7 @@ func TestWorkflowRunChildRecordsSucceededTermination(t *testing.T) {
 	var mu sync.Mutex
 	var called bool
 	var gotStatus workflow.AttemptStatus
-	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus, _, _ string) {
 		mu.Lock()
 		called = true
 		gotStatus = status
@@ -7523,7 +7523,7 @@ func TestWorkflowRunChildRecordsFailedTermination(t *testing.T) {
 	var mu sync.Mutex
 	var called bool
 	var gotStatus workflow.AttemptStatus
-	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus, _, _ string) {
 		mu.Lock()
 		called = true
 		gotStatus = status
@@ -7604,7 +7604,7 @@ func TestWorkflowLoopChildRecordsTermination(t *testing.T) {
 	var mu sync.Mutex
 	var called bool
 	var gotStatus workflow.AttemptStatus
-	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus, _, _ string) {
 		mu.Lock()
 		called = true
 		gotStatus = status
@@ -7730,7 +7730,7 @@ func TestWorkflowTeamChildRecordsTermination(t *testing.T) {
 	var mu sync.Mutex
 	var called bool
 	var gotStatus workflow.AttemptStatus
-	child.onWorkflowTerminate = func(status workflow.AttemptStatus) {
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus, _, _ string) {
 		mu.Lock()
 		called = true
 		gotStatus = status
@@ -8347,5 +8347,96 @@ func TestStartHTTPServerScrubsTheParentCredential(t *testing.T) {
 	}
 	if len(capturedCmd.Env) == 0 {
 		t.Fatal("cmd.Env is empty: the scrub dropped the whole environment")
+	}
+}
+
+// TestRecordWorkflowTerminationCarriesStopReason pins the wiring between the
+// child's terminal state and the workflow attempt fact: the stop reason comes
+// from the child's observed session.end (falling back to the exit-code map),
+// and the bounded error excerpt comes from the child's last error event, so an
+// auth_rejected turn reaches the workflow events and inspect output.
+func TestRecordWorkflowTerminationCarriesStopReason(t *testing.T) {
+	s := &Supervisor{}
+	child := &childRuntime{workflowID: "wf-1"}
+	type termination struct {
+		status     workflow.AttemptStatus
+		stopReason string
+		errorText  string
+	}
+	var got []termination
+	child.onWorkflowTerminate = func(status workflow.AttemptStatus, stopReason, errorText string) {
+		got = append(got, termination{status, stopReason, errorText})
+	}
+
+	// A provider-auth failure: exit code 8, the observed session.end reason,
+	// and the bounded error text captured from the error event path.
+	child.mu.Lock()
+	child.exitCode = 8
+	child.lastStopReason = "auth_rejected"
+	child.lastErrorText = "turn failed for session 01a1f083: Your authentication token has expired. Please try refreshing it."
+	child.mu.Unlock()
+	s.recordWorkflowTermination(child, false, context.Background())
+	if len(got) != 1 {
+		t.Fatalf("terminations = %d, want 1", len(got))
+	}
+	if got[0].status != workflow.AttemptFailed {
+		t.Fatalf("status = %s, want failed", got[0].status)
+	}
+	if got[0].stopReason != "auth_rejected" {
+		t.Fatalf("stop reason = %q, want auth_rejected", got[0].stopReason)
+	}
+	if !strings.Contains(got[0].errorText, "authentication token has expired") {
+		t.Fatalf("error text = %q, want the provider's auth failure text", got[0].errorText)
+	}
+
+	// With no observed session.end, the exit-code map names the reason: a
+	// quota-exhausted exit (6) records quota_exhausted.
+	got = nil
+	child.mu.Lock()
+	child.exitCode = 6
+	child.lastStopReason = ""
+	child.mu.Unlock()
+	s.recordWorkflowTermination(child, false, context.Background())
+	if len(got) != 1 || got[0].stopReason != runtime.QuotaExhaustedStopReason {
+		t.Fatalf("stop reason from exit code = %+v, want %q", got, runtime.QuotaExhaustedStopReason)
+	}
+}
+
+// TestFanoutCaptureAttemptsProviderErrorText drives the real capture path the
+// feature depends on: an avenor.error event with the prompt source written
+// through the fanout writer must land bounded on child.lastErrorText, and a
+// cli-sourced diagnostic must not overwrite it.
+func TestFanoutCaptureAttemptsProviderErrorText(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/test-fanout-error.sock", MaxRuntimes: 1})
+	child := &childRuntime{id: "rt_err_capture", done: make(chan struct{}), promptCh: make(chan struct{}, 1)}
+	registerSyntheticChild(t, sup, child, testLifecycleOptions{exec: execRunning, attempts: 1, class: directAttemptClass})
+	finishUnrunChildAtCleanup(t, sup, child)
+
+	writer := &runtimeFanoutWriter{base: stableTestSink{}, runtimeID: child.id, child: child, supervisor: sup}
+	if err := writer.Write(events.Event{Event: "avenor.error", Fields: map[string]any{
+		"source": "prompt", "message": "prompt: turn failed for session 01a1f083: Your authentication token has expired. Please try refreshing it.",
+	}}); err != nil {
+		t.Fatalf("write prompt error: %v", err)
+	}
+	child.mu.Lock()
+	got := child.lastErrorText
+	child.mu.Unlock()
+	if !strings.Contains(got, "authentication token has expired") {
+		t.Fatalf("lastErrorText = %q, want the provider's auth failure text", got)
+	}
+
+	// A cli-sourced error on the same path must not replace the provider
+	// excerpt the attempt records.
+	if err := writer.Write(events.Event{Event: "avenor.error", Fields: map[string]any{
+		"source": "permission", "message": "permission answer timed out",
+	}}); err != nil {
+		t.Fatalf("write cli error: %v", err)
+	}
+	child.mu.Lock()
+	got = child.lastErrorText
+	child.mu.Unlock()
+	if !strings.Contains(got, "authentication token has expired") {
+		t.Fatalf("lastErrorText after cli error = %q, want the provider text kept", got)
 	}
 }

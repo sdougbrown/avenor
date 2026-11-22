@@ -247,6 +247,8 @@ func buildCommandEvents(state Snapshot, command Command, policies Policies) ([]E
 		e.AttemptID = command.Identity.AttemptID
 		e.MarkerKind = command.MarkerKind
 		e.MarkerLabel = command.MarkerLabel
+		e.StopReason = command.StopReason
+		e.ErrorText = command.ErrorText
 		e.WorkingDirectory = command.WorkingDirectory
 		e.Evidence = command.Evidence
 		return []Event{e}, nil
@@ -654,6 +656,21 @@ func applyAttemptIdentified(next *Snapshot, act *Activation, event Event) error 
 	return nil
 }
 
+// neverRetryableStopReasons holds the provider stop reasons the kernel never
+// re-arms a node after: the refusal cannot clear inside the run, so the
+// remaining retry budget must not be spent on it. It mirrors the non-retryable
+// set in runtime.IsRetryableFailure for reasons that ride a provider terminal
+// record, with one documented divergence: quota_exhausted is fatal at the run
+// level, while the kernel still re-arms per the node's retry policy, whose
+// backoff can wait out a quota window. session_id_conflict and
+// messaging_unavailable are Avenor-side verdicts that never ride a provider
+// turn's terminal record, so the kernel never sees them here. A reason made
+// non-retryable in that set must be decided here too;
+// TestNeverRetryableStopReasons pins the membership and the divergence.
+var neverRetryableStopReasons = map[string]bool{
+	"auth_rejected": true,
+}
+
 // applyAttemptTerminated records the outcome of an attempt. It never satisfies
 // the activation on its own: retry and retry-exhaustion are handled here, but
 // only a follow-up completion (or a reroute) advances the workflow.
@@ -690,6 +707,8 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event, polici
 		return nil
 	}
 	attempt.Status = status
+	attempt.StopReason = event.StopReason
+	attempt.ErrorText = event.ErrorText
 	ended := event.At
 	attempt.EndedAt = &ended
 	// The marker kind/label is inert evidence of the terminal directive the
@@ -743,9 +762,12 @@ func applyAttemptTerminated(next *Snapshot, act *Activation, event Event, polici
 	// success and cancellation returned earlier) — only on the same
 	// activation, and never consumes loop iteration budget. Exhaustion uses
 	// the node's retry policy; without a template the reducer falls back to a
-	// single attempt (any failure exhausts to ActivationBlocked).
+	// single attempt (any failure exhausts to ActivationBlocked). An
+	// auth_rejected termination skips the re-arm entirely: the credential
+	// rejection cannot clear inside the run, so re-arming spends the budget
+	// on the same refusal and the exhaustion path surfaces the stop instead.
 	policy := retryPolicyFor(policies, next, act.NodeID)
-	if policy != nil && len(act.AttemptIDs) < policy.MaximumAttempts {
+	if !neverRetryableStopReasons[event.StopReason] && policy != nil && len(act.AttemptIDs) < policy.MaximumAttempts {
 		// Re-arm the same activation for a new attempt; the stale lease was
 		// already released above so the new attempt is freshly claimed. A
 		// declared backoff stamps a not-before readiness time derived from

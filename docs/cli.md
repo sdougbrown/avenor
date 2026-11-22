@@ -1040,12 +1040,14 @@ avenor watch --follow --format plain --since-cursor /tmp/cursor /tmp/events.json
 - `5` — Blocked (a phase aborted with an abort marker)
 - `6` — Provider quota exhausted (`quota_exhausted`); fall back to another model or retry later
 - `7` — Provider rate limit (`rate_limited`); retried when `--max-retries` > 0
+- `8` — Provider rejected the credentials (`auth_rejected`); refresh credentials (for example `pi auth login`) before retrying
 - `124` — Overall session timeout (`--timeout` reached)
 - `130` — Cancelled (`SIGINT`, `SIGTERM`, or context cancellation)
 
-A provider limit failure is reported as exit code 6 or 7 instead of 1, so an
-orchestrator can distinguish "out of quota, switch or retry later" from "the
-agent failed" without reading the event log.
+A provider limit failure is reported as exit code 6, 7, or 8 instead of 1, so an
+orchestrator can distinguish "out of quota, switch or retry later", "throttled,
+wait", and "credentials refused, refresh them" from "the agent failed" without
+reading the event log.
 
 ### Completion sentinel
 
