@@ -514,12 +514,10 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		if _, _, err := r.store.ClearCapacityBlocked(r.controllerID); err != nil {
 			log.Printf("workflow controller %s: clear capacity blocked: %v", r.controllerID, err)
 		}
-		// The dispatch worked, so an unresolved_selection diagnostic on
-		// this candidate's identity names a cause that is gone; clear it
-		// so a healthy controller does not report a stale failure.
-		if err := r.store.ClearDiagnostic(r.controllerID, "unresolved_selection", DiagnosticName(res.identity)); err != nil {
-			log.Printf("workflow controller %s: clear unresolved_selection: %v", r.controllerID, err)
-		}
+		// The dispatch worked, so any dispatch diagnostic on this
+		// candidate's identity names a cause that is gone; clear it so a
+		// healthy controller does not report a stale failure.
+		r.clearDispatchDiagnostics(res.identity)
 		r.setStatus(func(st *RunnerStatus) {
 			st.LastOutcome = string(ResultDispatched)
 			st.CapacityBlocked = ""
@@ -550,11 +548,9 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 				log.Printf("workflow controller %s: ensure poll cursor %s: %v", r.controllerID, PollCursorKey(cursor), err)
 			}
 		}
-		// The park succeeded, so an unresolved_binding diagnostic on this
+		// The park succeeded, so any dispatch diagnostic on this
 		// candidate's identity names a cause that is gone.
-		if err := r.store.ClearDiagnostic(r.controllerID, "unresolved_binding", DiagnosticName(res.identity)); err != nil {
-			log.Printf("workflow controller %s: clear unresolved_binding: %v", r.controllerID, err)
-		}
+		r.clearDispatchDiagnostics(res.identity)
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(ResultParked) })
 	case ResultUnresolvedBinding:
 		name := DiagnosticName(res.identity)
@@ -590,6 +586,19 @@ func (r *Runner) handleResult(s *leaderState, res dispatchWorkerResult) (lostLea
 		r.setStatus(func(s *RunnerStatus) { s.LastOutcome = string(res.result.Kind) })
 	}
 	return lostLead
+}
+
+// clearDispatchDiagnostics removes the dispatch diagnostics recorded
+// against this candidate's identity: a delivered success means their
+// causes are gone. Clearing an absent diagnostic is a no-op, so a
+// candidate that only ever failed one path pays one load.
+func (r *Runner) clearDispatchDiagnostics(identity workflow.ExecutionIdentity) {
+	name := DiagnosticName(identity)
+	for _, kind := range []string{"unresolved_selection", "unresolved_binding"} {
+		if err := r.store.ClearDiagnostic(r.controllerID, kind, name); err != nil {
+			log.Printf("workflow controller %s: clear %s: %v", r.controllerID, kind, err)
+		}
+	}
 }
 
 // receiveResult accounts for one delivered worker result.

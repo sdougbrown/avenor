@@ -1067,6 +1067,41 @@ func TestRunnerUnresolvedBindingRecordsDiagnosticAndBacksOff(t *testing.T) {
 	})
 }
 
+// TestRunnerSuccessClearsBothDispatchDiagnostics proves a success-shaped
+// outcome clears both dispatch diagnostic kinds recorded against the
+// candidate's identity: the kinds are disjoint per node kind today, but
+// the clear must not depend on that — a stale kind would otherwise
+// outlive the fix that caused it.
+func TestRunnerSuccessClearsBothDispatchDiagnostics(t *testing.T) {
+	t.Parallel()
+	store, _ := newRunnerStore(t, 2)
+	deps := newFakeDeps(store, "c1")
+	cand := runnerCand("wf1", "start", "a1")
+	deps.setCandidates([]Candidate{cand})
+	name := DiagnosticName(cand.Identity)
+	for _, kind := range []string{"unresolved_selection", "unresolved_binding"} {
+		if _, err := store.RecordDiagnostic("c1", kind, name, "stale cause"); err != nil {
+			t.Fatalf("record %s: %v", kind, err)
+		}
+	}
+	deps.setDefaultResult(DispatchResult{Kind: ResultDispatched})
+
+	r := startRunner(t, store, deps, 20*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond, nil, nil)
+	waitUntil(t, "dispatch succeeds", func() bool {
+		return r.Status().LastOutcome == string(ResultDispatched)
+	})
+	waitUntil(t, "both diagnostics cleared", func() bool {
+		rec, ok, err := store.Get("c1")
+		if err != nil || !ok {
+			return false
+		}
+		rec, _, _ = store.Get("c1")
+		_, sel := rec.Diagnostics["unresolved_selection/"+name]
+		_, bind := rec.Diagnostics["unresolved_binding/"+name]
+		return !sel && !bind
+	})
+}
+
 // TestRunnerDispatchBackoffIsPerCandidate verifies the map keying: while
 // one failing candidate is held in backoff, a non-failing sibling
 // candidate must keep dispatching on cadence. If the map were keyed too
