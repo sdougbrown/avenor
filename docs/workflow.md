@@ -682,8 +682,9 @@ recorded; leases, retries, and statuses never regress). A dispatch whose
 attempt intent is already committed but whose runtime has not registered
 reads the instance status inside its registration critical section and
 records the attempt as a pre-start failure carrying the `dispatch_canceled`
-marker instead of starting its provider; an attempt whose status cannot be
-read fails the same way, so the node falls back to its retry policy.
+marker instead of starting its provider. An attempt whose status cannot be
+read fails before its provider starts too, carrying the action's own marker,
+and the node falls back to its retry policy.
 Canceling an already
 terminal instance (`completed`, `failed`) is a clear error; re-canceling the
 same instance is an idempotent no-op. A cancel covers only the targeted
