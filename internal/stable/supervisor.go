@@ -242,8 +242,8 @@ type SpawnParams struct {
 	// its terminal fact. Set only by workflow executors.
 	workflowTerminate func(child *childRuntime, status workflow.AttemptStatus, stopReason, errorText string)
 	// attemptStart marks a workflow attempt's runtime start. It carries no JSON
-	// tag and is set only by spawnForAttempt, so it scopes the registration-time
-	// workflow authority check to attempt starts rather than to any spawn that
+	// tag and is set only by spawnForAttempt, so it scopes the workflow-canceled
+	// authority check to attempt starts rather than to any spawn that
 	// happens to carry workflow identity.
 	attemptStart bool
 	// permissionDeciderRun marks the spawn as a supervisor-spawned permission
@@ -7465,20 +7465,22 @@ func (s *Supervisor) spawnForAttempt(params SpawnParams, admission workflow.Admi
 // dispatchCanceledMarkerKind and dispatchCanceledMarkerLabel are the
 // attempt-level marker evidence for a workflow attempt whose provider never
 // ran because the workflow was canceled before the attempt started. The
-// dispatch boundary (its own context cancellation) and the registration-time
-// refusal both stamp this one pair, so the two paths record the same fact.
+// dispatch boundary (its own context cancellation) and the refusal reads both
+// stamp this one pair, so the paths record the same fact.
 const (
 	dispatchCanceledMarkerKind  = "dispatch"
 	dispatchCanceledMarkerLabel = "dispatch_canceled"
 )
 
 // errAttemptWorkflowCanceled reports that the attempt's workflow instance was
-// canceled before the attempt's runtime was registered, so its provider must
-// not be created.
+// canceled before the attempt's provider was created. The refusal reads run
+// outside the registration section, so a cancel caught by the post-publication
+// re-read has a registered child, which the refusal rolls back through the
+// deferred spawn cleanup.
 var errAttemptWorkflowCanceled = errors.New("workflow instance canceled before the attempt started")
 
 // isAttemptStartRefusal reports whether a runtime-start error is the
-// registration-time workflow-canceled refusal — the predicate both the
+// workflow-canceled refusal — the predicate both the
 // dispatch outcome mapping and the termination-fact marker override key on.
 func isAttemptStartRefusal(startErr error) bool {
 	return errors.Is(startErr, errAttemptWorkflowCanceled)
@@ -7486,9 +7488,10 @@ func isAttemptStartRefusal(startErr error) bool {
 
 // attemptStartFailureMarker returns the marker evidence for a pre-start
 // attempt termination: the dispatch-level cancellation marker when the
-// registration-time refusal won the race, otherwise the action-level marker
-// the executor declares. It is shared by every workflow executor's start
-// failure path, so a wrapped refusal error must still match here.
+// refusal read won the race against the cancel commit, otherwise the
+// action-level marker the executor declares. It is shared by every workflow
+// executor's start failure path, so a wrapped refusal error must still match
+// here.
 func attemptStartFailureMarker(startErr error, marker ...string) []string {
 	if isAttemptStartRefusal(startErr) {
 		return []string{dispatchCanceledMarkerKind, dispatchCanceledMarkerLabel}

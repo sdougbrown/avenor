@@ -176,11 +176,11 @@ func TestDispatchStartsNoProviderWhenCancelCommitsAfterBeginDispatch(t *testing.
 
 // TestDispatchStartsNoProviderWhenCancelCommitsBeforeAttemptRegistration lands
 // the cancel after every step the dispatch path performs on its own and
-// immediately before the registration critical section. A status recheck
-// placed anywhere on the dispatch path alone is a TOCTOU: it runs before this
-// seam, sees an uncanceled instance, and the provider starts anyway. Only a
-// check inside the registration critical section — which the cancel's runtime
-// snapshot serializes against — closes this ordering.
+// immediately before the registration critical section. The pre-section read
+// runs before this seam and sees an uncanceled instance — a recheck placed on
+// the dispatch path alone is that TOCTOU. The post-publication re-read, with
+// no lock held, is what catches this cancel: it refuses the start and rolls
+// the published child back.
 func TestDispatchStartsNoProviderWhenCancelCommitsBeforeAttemptRegistration(t *testing.T) {
 	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-cancel-pre-registration", 4, 4, "")
