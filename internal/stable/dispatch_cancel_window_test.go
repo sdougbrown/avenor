@@ -13,10 +13,10 @@ package stable
 //     stop and the dispatch used to start the provider for an already-canceled
 //     workflow. TestDispatchStartsNoProviderWhenCancelCommitsAfterBeginDispatch
 //     lands the cancel in that window; TestDispatchStartsNoProviderWhenCancel-
-//     CommitsBeforeAttemptRegistration lands it after every dispatch-side step,
-//     which is the window a status recheck placed on the dispatch path alone
-//     (a TOCTOU) cannot close: only a check inside the registration critical
-//     section, which the cancel's snapshot serializes against, sees it.
+//     CommitsBeforeAttemptRegistration lands it after every dispatch-side step.
+//     Both are refused by the durable reads around the registration section,
+//     which run with no lock held; the post-publication re-read is the one
+//     that catches a cancel committed between them.
 //  2. after registration — cancel finds the attempt's runtime and stops it.
 //     TestCancelAfterRegisteredRuntimeStopsTheAttempt pins that ordering.
 //  3. unknown ownership — an attempt whose instance status cannot be read must
@@ -176,11 +176,11 @@ func TestDispatchStartsNoProviderWhenCancelCommitsAfterBeginDispatch(t *testing.
 
 // TestDispatchStartsNoProviderWhenCancelCommitsBeforeAttemptRegistration lands
 // the cancel after every step the dispatch path performs on its own and
-// immediately before the registration critical section. A status recheck
-// placed anywhere on the dispatch path alone is a TOCTOU: it runs before this
-// seam, sees an uncanceled instance, and the provider starts anyway. Only a
-// check inside the registration critical section — which the cancel's runtime
-// snapshot serializes against — closes this ordering.
+// immediately before the registration critical section. The pre-section read
+// runs before this seam and sees an uncanceled instance — a recheck placed on
+// the dispatch path alone is that TOCTOU. The post-publication re-read, with
+// no lock held, is what catches this cancel: it refuses the start and rolls
+// the published child back.
 func TestDispatchStartsNoProviderWhenCancelCommitsBeforeAttemptRegistration(t *testing.T) {
 	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-cancel-pre-registration", 4, 4, "")
@@ -321,10 +321,11 @@ func TestCancelAfterRegisteredRuntimeStopsTheAttempt(t *testing.T) {
 // TestDispatchStartsNoProviderWhenCancelCommitsInsideRegistrationLock commits
 // the cancel while the registration critical section is held, through the
 // manager directly (the supervisor's own cancel handler deadlocks on the
-// held lock). This pins where the refusal read lives: the hook runs after the
-// lock is acquired and before the status read, so a read placed anywhere
-// earlier — outside the lock, or before it is acquired — sees an uncanceled
-// instance, starts the provider, and fails this test.
+// held lock). The refusal reads run outside the lock, so neither sees this
+// commit at read time; the post-publication re-read catches it, and a cancel
+// committed after that re-read finds the published child through the cancel
+// surface's own snapshot. Disabling the re-read fails this test with the
+// provider running.
 func TestDispatchStartsNoProviderWhenCancelCommitsInsideRegistrationLock(t *testing.T) {
 	t.Parallel()
 	f := newDispatchFixture(t, "dispatch-cancel-in-lock", 4, 4, "")

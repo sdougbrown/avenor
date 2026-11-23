@@ -242,8 +242,8 @@ type SpawnParams struct {
 	// its terminal fact. Set only by workflow executors.
 	workflowTerminate func(child *childRuntime, status workflow.AttemptStatus, stopReason, errorText string)
 	// attemptStart marks a workflow attempt's runtime start. It carries no JSON
-	// tag and is set only by spawnForAttempt, so it scopes the registration-time
-	// workflow authority check to attempt starts rather than to any spawn that
+	// tag and is set only by spawnForAttempt, so it scopes the workflow-canceled
+	// authority check to attempt starts rather than to any spawn that
 	// happens to carry workflow identity.
 	attemptStart bool
 	// permissionDeciderRun marks the spawn as a supervisor-spawned permission
@@ -707,11 +707,11 @@ type testHooks struct {
 	// command into that window deterministically. nil in production.
 	beforeAttemptRegistration func(attemptID string)
 	// insideAttemptRegistration, when non-nil (set by tests), runs in
-	// spawnReserved for a workflow attempt while the registration lock is held,
-	// immediately before the durable instance status read. A test commits a cancel
-	// there to pin that the read stays inside the critical section: a status read
-	// placed anywhere earlier sees an uncanceled instance and starts the provider,
-	// failing the test. nil in production.
+	// spawnReserved for a workflow attempt while the registration lock is held.
+	// The refusal reads run outside the lock, so a test commits a cancel here
+	// to pin the gap coverage: the commit is invisible to both reads and must
+	// be caught by the post-publication re-read (or, after it, by the cancel
+	// surface's own snapshot finding the published child). nil in production.
 	insideAttemptRegistration func(attemptID string)
 	// afterAttemptSpawn, when non-nil (set by tests), runs in a workflow
 	// executor right after the attempt's runtime is spawned, with its runtime
@@ -1890,13 +1890,20 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		resolvedMessaging = *params.resume.messagingOn
 	}
 
-	// A workflow attempt's start is serialized against the cancel surface: the
-	// manager is resolved here, outside the registration lock, and the attempt's
-	// durable instance status is read inside that lock (below) before anything
-	// is published or the provider is created.
+	// A workflow attempt's start is bounded against the cancel surface with two
+	// durable status reads, both with no supervisor lock held: one before the
+	// registration critical section (below) and one after the child is
+	// published. Between the second read and provider creation, the cancel
+	// surface's own runtime snapshot closes the gap. No durable I/O runs under
+	// controlMu.
 	var attemptMgr *workflow.Manager
 	if params.attemptStart {
 		attemptMgr = s.workflowManager()
+	}
+	if attemptMgr != nil {
+		if reason := attemptStartRefusal(attemptMgr, params.WorkflowID); reason != nil {
+			return SpawnResult{}, reason
+		}
 	}
 	if h := s.testHooks.beforeAttemptRegistration; h != nil && attemptMgr != nil {
 		h(string(params.AttemptID))
@@ -1910,18 +1917,16 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 		return SpawnResult{}, fmt.Errorf("supervisor is shutting down")
 	}
 	// The cancel surface commits the instance cancel durably, then snapshots
-	// s.runtimes under this lock (cancelWorkflowRuntimes). This read of the
-	// durable status sits inside the same critical section that publishes the
-	// child, so the two orderings are exhaustive. A cancel committed before this
-	// section is visible to this read. One committed after it finds the published
-	// child and begins its shutdown.
+	// s.runtimes under this lock (cancelWorkflowRuntimes). The child is
+	// published inside this section, so a same-process cancel that commits
+	// after it finds the published child and begins its shutdown; the two
+	// durable reads around this section cover every earlier commit this
+	// supervisor observes. (Teardown is supervisor-local by design: a cancel
+	// committed by another supervisor sharing the root stops only that
+	// supervisor's runtimes.)
 	if attemptMgr != nil {
 		if h := s.testHooks.insideAttemptRegistration; h != nil {
 			h(string(params.AttemptID))
-		}
-		if reason := attemptStartRefusal(attemptMgr, params.WorkflowID); reason != nil {
-			s.controlMu.Unlock()
-			return SpawnResult{}, reason
 		}
 	}
 	s.nextID++
@@ -2085,6 +2090,17 @@ func (s *Supervisor) spawnReserved(params SpawnParams, res *admissionReservation
 			releaseReservation()
 		}
 	}()
+
+	// Second durable status read, still with no supervisor lock held. The child
+	// is published, so a cancel that committed between the first read and here
+	// is visible to this re-check; a refusal rolls the registered child back
+	// through the same deferred cleanup every post-publication failure path
+	// uses. The provider is created below, so nothing ran for the attempt.
+	if attemptMgr != nil {
+		if reason := attemptStartRefusal(attemptMgr, params.WorkflowID); reason != nil {
+			return SpawnResult{}, reason
+		}
+	}
 
 	promptText := params.Prompt
 	if promptText == "" && params.PromptFile != "" {
@@ -7449,20 +7465,22 @@ func (s *Supervisor) spawnForAttempt(params SpawnParams, admission workflow.Admi
 // dispatchCanceledMarkerKind and dispatchCanceledMarkerLabel are the
 // attempt-level marker evidence for a workflow attempt whose provider never
 // ran because the workflow was canceled before the attempt started. The
-// dispatch boundary (its own context cancellation) and the registration-time
-// refusal both stamp this one pair, so the two paths record the same fact.
+// dispatch boundary (its own context cancellation) and the refusal reads both
+// stamp this one pair, so the paths record the same fact.
 const (
 	dispatchCanceledMarkerKind  = "dispatch"
 	dispatchCanceledMarkerLabel = "dispatch_canceled"
 )
 
 // errAttemptWorkflowCanceled reports that the attempt's workflow instance was
-// canceled before the attempt's runtime was registered, so its provider must
-// not be created.
+// canceled before the attempt's provider was created. The refusal reads run
+// outside the registration section, so a cancel caught by the post-publication
+// re-read has a registered child, which the refusal rolls back through the
+// deferred spawn cleanup.
 var errAttemptWorkflowCanceled = errors.New("workflow instance canceled before the attempt started")
 
 // isAttemptStartRefusal reports whether a runtime-start error is the
-// registration-time workflow-canceled refusal — the predicate both the
+// workflow-canceled refusal — the predicate both the
 // dispatch outcome mapping and the termination-fact marker override key on.
 func isAttemptStartRefusal(startErr error) bool {
 	return errors.Is(startErr, errAttemptWorkflowCanceled)
@@ -7470,9 +7488,10 @@ func isAttemptStartRefusal(startErr error) bool {
 
 // attemptStartFailureMarker returns the marker evidence for a pre-start
 // attempt termination: the dispatch-level cancellation marker when the
-// registration-time refusal won the race, otherwise the action-level marker
-// the executor declares. It is shared by every workflow executor's start
-// failure path, so a wrapped refusal error must still match here.
+// refusal read won the race against the cancel commit, otherwise the
+// action-level marker the executor declares. It is shared by every workflow
+// executor's start failure path, so a wrapped refusal error must still match
+// here.
 func attemptStartFailureMarker(startErr error, marker ...string) []string {
 	if isAttemptStartRefusal(startErr) {
 		return []string{dispatchCanceledMarkerKind, dispatchCanceledMarkerLabel}
@@ -7481,11 +7500,16 @@ func attemptStartFailureMarker(startErr error, marker ...string) []string {
 }
 
 // attemptStartRefusal reports why a workflow attempt must not start its
-// provider, or nil when the start can proceed. The caller reads it inside the
-// registration critical section, which serializes it against
-// cancelWorkflowRuntimes. It is fail-closed: an instance whose status cannot be
-// read is not treated as dispatchable, because unknown ownership must not be
-// assumed safe.
+// provider, or nil when the start can proceed. spawnReserved reads it twice
+// with no supervisor lock held — before the registration critical section and
+// again after the child is published — so the durable status bounds the start
+// without durable I/O under controlMu. The gap between the second read and
+// provider creation is covered by the cancel surface's own runtime snapshot:
+// a same-process cancel that commits after the second read finds the published
+// child and stops it (cancels from other supervisors sharing the root stop
+// only their own runtimes). It is fail-closed: an instance whose status cannot
+// be read is not treated as dispatchable, because unknown ownership must not
+// be assumed safe.
 func attemptStartRefusal(mgr *workflow.Manager, workflowID string) error {
 	status, err := mgr.InstanceStatus(workflowID)
 	if err != nil {
