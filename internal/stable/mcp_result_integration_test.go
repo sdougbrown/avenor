@@ -1,13 +1,18 @@
 // This file holds the deliberate cross-boundary integration tests in the
 // stable package: they import internal/mcpserver (a surface) so stable's test
-// binary links a surface binary. They prove two properties of the MCP surface
+// binary links a surface binary. They prove three properties of the MCP surface
 // against a real supervisor and a real control socket:
 //
 //   - a runtime result carries the per-turn sentinel_file through control to
 //     the MCP result tool: a run spawned with its own sentinel file and
 //     per-turn event log answers with its complete output and no truncation
 //     flag, even after the event log is moved out from under the runtime;
-//   - the MCP spawn tool refuses a roster entry's launch fields.
+//   - the MCP spawn tool refuses a roster entry's launch fields;
+//   - a bound conversation's avenor://inbox carries a child's ask to the MCP
+//     client and the reply it sends back through the message tool reaches that
+//     child, on both the resources/subscribe and subscriptions/listen revisions,
+//     and it shares one consumer lock with `avenor feed broker` in both
+//     directions.
 //
 // New stable tests must not import internal/mcpserver; keep the surface
 // boundary here.
@@ -30,8 +35,11 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sdougbrown/avenor/internal/appdir"
+	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/events"
+	"github.com/sdougbrown/avenor/internal/feed"
 	"github.com/sdougbrown/avenor/internal/mcpserver"
 	"github.com/sdougbrown/avenor/internal/messaging"
 	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
@@ -300,19 +308,48 @@ func noteParentRun(note string) string {
 	return parent
 }
 
+// connectMCPOptions parameterizes a bound MCP connection. The zero value is the
+// launch that declares a private handoff pipe and connects an SDK client with
+// its defaults; a caller that drives the inbox itself passes what it needs.
+type connectMCPOptions struct {
+	// noHandoff declares the conversation without a pipe. The launch then keeps
+	// the identity in memory, which is what a server that serves its own inbox
+	// does: nothing else needs the credentials.
+	noHandoff bool
+	// client and session configure the MCP client.
+	client  *mcpsdk.ClientOptions
+	session *mcpsdk.ClientSessionOptions
+}
+
 // connectMCP declares one host conversation on a server over its supervisor and
 // returns the session a client drives it with, plus the identity the launch
 // handed over on the private pipe. The line is read before the client connects:
 // the launch writes it before it serves anything.
 func connectMCP(t *testing.T, ctx context.Context, opts mcpserver.Options, host, session string) (*mcpsdk.ClientSession, messaging.MessageBindResult) {
 	t.Helper()
-	read, write, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = read.Close() })
+	cs, bound, _ := connectMCPWith(t, ctx, opts, host, session, connectMCPOptions{})
+	return cs, bound
+}
+
+// connectMCPWith connects one client to a bound MCP server over an in-memory
+// transport. It also returns a waiter for the served transport's exit, so a test
+// can observe what the server releases when its client goes away. The returned
+// identity is empty for a launch that declared no pipe: that launch hands its
+// credentials to nobody.
+func connectMCPWith(t *testing.T, ctx context.Context, opts mcpserver.Options, host, session string, extra connectMCPOptions) (*mcpsdk.ClientSession, messaging.MessageBindResult, func() error) {
+	t.Helper()
 	opts.Transport, opts.NoAutostart = "stdio", true
-	opts.BindHost, opts.BindSession, opts.BindHandoff = host, session, write
+	opts.BindHost, opts.BindSession = host, session
+	var handoff *os.File
+	if !extra.noHandoff {
+		read, write, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = read.Close() })
+		handoff = read
+		opts.BindHandoff = write
+	}
 	if opts.Stderr == nil {
 		opts.Stderr = os.Stderr
 	}
@@ -323,32 +360,53 @@ func connectMCP(t *testing.T, ctx context.Context, opts mcpserver.Options, host,
 	t.Cleanup(func() { _ = srv.Close() })
 	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
 	serveCtx, cancel := context.WithCancel(ctx)
-	t.Cleanup(cancel)
-	go func() { _ = srv.ServeTransport(serveCtx, serverTransport) }()
+	var (
+		serveOnce sync.Once
+		serveErr  error
+	)
+	serveDone := make(chan error, 1)
+	awaitServe := func() error {
+		serveOnce.Do(func() {
+			select {
+			case serveErr = <-serveDone:
+			case <-time.After(15 * time.Second):
+				t.Error("ServeTransport did not return")
+			}
+		})
+		return serveErr
+	}
+	t.Cleanup(func() {
+		cancel()
+		awaitServe()
+	})
+	go func() { serveDone <- srv.ServeTransport(serveCtx, serverTransport) }()
 
-	line, err := io.ReadAll(read)
-	if err != nil {
-		t.Fatalf("read handoff: %v", err)
-	}
-	if len(line) == 0 {
-		t.Fatal("the launch handed over no identity: it failed before serving")
-	}
-	var handedControl control.MessageBindResult
-	if err := json.Unmarshal(line, &handedControl); err != nil {
-		t.Fatalf("handoff line: %v", err)
-	}
-	handed := handedControl.MessageBindResult()
-	if handed.RunID == "" || handed.RunToken == "" || handed.BrokerURL == "" || handed.Generation == "" {
-		t.Fatalf("handoff identity = %+v, want the bind result's five fields", handed)
+	var handed messaging.MessageBindResult
+	if handoff != nil {
+		line, err := io.ReadAll(handoff)
+		if err != nil {
+			t.Fatalf("read handoff: %v", err)
+		}
+		if len(line) == 0 {
+			t.Fatal("the launch handed over no identity: it failed before serving")
+		}
+		var handedControl control.MessageBindResult
+		if err := json.Unmarshal(line, &handedControl); err != nil {
+			t.Fatalf("handoff line: %v", err)
+		}
+		handed = handedControl.MessageBindResult()
+		if handed.RunID == "" || handed.RunToken == "" || handed.BrokerURL == "" || handed.Generation == "" {
+			t.Fatalf("handoff identity = %+v, want the bind result's five fields", handed)
+		}
 	}
 
-	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "poo-test", Version: "1"}, nil)
-	cs, err := client.Connect(serveCtx, clientTransport, nil)
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "poo-test", Version: "1"}, extra.client)
+	cs, err := client.Connect(serveCtx, clientTransport, extra.session)
 	if err != nil {
 		t.Fatalf("connect mcp client: %v", err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	return cs, handed
+	return cs, handed, awaitServe
 }
 
 // spawnOverMCP drives the spawn tool and returns its structured result.
@@ -657,4 +715,518 @@ func TestMCPDeclaredConversationRefusesAStaleBinding(t *testing.T) {
 	if record := replacement.sup.broker.GetRun(bound.RunID); record != nil {
 		t.Fatalf("the replacement minted a ghost parent record for %q", bound.RunID)
 	}
+}
+
+// inboxAsk is the part of one avenor://inbox message a reply needs. The JSON
+// shape is the resource's contract; this package sees it only through the wire.
+type inboxAsk struct {
+	ID           string `json:"id"`
+	From         string `json:"from"`
+	Text         string `json:"text"`
+	ExpectsReply bool   `json:"expects_reply"`
+	Answerable   bool   `json:"answerable"`
+}
+
+// decodeInboxPayload reads the messages one inbox read reports.
+func decodeInboxPayload(t *testing.T, text string) []inboxAsk {
+	t.Helper()
+	var payload struct {
+		Messages []inboxAsk `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("decode the inbox payload: %v (%q)", err, text)
+	}
+	return payload.Messages
+}
+
+// answerableAsk returns the one ask a delivered batch carries, failing if the
+// conversation was told about a message it cannot answer.
+func answerableAsk(t *testing.T, messages []inboxAsk) inboxAsk {
+	t.Helper()
+	for _, message := range messages {
+		if !message.ExpectsReply {
+			continue
+		}
+		if !message.Answerable {
+			t.Fatalf("the delivered ask %+v reports no route for its reply", message)
+		}
+		return message
+	}
+	t.Fatalf("the inbox reported no ask: %+v", messages)
+	return inboxAsk{}
+}
+
+// inboxDriver is the protocol-specific half of the inbox round trip: how the
+// conversation subscribes, spawns, learns about the ask and answers it.
+type inboxDriver interface {
+	// subscribe opens the conversation's subscription to its own inbox.
+	subscribe(t *testing.T)
+	// spawn starts one child over the MCP spawn tool.
+	spawn(t *testing.T, dir string)
+	// awaitAsk waits for the inbox to be reported changed and returns the ask it
+	// holds.
+	awaitAsk(t *testing.T) inboxAsk
+	// reply answers one ask through the MCP message tool.
+	reply(t *testing.T, askID, text string)
+}
+
+// legacyInboxDriver drives the resources/subscribe revision through the SDK
+// client, which reports resource updates through a handler.
+type legacyInboxDriver struct {
+	ctx     context.Context
+	cs      *mcpsdk.ClientSession
+	updates chan struct{}
+}
+
+func (d legacyInboxDriver) subscribe(t *testing.T) {
+	t.Helper()
+	if err := d.cs.Subscribe(d.ctx, &mcpsdk.SubscribeParams{URI: mcpserver.InboxResourceURI}); err != nil {
+		t.Fatalf("subscribe to %s: %v", mcpserver.InboxResourceURI, err)
+	}
+}
+
+func (d legacyInboxDriver) spawn(t *testing.T, dir string) {
+	t.Helper()
+	spawnOverMCP(t, d.ctx, d.cs, map[string]any{"dir": dir, "prompt": "report", "backend": "pony"})
+}
+
+func (d legacyInboxDriver) awaitAsk(t *testing.T) inboxAsk {
+	t.Helper()
+	select {
+	case <-d.updates:
+	case <-d.ctx.Done():
+		t.Fatal("the conversation was never told its inbox changed")
+	}
+	res, err := d.cs.ReadResource(d.ctx, &mcpsdk.ReadResourceParams{URI: mcpserver.InboxResourceURI})
+	if err != nil {
+		t.Fatalf("read %s: %v", mcpserver.InboxResourceURI, err)
+	}
+	if len(res.Contents) != 1 {
+		t.Fatalf("the read returned %d contents, want 1", len(res.Contents))
+	}
+	return answerableAsk(t, decodeInboxPayload(t, res.Contents[0].Text))
+}
+
+func (d legacyInboxDriver) reply(t *testing.T, askID, text string) {
+	t.Helper()
+	res, err := d.cs.CallTool(d.ctx, &mcpsdk.CallToolParams{Name: "message", Arguments: map[string]any{
+		"action": "reply", "reply_to": askID, "message": text,
+	}})
+	if err != nil {
+		t.Fatalf("message reply: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("message reply tool error: %s", resultToolText(t, res))
+	}
+}
+
+// rawMCPStream drives one MCP server over newline-delimited JSON-RPC pipes. The
+// SDK client runs subscriptions/listen in a background goroutine and returns only
+// when that stream ends, so the revision without resources/subscribe has to be
+// driven frame by frame.
+type rawMCPStream struct {
+	t      *testing.T
+	to     *io.PipeWriter
+	frames chan map[string]any
+}
+
+// serveRawMCP serves one bound MCP server over pipes and starts reading its
+// frames.
+func serveRawMCP(t *testing.T, ctx context.Context, opts mcpserver.Options) *rawMCPStream {
+	t.Helper()
+	opts.Transport, opts.NoAutostart = "stdio", true
+	opts.BindHost, opts.BindSession, opts.BindHandoff = "poo", "ses_poo", nil
+	if opts.Stderr == nil {
+		opts.Stderr = os.Stderr
+	}
+	srv, err := mcpserver.NewServer(opts)
+	if err != nil {
+		t.Fatalf("mcp server: %v", err)
+	}
+	clientToServer, fromClient := io.Pipe()
+	toClient, serverToClient := io.Pipe()
+	serveCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.ServeTransport(serveCtx, &mcpsdk.IOTransport{Reader: clientToServer, Writer: serverToClient})
+	}()
+	stream := &rawMCPStream{t: t, to: fromClient, frames: make(chan map[string]any, 64)}
+	go func() {
+		defer close(stream.frames)
+		decoder := json.NewDecoder(toClient)
+		for {
+			var frame map[string]any
+			if err := decoder.Decode(&frame); err != nil {
+				return
+			}
+			stream.frames <- frame
+		}
+	}()
+	t.Cleanup(func() {
+		_ = fromClient.Close()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			t.Error("ServeTransport did not return")
+		}
+		_ = srv.Close()
+	})
+	return stream
+}
+
+// send writes one frame.
+func (s *rawMCPStream) send(frame map[string]any) {
+	s.t.Helper()
+	frame["jsonrpc"] = "2.0"
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		s.t.Fatalf("encode frame %+v: %v", frame, err)
+	}
+	if _, err := s.to.Write(append(encoded, '\n')); err != nil {
+		s.t.Fatalf("write frame %+v: %v", frame, err)
+	}
+}
+
+// call sends one request under the SEP-2575 per-request metadata every call in
+// this revision carries.
+func (s *rawMCPStream) call(id int, method string, params map[string]any) {
+	s.t.Helper()
+	if params == nil {
+		params = map[string]any{}
+	}
+	params["_meta"] = map[string]any{
+		"io.modelcontextprotocol/protocolVersion":    "2026-07-28",
+		"io.modelcontextprotocol/clientInfo":         map[string]any{"name": "stable-raw", "version": "1"},
+		"io.modelcontextprotocol/clientCapabilities": map[string]any{},
+	}
+	s.send(map[string]any{"id": id, "method": method, "params": params})
+}
+
+// await returns the next frame matching match.
+func (s *rawMCPStream) await(what string, match func(map[string]any) bool) map[string]any {
+	s.t.Helper()
+	deadline := time.After(30 * time.Second)
+	var seen []map[string]any
+	for {
+		select {
+		case frame, ok := <-s.frames:
+			if !ok {
+				s.t.Fatalf("the server closed the stream while waiting for %s; frames seen: %#v", what, seen)
+			}
+			seen = append(seen, frame)
+			if match(frame) {
+				return frame
+			}
+		case <-deadline:
+			s.t.Fatalf("timed out waiting for %s; frames seen: %#v", what, seen)
+		}
+	}
+}
+
+// result returns the result object of a response frame.
+func (s *rawMCPStream) result(frame map[string]any) map[string]any {
+	s.t.Helper()
+	result, ok := frame["result"].(map[string]any)
+	if !ok {
+		s.t.Fatalf("frame %#v carries no result", frame)
+	}
+	return result
+}
+
+// mcpFrameWithID matches the response to one request.
+func mcpFrameWithID(id float64) func(map[string]any) bool {
+	return func(frame map[string]any) bool {
+		frameID, ok := frame["id"].(float64)
+		return ok && frameID == id
+	}
+}
+
+// modernInboxDriver drives the subscriptions/listen revision over the raw stream.
+type modernInboxDriver struct {
+	stream *rawMCPStream
+}
+
+func (d modernInboxDriver) subscribe(t *testing.T) {
+	t.Helper()
+	d.stream.call(10, "subscriptions/listen", map[string]any{
+		"notifications": map[string]any{"resourceSubscriptions": []string{mcpserver.InboxResourceURI}},
+	})
+	d.stream.await("subscriptions/acknowledged", func(frame map[string]any) bool {
+		return frame["method"] == "notifications/subscriptions/acknowledged"
+	})
+}
+
+func (d modernInboxDriver) spawn(t *testing.T, dir string) {
+	t.Helper()
+	d.stream.call(11, "tools/call", map[string]any{
+		"name":      "spawn",
+		"arguments": map[string]any{"dir": dir, "prompt": "report", "backend": "pony"},
+	})
+	res := d.stream.result(d.stream.await("the spawn result", mcpFrameWithID(11)))
+	if isError, _ := res["isError"].(bool); isError {
+		t.Fatalf("spawn tool error: %#v", res)
+	}
+}
+
+func (d modernInboxDriver) awaitAsk(t *testing.T) inboxAsk {
+	t.Helper()
+	d.stream.await("notifications/resources/updated", func(frame map[string]any) bool {
+		return frame["method"] == "notifications/resources/updated"
+	})
+	d.stream.call(20, "resources/read", map[string]any{"uri": mcpserver.InboxResourceURI})
+	read := d.stream.result(d.stream.await("the inbox read", mcpFrameWithID(20)))
+	contents, _ := read["contents"].([]any)
+	if len(contents) != 1 {
+		t.Fatalf("the read returned %d contents, want 1", len(contents))
+	}
+	content, _ := contents[0].(map[string]any)
+	text, _ := content["text"].(string)
+	return answerableAsk(t, decodeInboxPayload(t, text))
+}
+
+func (d modernInboxDriver) reply(t *testing.T, askID, text string) {
+	t.Helper()
+	d.stream.call(30, "tools/call", map[string]any{
+		"name": "message",
+		"arguments": map[string]any{
+			"action": "reply", "reply_to": askID, "message": text,
+		},
+	})
+	res := d.stream.result(d.stream.await("the reply result", mcpFrameWithID(30)))
+	if isError, _ := res["isError"].(bool); isError {
+		t.Fatalf("message reply tool error: %#v", res)
+	}
+}
+
+// awaitConversationChild returns the provider the spawn built.
+func awaitConversationChild(t *testing.T, ctx context.Context, children <-chan *conversationChild) *conversationChild {
+	t.Helper()
+	select {
+	case child := <-children:
+		return child
+	case <-ctx.Done():
+		t.Fatal("the spawn built no child provider")
+	}
+	return nil
+}
+
+// assertChildAnswered waits for the child's own ask to settle and checks what it
+// received back.
+func assertChildAnswered(t *testing.T, ctx context.Context, child *conversationChild, want string) {
+	t.Helper()
+	select {
+	case <-child.finished:
+	case <-ctx.Done():
+		t.Fatal("the child never finished its ask")
+	}
+	done := child.snapshot()
+	if done.askErr != nil {
+		t.Fatalf("child ask: %v", done.askErr)
+	}
+	if done.outcome != messaging.OutcomeReplied {
+		t.Fatalf("child ask outcome = %q, want replied", done.outcome)
+	}
+	if !strings.Contains(done.reply, want) {
+		t.Fatalf("child reply = %q, want %q", done.reply, want)
+	}
+}
+
+// driveInboxConversation runs the round trip one protocol revision at a time: the
+// conversation subscribes to its own inbox, a child spawned over MCP asks it
+// something, and the answer the conversation sends through the MCP message tool
+// reaches that child.
+func driveInboxConversation(t *testing.T, ctx context.Context, driver inboxDriver, children <-chan *conversationChild) {
+	t.Helper()
+	driver.subscribe(t)
+	driver.spawn(t, t.TempDir())
+	child := awaitConversationChild(t, ctx, children)
+	ask := driver.awaitAsk(t)
+	if ask.From == "" || ask.Text == "" {
+		t.Fatalf("the delivered ask = %+v, want the child's question and its sender", ask)
+	}
+	driver.reply(t, ask.ID, "pong")
+	assertChildAnswered(t, ctx, child, "pong")
+}
+
+// TestMCPInboxDeliversChildAskAndRepliesOverMCP proves the inbox round trip
+// against a real supervisor and a real broker on both protocol revisions: each
+// subscribes by its own RPC, is woken by its own notification, drains the same
+// resource, and answers with the same message tool.
+func TestMCPInboxDeliversChildAskAndRepliesOverMCP(t *testing.T) {
+	for _, version := range []string{"2025-11-25", "2026-07-28"} {
+		t.Run(version, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			children := make(chan *conversationChild, 1)
+			h := newItestHarness(t, Config{}, func(runtime.StartOptions, string) (runtime.Provider, error) {
+				child := newConversationChild()
+				children <- child
+				return child, nil
+			})
+			cl := h.connectClient()
+
+			if version == "2026-07-28" {
+				// The SDK client cannot drive a listen stream synchronously, so this
+				// revision speaks the protocol over pipes.
+				driveInboxConversation(t, ctx, modernInboxDriver{stream: serveRawMCP(t, ctx, mcpserver.Options{ControlClient: cl})}, children)
+				return
+			}
+			updates := make(chan struct{}, 4)
+			cs, _, _ := connectMCPWith(t, ctx, mcpserver.Options{ControlClient: cl}, "poo", "ses_poo", connectMCPOptions{
+				noHandoff: true,
+				client: &mcpsdk.ClientOptions{ResourceUpdatedHandler: func(_ context.Context, req *mcpsdk.ResourceUpdatedNotificationRequest) {
+					if req.Params != nil && req.Params.URI == mcpserver.InboxResourceURI {
+						select {
+						case updates <- struct{}{}:
+						default:
+						}
+					}
+				}},
+				session: &mcpsdk.ClientSessionOptions{ProtocolVersion: version},
+			})
+			driveInboxConversation(t, ctx, legacyInboxDriver{ctx: ctx, cs: cs, updates: updates}, children)
+		})
+	}
+}
+
+// feedRecord is one NDJSON line `avenor feed broker` printed.
+type feedRecord struct {
+	Text string `json:"text"`
+	From string `json:"from"`
+	ID   string `json:"id"`
+}
+
+// firstFeedRecord decodes the first line the feed printed.
+func firstFeedRecord(t *testing.T, out string) feedRecord {
+	t.Helper()
+	line, _, _ := strings.Cut(out, "\n")
+	var record feedRecord
+	if err := json.Unmarshal([]byte(line), &record); err != nil {
+		t.Fatalf("feed record %q: %v", line, err)
+	}
+	return record
+}
+
+// TestMCPInboxReplyWorksForFeedDeliveredAsk pins the shared claim directory: an
+// ask the *feed* delivered is answerable from the MCP surface, because both write
+// and read the one record the launch resolved for the conversation.
+func TestMCPInboxReplyWorksForFeedDeliveredAsk(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	children := make(chan *conversationChild, 1)
+	h := newItestHarness(t, Config{}, func(runtime.StartOptions, string) (runtime.Provider, error) {
+		child := newConversationChild()
+		children <- child
+		return child, nil
+	})
+	cl := h.connectClient()
+	cs, bound := connectMCP(t, ctx, mcpserver.Options{ControlClient: cl}, "poo", "ses_poo")
+
+	// The feed consumes the inbox instead of the MCP resource, using the identity
+	// the launch handed over.
+	var records, feedLog syncBuffer
+	feedCtx, stopFeed := context.WithCancel(ctx)
+	defer stopFeed()
+	go func() {
+		feed.Broker{
+			RunID:          bound.RunID,
+			Token:          bound.RunToken,
+			BrokerURL:      bound.BrokerURL,
+			LockDir:        feed.DefaultLockDir(appdir.StateHome()),
+			Out:            &records,
+			Log:            &feedLog,
+			RequestTimeout: 2 * time.Second,
+		}.Run(feedCtx)
+	}()
+
+	spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "pony"})
+	child := awaitConversationChild(t, ctx, children)
+	h.awaitCondition("the feed to record the child's ask", func() bool {
+		return strings.Contains(records.String(), "\n")
+	})
+	record := firstFeedRecord(t, records.String())
+	if record.ID == "" || record.From == "" {
+		t.Fatalf("feed record = %+v, want the child's ask", record)
+	}
+
+	claimDir, err := askclaim.DefaultDir(appdir.StateHome(), bound.BrokerURL, bound.RunID)
+	if err != nil {
+		t.Fatalf("resolve the claim directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(claimDir, record.ID+".json")); err != nil {
+		t.Fatalf("the feed-delivered ask left no claim under %s: %v", claimDir, err)
+	}
+
+	res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{Name: "message", Arguments: map[string]any{
+		"action": "reply", "reply_to": record.ID, "message": "pong-from-mcp",
+	}})
+	if err != nil {
+		t.Fatalf("message reply: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("message reply tool error: %s", resultToolText(t, res))
+	}
+	assertChildAnswered(t, ctx, child, "pong-from-mcp")
+}
+
+// TestMCPInboxSharesLockWithFeedBroker pins the mutual exclusion between the two
+// consumers of one run's inbox: while the MCP server subscribes, `avenor feed
+// broker` exits without consuming, and once the subscription is released the feed
+// takes the inbox over and delivers.
+func TestMCPInboxSharesLockWithFeedBroker(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	children := make(chan *conversationChild, 1)
+	h := newItestHarness(t, Config{}, func(runtime.StartOptions, string) (runtime.Provider, error) {
+		child := newConversationChild()
+		children <- child
+		return child, nil
+	})
+	cl := h.connectClient()
+	// The legacy revision subscribes synchronously, so the lock is held by the
+	// time Subscribe returns.
+	cs, bound, _ := connectMCPWith(t, ctx, mcpserver.Options{ControlClient: cl}, "poo", "ses_poo", connectMCPOptions{
+		session: &mcpsdk.ClientSessionOptions{ProtocolVersion: "2025-11-25"},
+	})
+	if err := cs.Subscribe(ctx, &mcpsdk.SubscribeParams{URI: mcpserver.InboxResourceURI}); err != nil {
+		t.Fatalf("subscribe to %s: %v", mcpserver.InboxResourceURI, err)
+	}
+
+	var feedLog syncBuffer
+	contended := feed.Broker{
+		RunID:          bound.RunID,
+		Token:          bound.RunToken,
+		BrokerURL:      bound.BrokerURL,
+		LockDir:        feed.DefaultLockDir(appdir.StateHome()),
+		Out:            io.Discard,
+		Log:            &feedLog,
+		RequestTimeout: 2 * time.Second,
+	}
+	if code := contended.Run(ctx); code != 0 {
+		t.Fatalf("feed broker exit = %d while the MCP inbox was subscribed, want 0: losing the lock is not a failure", code)
+	}
+	if !strings.Contains(feedLog.String(), "consumer lock is held") {
+		t.Fatalf("feed broker log = %q, want the lock-held line", feedLog.String())
+	}
+
+	if err := cs.Unsubscribe(ctx, &mcpsdk.UnsubscribeParams{URI: mcpserver.InboxResourceURI}); err != nil {
+		t.Fatalf("unsubscribe from %s: %v", mcpserver.InboxResourceURI, err)
+	}
+
+	var records syncBuffer
+	feedCtx, stopFeed := context.WithCancel(ctx)
+	defer stopFeed()
+	go func() {
+		contended.Out = &records
+		contended.Run(feedCtx)
+	}()
+	spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "pony"})
+	awaitConversationChild(t, ctx, children)
+	h.awaitCondition("the released feed to deliver the child's ask", func() bool {
+		return strings.Contains(records.String(), "\n")
+	})
 }

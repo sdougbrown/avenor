@@ -272,20 +272,33 @@ func (s *Server) handleResourceSubscribe(ctx context.Context, req *mcp.Subscribe
 
 // inboxConsumerConfig is what the worker runs: the bound run's own broker
 // credentials, the queue's backpressure hook, and the wake a delivered batch
-// triggers. The worker logs nothing of its own: a transient broker error retries
-// silently, and every failure a caller can act on is reported by the tool calls
-// that reach the broker. CancelInFlight stays unset, so a batch already drained
-// from the broker lands in the queue before the worker exits.
+// triggers.
+//
+// The delivery boundary is explicit. Every decoded batch is queued before the
+// worker exits, so a poll that already drained the broker is never dropped on
+// the floor. CancelInFlight abandons only a request still in flight: a client
+// that disconnects or unsubscribes must not wait out an idle 15s long-poll, so
+// the poll context reaches the wire and the worker retires promptly. The same
+// context bounds the wake, whose failure is expected for a subscriber that
+// already left.
+//
+// Diagnostics go to the server's stderr because a terminal broker refusal is
+// the one failure a subscribe cannot report: the worker started and the
+// refusal arrives later, so the line is the only place an operator learns the
+// inbox stopped. It names the status and never the run token.
 func (s *Server) inboxConsumerConfig(pollCtx context.Context, bound boundIdentity) feed.ConsumerConfig {
 	inbox := s.inbox
 	return feed.ConsumerConfig{
-		Surface:    messaging.SurfaceMCP,
-		RunID:      bound.result.RunID,
-		Token:      bound.result.RunToken,
-		BrokerURL:  bound.result.BrokerURL,
-		AsksDir:    bound.asksDir,
-		BeforePoll: inbox.waitForDrain,
-		OnRow:      inbox.record,
+		Surface:        messaging.SurfaceMCP,
+		RunID:          bound.result.RunID,
+		Token:          bound.result.RunToken,
+		BrokerURL:      bound.result.BrokerURL,
+		AsksDir:        bound.asksDir,
+		Log:            stderrOr(s.opts.Stderr),
+		LogPrefix:      "mcp inbox",
+		CancelInFlight: true,
+		BeforePoll:     inbox.waitForDrain,
+		OnRow:          inbox.record,
 		OnBatchDone: func() {
 			s.notifyInboxUpdated(pollCtx)
 		},
