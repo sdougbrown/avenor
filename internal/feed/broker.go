@@ -7,19 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/appdir"
 	"github.com/sdougbrown/avenor/internal/askclaim"
-	"github.com/sdougbrown/avenor/internal/childmessaging"
-	"github.com/sdougbrown/avenor/internal/durablefile"
 	"github.com/sdougbrown/avenor/internal/messaging"
-	"github.com/sdougbrown/avenor/internal/messaging/localhttp"
-	"github.com/sdougbrown/avenor/internal/runtime/broker"
 )
 
 // DefaultLockDir returns the feed lock directory under stateHome.
@@ -56,7 +50,7 @@ func (b Broker) Run(ctx context.Context) int {
 	return b.run(ctx, parent, os.Getppid)
 }
 
-// run owns the lock and the provider for the lifetime of the feed.
+// run owns the lock and the consumer for the lifetime of the feed.
 func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 	if parent == 1 {
 		return 0
@@ -77,27 +71,30 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 	if b.Out == nil {
 		b.Out = io.Discard
 	}
-	key, err := askclaim.BrokerKey(b.BrokerURL, b.RunID)
-	if err != nil {
+	if _, err := askclaim.BrokerKey(b.BrokerURL, b.RunID); err != nil {
 		fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 		return 1
 	}
+	// Start-up maintenance runs before the contested lock: a feed that loses
+	// the lock still sweeps the records an earlier run left behind, and it does
+	// so before it contends for the inbox.
 	reporter := &pruneReporter{out: b.Log}
 	b.pruneAskClaims(reporter)
 	if b.AsksDir == "" {
-		b.AsksDir, err = askclaim.DefaultDir(appdir.StateHome(), b.BrokerURL, b.RunID)
+		dir, err := askclaim.DefaultDir(appdir.StateHome(), b.BrokerURL, b.RunID)
 		if err != nil {
 			fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
 			return 1
 		}
+		b.AsksDir = dir
 	}
-	if err := os.MkdirAll(b.LockDir, 0700); err != nil {
-		fmt.Fprintln(b.Log, "feed broker: cannot create lock directory:", err)
-		return 1
-	}
-	unlock, held, err := durablefile.TryLock(filepath.Join(b.LockDir, key+".lock"))
+	unlock, held, err := AcquireLock(b.LockDir, b.BrokerURL, b.RunID)
 	if err != nil {
-		fmt.Fprintln(b.Log, "feed broker: cannot lock:", err)
+		if errors.Is(err, ErrInvalidBrokerURL) {
+			fmt.Fprintln(b.Log, "feed broker: invalid broker URL")
+		} else {
+			fmt.Fprintln(b.Log, "feed broker: cannot lock:", err)
+		}
 		return 1
 	}
 	if held {
@@ -105,265 +102,67 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 		return 0
 	}
 	defer unlock()
-	// Prune for as long as this feed holds its lock, not for as long as ctx
-	// lives: run returns on parent loss and terminal errors while ctx is still
-	// open, and a pruner outliving the lock would contradict the exclusivity
-	// the lock is taken for.
-	stopPruner := b.startAskClaimPruner(ctx, reporter)
-	defer stopPruner()
 	alive := func() bool { return parentPID() == parent }
-	wait := func(d time.Duration) bool {
-		ticker := time.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-		var timer <-chan time.Time
-		if d > 0 {
-			t := time.NewTimer(d)
-			defer t.Stop()
-			timer = t.C
-		}
-		for {
-			if !alive() {
-				return false
-			}
-			select {
-			case <-ctx.Done():
-				return false
-			case <-ticker.C:
-			case <-timer:
-				return true
-			}
-		}
-	}
-	limit := b.Limit
-	for alive() && ctx.Err() == nil {
-		p, err := childmessaging.NewMessageProvider(messaging.SurfaceFeed, childmessaging.Options{RunID: b.RunID, Token: b.Token, BrokerURL: b.BrokerURL})
-		if err != nil {
-			fmt.Fprintln(b.Log, "feed broker: invalid provider configuration")
-			return 1
-		}
-		requestCtx, cancel := context.WithTimeout(context.Background(), b.RequestTimeout)
-		err = p.Prepare(requestCtx)
-		cancel()
-		if !alive() || ctx.Err() != nil {
-			_ = p.Close()
-			return 0
-		}
-		for err == nil && alive() && ctx.Err() == nil {
-			requestCtx, cancel = context.WithTimeout(context.Background(), b.RequestTimeout)
-			var result messaging.ReceiveResult
-			result, err = p.Receive(requestCtx, messaging.ReceiveRequest{Generation: p.Generation(), Timeout: b.RequestTimeout, Limit: limit})
-			cancel()
-			if errors.Is(err, localhttp.ErrResponseTooLarge) {
-				fmt.Fprintln(b.Log, "feed broker: drained batch exceeded response cap; rows lost (ids unknown)")
-				limit = 1
-				err = nil
-				continue
-			}
-			if err != nil {
-				break
-			}
-			limit = b.Limit
-			for i, row := range result.Messages {
-				var message broker.AgentMessage
-				if decodeErr := json.Unmarshal(row.Payload, &message); decodeErr != nil || message.Message == "" {
-					b.lost(result.Messages[i : i+1])
-					continue
-				}
-				sender := row.FromRunID
-				if sender == "" {
-					sender = "unknown"
-				}
-				id := message.ID
-				if id == "" {
-					id = row.MessageID
-				}
-				text := message.Message
-				if message.ExpectsReply {
-					quotedSender, _ := json.Marshal(sender)
-					var recordErr error
-					if row.FromRunID != "" {
-						recordErr = askclaim.Record(b.AsksDir, id, row.FromRunID)
-						if recordErr != nil {
-							fmt.Fprintf(b.Log, "feed broker: failed to record ask id %q\n", id)
-						}
-					}
-					if row.FromRunID == "" || recordErr != nil {
-						text += fmt.Sprintf("\n\nThis message is an ask from %s, but it cannot be answered here.", quotedSender)
-					} else {
-						quotedID, _ := json.Marshal(id)
-						text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_message\", \"args\": {\"action\": \"reply\", \"reply_to\": %s, \"message\": \"...\"}}.", quotedSender, quotedID)
-					}
-				}
-				line := struct {
-					Text string `json:"text"`
-					From string `json:"from"`
-					ID   string `json:"id"`
-				}{text, sender, id}
-				writeErr := json.NewEncoder(b.Out).Encode(line)
-				if writeErr == nil {
-					if flusher, ok := b.Out.(interface{ Flush() error }); ok {
-						writeErr = flusher.Flush()
-					}
-				}
-				if writeErr != nil {
-					b.lost(result.Messages[i:])
-					_ = p.Close()
-					return 0
-				}
-			}
-		}
-		_ = p.Close()
-		if !alive() || ctx.Err() != nil {
-			return 0
-		}
-		if terminal(err) {
-			var status *localhttp.StatusError
-			if errors.As(err, &status) {
-				fmt.Fprintf(b.Log, "feed broker: terminal broker refusal (HTTP %d)\n", status.Status)
-			} else {
-				fmt.Fprintln(b.Log, "feed broker: terminal broker protocol or identity error")
-			}
-			wait(0)
-			return 0
-		}
-		fmt.Fprintln(b.Log, "feed broker: temporary broker error; retrying")
-		if !wait(2 * time.Second) {
-			return 0
-		}
+	err = Consume(ctx, ConsumerConfig{
+		Surface:          messaging.SurfaceFeed,
+		RunID:            b.RunID,
+		Token:            b.Token,
+		BrokerURL:        b.BrokerURL,
+		AsksDir:          b.AsksDir,
+		Limit:            b.Limit,
+		RequestTimeout:   b.RequestTimeout,
+		Log:              b.Log,
+		LogPrefix:        "feed broker",
+		SkipInitialPrune: true,
+		Alive:            alive,
+		OnRow:            b.write,
+	})
+	if errors.Is(err, ErrInvalidProviderConfig) {
+		return 1
 	}
 	return 0
 }
 
-// lost reports the IDs of drained messages that could not be delivered.
-func (b Broker) lost(rows []messaging.InboundMessage) {
-	for _, row := range rows {
-		id := row.MessageID
-		if id == "" {
-			var payload struct {
-				ID string `json:"id"`
-			}
-			_ = json.Unmarshal(row.Payload, &payload)
-			id = payload.ID
+// write emits one feed record as NDJSON, with the footer an ask needs to be
+// answered from the surface that received it.
+func (b Broker) write(m Message) error {
+	text := m.Text
+	if m.ExpectsReply {
+		quotedSender, _ := json.Marshal(m.From)
+		if m.Answerable {
+			quotedID, _ := json.Marshal(m.ID)
+			text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_message\", \"args\": {\"action\": \"reply\", \"reply_to\": %s, \"message\": \"...\"}}.", quotedSender, quotedID)
+		} else {
+			text += fmt.Sprintf("\n\nThis message is an ask from %s, but it cannot be answered here.", quotedSender)
 		}
-		fmt.Fprintf(b.Log, "feed broker: undelivered message id %q\n", id)
 	}
+	line := struct {
+		Text string `json:"text"`
+		From string `json:"from"`
+		ID   string `json:"id"`
+	}{text, m.From, m.ID}
+	err := json.NewEncoder(b.Out).Encode(line)
+	if err == nil {
+		if flusher, ok := b.Out.(interface{ Flush() error }); ok {
+			err = flusher.Flush()
+		}
+	}
+	return err
 }
 
-// terminal classifies typed HTTP statuses before their wrapped sentinels.
-func terminal(err error) bool {
-	if errors.Is(err, localhttp.ErrResponseTooLarge) {
-		return false
-	}
-	var status *localhttp.StatusError
-	if errors.As(err, &status) {
-		if status.Status == http.StatusConflict || status.Status == http.StatusTooManyRequests {
-			return false
-		}
-		return status.Status >= 400 && status.Status < 500
-	}
-	return errors.Is(err, localhttp.ErrUnsupportedLocalProtocol) || errors.Is(err, messaging.ErrAuthRejected) || errors.Is(err, messaging.ErrInvalidRequest)
-}
-
-// askClaimPruneInterval paces the prune a running feed performs. A feed lives
-// as long as its supervisor parent, so start-up pruning alone would leave every
-// record written since then in place. The interval is a variable so a test can
-// shorten it.
-var askClaimPruneInterval = time.Hour
-
-// pruneAskClaims removes expired records from the default root. It is
-// housekeeping: a failure is reported and the feed keeps running, which is why
-// neither caller branches on the error.
+// pruneAskClaims sweeps the records this feed's run left behind. It is the
+// start-up half of the maintenance Consume repeats hourly.
 func (b *Broker) pruneAskClaims(reporter *pruneReporter) {
-	root, prune := askClaimPruneRoot(b.AsksDir, appdir.StateHome(), b.BrokerURL, b.RunID)
-	if !prune {
-		return
-	}
-	if err := askclaim.PruneRoot(root, askclaim.AskClaimMaxAge); err != nil {
-		reporter.report(root, err)
-		return
-	}
-	reporter.forget(root)
+	b.claimPruner().prune(reporter)
 }
 
-// pruneReporter reports prune failures once per root and message. The prune
-// runs hourly for the life of a feed, and an unwritable root fails identically
-// on every pass; repeating it would bury everything else in the log.
-//
-// It is a pointer-owned type rather than fields on Broker: Broker is passed by
-// value, and a mutex inside it makes every copy a copylocks finding and every
-// future method a cross-copy race.
-type pruneReporter struct {
-	mu     sync.Mutex
-	logged map[string]string
-	out    io.Writer
+// claimPruner names the records a Broker's run accumulates.
+func (b *Broker) claimPruner() askClaimPruner {
+	return askClaimPruner{asksDir: b.AsksDir, brokerURL: b.BrokerURL, runID: b.RunID}
 }
 
-func (r *pruneReporter) report(root string, err error) {
-	message := err.Error()
-	r.mu.Lock()
-	if r.logged == nil {
-		r.logged = make(map[string]string)
-	}
-	if r.logged[root] == message {
-		r.mu.Unlock()
-		return
-	}
-	r.logged[root] = message
-	r.mu.Unlock()
-	fmt.Fprintln(r.out, "feed broker: prune ask claim records:", err)
-}
-
-// forget clears the suppression for a root that pruned cleanly, so a later
-// failure is reported again.
-func (r *pruneReporter) forget(root string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.logged, root)
-}
-
-// startAskClaimPruner prunes on each tick and returns a stop function that
-// waits for the goroutine to exit. Waiting matters for an embedder whose ctx
-// outlives the feed.
-//
-// Feeds for different runs hold different locks (the key is the (broker, run)
-// pair) and prune the same root concurrently. That is benign because every step
-// of PruneRoot is best-effort and idempotent; it is not an invariant to lean on.
+// startAskClaimPruner starts the hourly sweep for a Broker's run and returns a
+// stop function that waits for it to exit.
 func (b *Broker) startAskClaimPruner(ctx context.Context, reporter *pruneReporter) func() {
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(askClaimPruneInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-stop:
-				return
-			case <-ticker.C:
-				b.pruneAskClaims(reporter)
-			}
-		}
-	}()
-	return func() {
-		close(stop)
-		<-done
-	}
-}
-
-// askClaimPruneRoot reports the directory to prune, if any. The supervised poo
-// path always passes --asks-dir, and it passes the default one, so keying on
-// an empty flag would prune exactly the deployments that do not accumulate.
-func askClaimPruneRoot(asksDir, stateHome, brokerURL, runID string) (string, bool) {
-	defaultDir, err := askclaim.DefaultDir(stateHome, brokerURL, runID)
-	if err != nil {
-		return "", false
-	}
-	if asksDir != "" && asksDir != defaultDir {
-		// A caller's own directory is the caller's to clean: pruning it would
-		// mean deleting files under a path whose layout we merely assume.
-		return "", false
-	}
-	return askclaim.DefaultRoot(stateHome), true
+	return startAskClaimPruner(ctx, b.claimPruner(), reporter)
 }
