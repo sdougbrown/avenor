@@ -160,9 +160,3 @@ func (b *Broker) pruneAskClaims(reporter *pruneReporter) {
 func (b *Broker) claimPruner() askClaimPruner {
 	return askClaimPruner{asksDir: b.AsksDir, brokerURL: b.BrokerURL, runID: b.RunID}
 }
-
-// startAskClaimPruner starts the hourly sweep for a Broker's run and returns a
-// stop function that waits for it to exit.
-func (b *Broker) startAskClaimPruner(ctx context.Context, reporter *pruneReporter) func() {
-	return startAskClaimPruner(ctx, b.claimPruner(), reporter)
-}

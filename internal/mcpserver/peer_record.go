@@ -231,20 +231,20 @@ func sanitizeCredential(message, credential string) string {
 // is refused rather than answered as the supervisor.
 func (s *Server) messageSurfaceFor(ctx context.Context, raw json.RawMessage, binding peerBinding, peerAllowed bool) (messageSurface, error) {
 	if peerAllowed && binding.file != "" {
-		refused := func(err error) error {
+		refused := func(err error, credential string) error {
 			return &router.ToolError{
 				Code:    "refused",
-				Message: "the avenor " + peerHostTitle(binding.host) + " peer record cannot be used: " + err.Error(),
+				Message: "the avenor " + peerHostTitle(binding.host) + " peer record cannot be used: " + sanitizeCredential(err.Error(), credential),
 				Facts:   map[string]string{},
 			}
 		}
 		peer, err := readPeerRecord(binding.file, binding.host)
 		if err != nil {
-			return messageSurface{}, refused(err)
+			return messageSurface{}, refused(err, "")
 		}
 		provider, err := peer.provider(ctx)
 		if err != nil {
-			return messageSurface{}, refused(err)
+			return messageSurface{}, refused(err, peer.record.RunToken)
 		}
 		return messageSurface{provider: provider, cleanup: func() { _ = provider.Close() }}, nil
 	}

@@ -634,7 +634,7 @@ func TestStartAskClaimPrunerStops(t *testing.T) {
 	b := &Broker{RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", Log: io.Discard}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop := b.startAskClaimPruner(ctx, &pruneReporter{out: io.Discard})
+	stop := startAskClaimPruner(ctx, b.claimPruner(), &pruneReporter{out: io.Discard})
 	stopped := make(chan struct{})
 	go func() {
 		stop()
