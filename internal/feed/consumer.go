@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,7 +82,7 @@ type ConsumerConfig struct {
 	RequestTimeout time.Duration
 	// Log receives diagnostics without message text. It defaults to io.Discard.
 	Log io.Writer
-	// LogPrefix leads every log line. It defaults to "feed broker".
+	// LogPrefix leads every log line and is required.
 	LogPrefix string
 	// CancelInFlight abandons an in-flight request when ctx ends. A caller that
 	// wants the current batch drained before shutdown leaves it false.
@@ -108,6 +109,9 @@ func Consume(ctx context.Context, cfg ConsumerConfig) error {
 	if cfg.RunID == "" || cfg.Token == "" || cfg.BrokerURL == "" {
 		return fmt.Errorf("feed consumer: run id, token, and broker URL are required")
 	}
+	if strings.TrimSpace(cfg.LogPrefix) == "" {
+		return fmt.Errorf("feed consumer: log prefix is required")
+	}
 	if cfg.AsksDir == "" {
 		dir, err := askclaim.DefaultDir(appdir.StateHome(), cfg.BrokerURL, cfg.RunID)
 		if err != nil {
@@ -123,9 +127,6 @@ func Consume(ctx context.Context, cfg ConsumerConfig) error {
 	}
 	if cfg.Log == nil {
 		cfg.Log = io.Discard
-	}
-	if cfg.LogPrefix == "" {
-		cfg.LogPrefix = "feed broker"
 	}
 	alive := cfg.Alive
 	if alive == nil {
@@ -355,11 +356,7 @@ func (r *pruneReporter) report(root string, err error) {
 	}
 	r.logged[root] = message
 	r.mu.Unlock()
-	prefix := r.prefix
-	if prefix == "" {
-		prefix = "feed broker"
-	}
-	fmt.Fprintf(r.out, "%s: prune ask claim records: %v\n", prefix, err)
+	fmt.Fprintf(r.out, "%s: prune ask claim records: %v\n", r.prefix, err)
 }
 
 // forget clears the suppression for a root that pruned cleanly, so a later

@@ -95,6 +95,7 @@ func TestConsumeCancelInFlightAbortsBlockedPoll(t *testing.T) {
 			Token:          "t",
 			BrokerURL:      s.URL,
 			AsksDir:        t.TempDir(),
+			LogPrefix:      "test consumer",
 			RequestTimeout: 10 * time.Second,
 			CancelInFlight: true,
 			OnRow:          func(Message) error { delivered.Add(1); return nil },
@@ -154,6 +155,7 @@ func TestConsumeBeforePollPausesPolling(t *testing.T) {
 			Token:     "t",
 			BrokerURL: s.URL,
 			AsksDir:   t.TempDir(),
+			LogPrefix: "test consumer",
 			BeforePoll: func(context.Context) error {
 				if calls.Add(1) == 2 {
 					close(reached)
@@ -247,6 +249,7 @@ func TestConsumeRowFailureReportsRemainingRows(t *testing.T) {
 		BrokerURL: s.URL,
 		AsksDir:   asksDir,
 		Log:       logs,
+		LogPrefix: "test consumer",
 		OnRow: func(m Message) error {
 			if m.ID == "row2" {
 				return errBoom
@@ -306,6 +309,7 @@ func TestConsumeParksOnTerminalRefusalWithoutToken(t *testing.T) {
 			BrokerURL: s.URL,
 			AsksDir:   t.TempDir(),
 			Log:       logs,
+			LogPrefix: "test consumer",
 		})
 	}()
 	deadline := time.After(4 * time.Second)
@@ -328,7 +332,7 @@ func TestConsumeParksOnTerminalRefusalWithoutToken(t *testing.T) {
 		t.Fatalf("consume returned %v", err)
 	}
 	logged := logs.String()
-	if !strings.Contains(logged, "feed broker: terminal broker refusal (HTTP 401)") {
+	if !strings.Contains(logged, "test consumer: terminal broker refusal (HTTP 401)") {
 		t.Fatalf("diagnostic %q", logged)
 	}
 	if strings.Contains(logged, token) {
@@ -377,6 +381,7 @@ func TestConsumeShrinksLimitAfterOversizedBatch(t *testing.T) {
 			AsksDir:   t.TempDir(),
 			Limit:     4,
 			Log:       logs,
+			LogPrefix: "test consumer",
 		})
 	}()
 	for _, want := range []int{4, 1, 4} {
@@ -399,5 +404,23 @@ func TestConsumeShrinksLimitAfterOversizedBatch(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "drained batch exceeded response cap") {
 		t.Fatalf("log %q", logs.String())
+	}
+}
+
+// TestConsumeRequiresLogPrefix proves the shared consumer refuses to fall back
+// to one surface's name when a caller omits LogPrefix.
+func TestConsumeRequiresLogPrefix(t *testing.T) {
+	for _, prefix := range []string{"", "   "} {
+		err := Consume(context.Background(), ConsumerConfig{
+			Surface:   messaging.SurfaceFeed,
+			RunID:     "r",
+			Token:     "t",
+			BrokerURL: "http://127.0.0.1:9",
+			AsksDir:   t.TempDir(),
+			LogPrefix: prefix,
+		})
+		if err == nil || !strings.Contains(err.Error(), "log prefix is required") {
+			t.Fatalf("prefix %q: err = %v, want log prefix required error", prefix, err)
+		}
 	}
 }

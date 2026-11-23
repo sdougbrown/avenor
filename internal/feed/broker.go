@@ -78,7 +78,7 @@ func (b Broker) run(ctx context.Context, parent int, parentPID func() int) int {
 	// Start-up maintenance runs before the contested lock: a feed that loses
 	// the lock still sweeps the records an earlier run left behind, and it does
 	// so before it contends for the inbox.
-	reporter := &pruneReporter{out: b.Log}
+	reporter := &pruneReporter{out: b.Log, prefix: "feed broker"}
 	b.pruneAskClaims(reporter)
 	if b.AsksDir == "" {
 		dir, err := askclaim.DefaultDir(appdir.StateHome(), b.BrokerURL, b.RunID)
