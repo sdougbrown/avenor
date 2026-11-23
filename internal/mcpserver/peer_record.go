@@ -139,15 +139,15 @@ func loopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// provider builds the shared broker-authenticated provider over this peer's own
-// credentials, so tell, ask, reply, withdraw, peers and last all speak as the
-// bound session rather than as the supervisor. A reply claims the ask record the
-// poller wrote under the peer's asks directory.
-func (p *hostPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
+// brokerMessageProvider builds the shared broker-authenticated provider over one
+// surface's own run credentials, so tell, ask, reply, withdraw, peers and last
+// all speak as that run rather than as the supervisor. A reply claims the ask
+// record the surface's inbox feed wrote under asksDir.
+func brokerMessageProvider(ctx context.Context, runID, token, brokerURL, asksDir string) (*askclaim.Provider, error) {
 	shared, err := childmessaging.NewMessageProvider(messaging.SurfaceMCP, childmessaging.Options{
-		RunID:     p.record.RunID,
-		Token:     p.record.RunToken,
-		BrokerURL: p.record.BrokerURL,
+		RunID:     runID,
+		Token:     token,
+		BrokerURL: brokerURL,
 	})
 	if err != nil {
 		return nil, err
@@ -156,7 +156,14 @@ func (p *hostPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
 		_ = shared.Close()
 		return nil, err
 	}
-	return &askclaim.Provider{MessageProvider: shared, Dir: filepath.Join(p.dir, "asks")}, nil
+	return &askclaim.Provider{MessageProvider: shared, Dir: asksDir}, nil
+}
+
+// provider builds the shared broker-authenticated provider over this peer's own
+// credentials. A reply claims the ask record the poller wrote under the peer's
+// asks directory.
+func (p *hostPeer) provider(ctx context.Context) (*askclaim.Provider, error) {
+	return brokerMessageProvider(ctx, p.record.RunID, p.record.RunToken, p.record.BrokerURL, filepath.Join(p.dir, "asks"))
 }
 
 // splitPeerFile removes the hook's binding from the router's input. The
@@ -202,9 +209,26 @@ type messageSurface struct {
 	cleanup        func()
 }
 
+// sanitizeCredential keeps one credential out of a refusal's text. A broker
+// failure can quote the request it rejected, so the credential is replaced
+// wherever it appears rather than trusted to be absent.
+func sanitizeCredential(message, credential string) string {
+	if credential == "" {
+		return message
+	}
+	return strings.ReplaceAll(message, credential, "[redacted]")
+}
+
 // messageSurfaceFor chooses the caller's identity. A bound Codex or Claude
 // call speaks as its own run; resume keeps the owner path because a
 // broker-authenticated run may only continue a run it spawned.
+//
+// A launch-declared conversation speaks as the run it bound, which is the same
+// run the host's inbox feed claims asks under: the two readings of "the
+// conversation's own ask" meet in one ask directory, so a reply works whether
+// the ask arrived through the MCP inbox or through `avenor feed broker`. A
+// declaration the launch never bound has no credentials to speak with, so it
+// is refused rather than answered as the supervisor.
 func (s *Server) messageSurfaceFor(ctx context.Context, raw json.RawMessage, binding peerBinding, peerAllowed bool) (messageSurface, error) {
 	if peerAllowed && binding.file != "" {
 		refused := func(err error) error {
@@ -224,7 +248,32 @@ func (s *Server) messageSurfaceFor(ctx context.Context, raw json.RawMessage, bin
 		}
 		return messageSurface{provider: provider, cleanup: func() { _ = provider.Close() }}, nil
 	}
-	provider, cleanup, resolvedPath, err := s.getClientForSupervisorWithPath(s.messageSupervisorPath(raw))
+	// The key ladder binds one supervisor per call. A bound call uses it to tell
+	// its own conversation from a call aimed at another supervisor's run; an
+	// unbound call and a resume use it to pick the owner connection.
+	supervisorPath := s.messageSupervisorPath(raw)
+	if peerAllowed && s.hostBind != nil {
+		bound, ok := s.hostBind.boundState()
+		if !ok {
+			return messageSurface{}, &router.ToolError{
+				Code:    "refused",
+				Message: "the bound host conversation has no active broker identity",
+				Facts:   map[string]string{},
+			}
+		}
+		if supervisorPath == "" || supervisorPath == bound.supervisorPath {
+			provider, err := brokerMessageProvider(ctx, bound.result.RunID, bound.result.RunToken, bound.result.BrokerURL, bound.asksDir)
+			if err != nil {
+				return messageSurface{}, &router.ToolError{
+					Code:    "refused",
+					Message: "the bound host conversation cannot reach its broker: " + sanitizeCredential(err.Error(), bound.result.RunToken),
+					Facts:   map[string]string{},
+				}
+			}
+			return messageSurface{provider: provider, supervisorPath: bound.supervisorPath, cleanup: func() { _ = provider.Close() }}, nil
+		}
+	}
+	provider, cleanup, resolvedPath, err := s.getClientForSupervisorWithPath(supervisorPath)
 	if err != nil {
 		return messageSurface{}, err
 	}
