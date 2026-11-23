@@ -205,6 +205,37 @@ Tool arguments can only target a supervisor socket directly inside the sockets r
 | `--allowed-host` | none | Exact hostname (case-insensitive) allowed to connect over HTTP; repeatable; loopback is always allowed |
 | `--max-wait` | `25s` (http) / `0` (stdio) | Approximate polling budget for blocking tools; an explicit `0` disables the clamp |
 | `--auth-token-file` | none | Mode-0600 token file; precedence flag > file > `MCP_AUTH_TOKEN`; conflicts with `--auth-token` |
+| `--bind-host` | none | Native host conversation this stdio server is bound to (requires `--bind-session`; `--bind-output-fd` optional) |
+| `--bind-session` | none | Native session ID paired with `--bind-host` |
+| `--bind-output-fd` | none | Optional inherited writable pipe descriptor (`>= 3`) receiving the conversation's bind JSON line before closing |
+
+## Bound conversation inbox (`avenor://inbox`)
+
+When launched on stdio with `--bind-host` and `--bind-session` (with or without `--bind-output-fd`), `avenor mcp` binds the conversation on its supervisor before serving and exposes the bound run's broker inbox as a subscribable MCP resource:
+
+- **URI**: `avenor://inbox` (`application/json`)
+- **Subscriptions**: Supported on both MCP `2025-11-25` (`resources/subscribe` / `resources/unsubscribe`) and MCP `2026-07-28` (`subscriptions/listen` with `resourceSubscriptions: ["avenor://inbox"]` and `notifications/cancelled`). On `2026-07-28`, one active listen per session is enforced; an overlapping listen for `avenor://inbox` on the same session is refused so the active subscription ID is not overwritten.
+- **Lock & polling lifecycle**: The server acquires the shared per-(broker, run) advisory lock (`<StateHome>/feed-locks/<BrokerKey>.lock` via `durablefile.TryLock`) and starts polling only when a client subscribes, releasing the lock when the last subscriber unsubscribes, the transport reaches EOF, or the server closes. This prevents double-consumption with `avenor feed broker` (when both share the same state home / lock directory) and leaves `#696` hosts that pass `--bind-output-fd` and run `avenor feed broker` untouched when they do not subscribe.
+- **Read & drain contract**: `resources/read` on `avenor://inbox` destructively drains all buffered messages in arrival order as:
+
+```json
+{
+  "messages": [
+    {
+      "id": "msg_1",
+      "from": "run_child",
+      "text": "Should I drop the fallback?",
+      "expects_reply": true,
+      "answerable": true
+    }
+  ]
+}
+```
+
+Empty reads return `{"messages":[]}`. Responses carry `ttlMs: 0` and `cacheScope: "private"` so modern clients do not cache drained batches. `text` is the raw broker message body; `expects_reply` reflects the broker ask bit, while `answerable` is `false` only when an ask lacked a stamped sender or ask-claim recording failed.
+- **Client first-wake rule**: Install the `notifications/resources/updated` handler, wait for the `resources/subscribe` response (2025-11-25) or `notifications/subscriptions/acknowledged` notification (2026-07-28), perform one initial `resources/read("avenor://inbox")` drain, then drain on subsequent update notifications.
+- **Backpressure & teardown**: The poller pauses further broker polls when the unread buffer reaches 64 messages or 4 MiB and resumes when `resources/read` drains it. Unsubscribe, EOF, or `Close` cancels any in-flight broker poll promptly so teardown does not wait out a 15s idle poll; every batch already decoded is queued before exit.
+- **Replies & peer identity**: On a bound server, `message` (all actions except `resume`) and `peers` speak as the bound conversation's run and claim ask records from the shared `<StateHome>/feed-asks/<BrokerKey>` directory, so `message(action: "reply")` works whether the ask was delivered through `avenor://inbox` or `avenor feed broker`. `message(action: "resume")` stays on the owner control path. Unbound servers do not register `avenor://inbox` or advertise resource subscriptions.
 
 ## Remote access over a tailnet
 

@@ -148,34 +148,55 @@ that one conversation:
 
 ```sh
 avenor mcp --transport stdio \
-  --bind-host <host> --bind-session <native-session-id> --bind-output-fd <fd>
+  --bind-host <host> --bind-session <native-session-id> [--bind-output-fd <fd>]
 ```
 
-The three flags travel together, only on the stdio transport, and the descriptor
-must be a private pipe the host inherited, open for writing — never stdin, stdout
-or stderr, which carry the protocol and its diagnostics, and never a file.
+`--bind-host` and `--bind-session` travel together, only on the stdio transport.
+`--bind-output-fd` is optional alongside them: pass it when the launching host
+also wants the credentials on an inherited pipe (for example, to start
+`avenor feed broker`), or omit it when the host consumes messages through the
+MCP server's own `avenor://inbox` resource. When supplied, the descriptor must
+be a private pipe the host inherited, open for writing — never stdin, stdout or
+stderr, which carry the protocol and its diagnostics, and never a file.
 
 Before it serves a tool call, the launch binds the conversation on the supervisor
-it owns and writes the bind result (`broker_url`, `run_id`, `run_token`,
-`generation`, `created`) as one JSON line on that pipe, then closes it. The
-descriptor is close-on-exec before anything can be autostarted, so no process the
-launch starts keeps the write end and the host always reaches EOF. The
-credentials appear on the pipe and nowhere else: not in a log, argv, file, MCP
-tool result or child environment. A launch that cannot bind or hand off exits
-non-zero without serving, so the host learns the conversation has no inbox
-instead of holding an identity nothing reads, and a host that stops reading the
-pipe fails the launch inside the handoff window instead of stalling it. There is no unbound fallback and no
-retry: a host that comes back relaunches, and a repeat bind of a live conversation
-returns the same identity with `created: false`.
+it owns, resolves the shared ask-claim directory (`<StateHome>/feed-asks/<BrokerKey>`),
+and — if `--bind-output-fd` was supplied — writes the bind result (`broker_url`,
+`run_id`, `run_token`, `generation`, `created`) as one JSON line on that pipe,
+then closes it. The descriptor is close-on-exec before anything can be
+autostarted, so no process the launch starts keeps the write end and the host
+always reaches EOF. The credentials are kept in memory for the server's own
+inbox and reply routing and never leave the process except on that optional
+pipe: never in a log, argv, file, MCP tool/resource payload or child
+environment. A launch that cannot bind (or hand off when a pipe was given) exits
+non-zero without serving, and a host that stops reading the pipe fails the
+launch inside the handoff window instead of stalling it. There is no unbound
+fallback and no retry: a host that comes back relaunches, and a repeat bind of a
+live conversation returns the same identity with `created: false`.
+
+When a client subscribes to `avenor://inbox` (via `resources/subscribe` on MCP
+`2025-11-25` or `subscriptions/listen` on `2026-07-28`), the MCP server acquires
+the same per-(broker, run) advisory lock `avenor feed broker` takes
+(`<StateHome>/feed-locks/<BrokerKey>.lock` via `durablefile.TryLock`), polls the
+bound run's broker inbox, writes ask-claim records to the same
+`<StateHome>/feed-asks/<BrokerKey>` directory, and wakes the subscriber with
+`notifications/resources/updated`. Because both consumers share the lock (within
+the same state home / lock directory), the MCP inbox and `avenor feed broker`
+never double-read the same run's inbox. Unsubscribing, EOF, or closing the
+server stops the poller and releases the lock.
 
 Every spawn the server forwards to that supervisor names the bound run as
 `parent_run_id`, so a child's messages reach the inbox the conversation consumes.
-A spawn aimed at another supervisor names no parent — that supervisor holds no
-record of the conversation — and is never asked to bind it. The supervisor is the
-one authority on the mapping: a parent run it no longer holds live (removed,
-expired, retired, or minted before a restart) is refused with `reconnect the host
-conversation to bind it again` and is never adopted into a fresh record, so a
-child never reports to a parent nothing reads.
+`message` (all actions except `resume`) and `peers` speak as the bound run and
+claim asks from `<StateHome>/feed-asks/<BrokerKey>`, so `message` with
+`action: "reply"` works whichever path (`avenor://inbox` or `avenor feed broker`)
+delivered the ask. A spawn or message aimed at another supervisor uses no bound
+identity — that supervisor holds no record of the conversation — and is never
+asked to bind it. The supervisor is the one authority on the mapping: a parent
+run it no longer holds live (removed, expired, retired, or minted before a
+restart) is refused with `reconnect the host conversation to bind it again` and
+is never adopted into a fresh record, so a child never reports to a parent
+nothing reads.
 
 ## Child CLI messages
 
