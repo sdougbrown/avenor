@@ -146,6 +146,10 @@ type Server struct {
 	// nil when the launch declared none, together with the identity its one
 	// bind resolved to.
 	hostBind *hostBind
+	// inbox is the bound conversation's broker inbox, nil unless a conversation
+	// was bound: an unbound server has no run to consume from, so it serves no
+	// inbox resource and starts no worker.
+	inbox *mcpInbox
 	// unboundNoteGate deduplicates the note about a spawn this server cannot
 	// give a parent route, so a spawn loop aimed at another supervisor cannot
 	// flood stderr.
@@ -279,17 +283,20 @@ func NewServer(opts Options) (*Server, error) {
 		return nil, err
 	}
 
-	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    "avenor",
-		Version: "dev",
-	}, nil)
+	// Only a bound conversation has a run to consume from, so an unbound server
+	// holds no inbox, serves no resource and starts no worker. Constructing one
+	// touches nothing outside this process, which keeps NewServer free of I/O.
+	var inbox *mcpInbox
+	if hostBind != nil {
+		inbox = newMCPInbox()
+	}
 
 	s := &Server{
 		opts:          opts,
-		mcpServer:     mcpServer,
 		controlClient: opts.ControlClient,
 		registry:      NewRunRegistry(),
 		hostBind:      hostBind,
+		inbox:         inbox,
 		clock:         time.Now,
 		sleep:         sleepWithContext,
 		toolNames: []string{
@@ -313,6 +320,31 @@ func NewServer(opts Options) (*Server, error) {
 	// call so constructing an MCP server does not race other constructors.
 	if opts.SupervisorSocket != "" {
 		s.defaultSupervisorPath = opts.SupervisorSocket
+	}
+
+	// The inbox resource is the one feature a bound conversation adds to the
+	// protocol surface. A session subscribes through whichever style its protocol
+	// version speaks, so both handlers are required together and neither exists
+	// without a conversation to serve.
+	var serverOpts *mcp.ServerOptions
+	if inbox != nil {
+		serverOpts = &mcp.ServerOptions{
+			SubscribeHandler:   s.handleResourceSubscribe,
+			UnsubscribeHandler: s.handleResourceUnsubscribe,
+		}
+	}
+	mcpServer := mcp.NewServer(&mcp.Implementation{
+		Name:    "avenor",
+		Version: "dev",
+	}, serverOpts)
+	s.mcpServer = mcpServer
+	if inbox != nil {
+		mcpServer.AddResource(&mcp.Resource{
+			URI:         InboxResourceURI,
+			Name:        "inbox",
+			Description: "Incoming Avenor broker messages for the bound conversation. Reading drains queued messages in arrival order.",
+			MIMEType:    InboxMIMEType,
+		}, s.handleReadInbox)
 	}
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
@@ -395,6 +427,11 @@ func (s *Server) clampWait(requested time.Duration) (time.Duration, bool) {
 }
 
 func (s *Server) Close() error {
+	// The inbox worker outlives no server: stop it before the connections it was
+	// launched beside go away. It runs outside supervisorMu so a subscription
+	// handler never waits on a mutex Close holds.
+	s.stopInbox(true)
+
 	s.supervisorMu.Lock()
 	lifecycle := s.lifecycle
 	controlClient := s.controlClient
@@ -1846,6 +1883,9 @@ func (s *Server) Run() error {
 // the first call is served, so every spawn this server forwards names the run
 // the conversation consumes and the host already holds.
 func (s *Server) ServeTransport(ctx context.Context, transport mcp.Transport) error {
+	// The served transport is what a subscription is delivered over, so the inbox
+	// worker ends with it: a client that leaves takes its poller with it.
+	defer s.stopInbox(false)
 	if err := s.bindHostConversation(ctx); err != nil {
 		// The launching host is reading the handoff pipe: close it so a failed
 		// launch reads EOF instead of waiting for this process to exit.
