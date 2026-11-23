@@ -98,13 +98,14 @@ type Options struct {
 	// conversation: the server spawns children exactly as it always has.
 	BindHost    string
 	BindSession string
-	// BindHandoff is the inherited private pipe the declared conversation's
-	// messaging credentials are written to, as one JSON line followed by EOF.
-	// It is required with BindHost and BindSession, and the server owns it:
-	// the handoff closes it, and its write must be deadline-bounded — a launch
-	// whose host stops reading fails rather than waits. The credentials appear
-	// on that pipe alone: never in a log, argv, file, MCP tool result or child
-	// environment.
+	// BindHandoff is the optional inherited private pipe the declared
+	// conversation's messaging credentials are written to, as one JSON line
+	// followed by EOF. A launch that omits it binds the conversation and keeps
+	// the identity in memory, handing the credentials to nobody. When present,
+	// the server owns the pipe: the handoff closes it, and its write must be
+	// deadline-bounded — a launch whose host stops reading fails rather than
+	// waits. The credentials appear on that pipe or in that memory alone: never
+	// in a log, argv, file, MCP tool result or child environment.
 	BindHandoff io.WriteCloser
 }
 

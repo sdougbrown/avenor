@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sdougbrown/avenor/internal/mcpserver"
 	"golang.org/x/sys/unix"
 )
 
@@ -49,11 +51,14 @@ func TestMCPBindFlagError(t *testing.T) {
 	}{
 		{name: "undeclared", transport: "stdio"},
 		{name: "declared", transport: "stdio", host: "poo", session: "ses_1", fd: 3, hostSet: true, sessSet: true, fdSet: true},
+		{name: "conversation without descriptor", transport: "stdio", host: "poo", session: "ses_1", hostSet: true, sessSet: true},
 		{name: "host alone", transport: "stdio", host: "poo", hostSet: true, wantErr: "supplied together or not at all"},
 		{name: "session alone", transport: "stdio", session: "ses_1", sessSet: true, wantErr: "supplied together or not at all"},
-		{name: "descriptor alone", transport: "stdio", fd: 3, fdSet: true, wantErr: "supplied together or not at all"},
-		{name: "missing descriptor", transport: "stdio", host: "poo", session: "ses_1", hostSet: true, sessSet: true, wantErr: "supplied together or not at all"},
+		{name: "descriptor alone", transport: "stdio", fd: 3, fdSet: true, wantErr: "--bind-output-fd requires --bind-host and --bind-session"},
+		{name: "descriptor with host but no session", transport: "stdio", host: "poo", fd: 3, hostSet: true, fdSet: true, wantErr: "--bind-output-fd requires --bind-host and --bind-session"},
+		{name: "descriptor with session but no host", transport: "stdio", session: "ses_1", fd: 3, sessSet: true, fdSet: true, wantErr: "--bind-output-fd requires --bind-host and --bind-session"},
 		{name: "http transport", transport: "http", host: "poo", session: "ses_1", fd: 3, hostSet: true, sessSet: true, fdSet: true, wantErr: "only supported with --transport stdio"},
+		{name: "http transport without descriptor", transport: "http", host: "poo", session: "ses_1", hostSet: true, sessSet: true, wantErr: "only supported with --transport stdio"},
 		{name: "empty host", transport: "stdio", session: "ses_1", fd: 3, hostSet: true, sessSet: true, fdSet: true, wantErr: "require non-empty values"},
 		{name: "empty session", transport: "stdio", host: "poo", fd: 3, hostSet: true, sessSet: true, fdSet: true, wantErr: "require non-empty values"},
 		{name: "stdin", transport: "stdio", host: "poo", session: "ses_1", fd: 0, hostSet: true, sessSet: true, fdSet: true, wantErr: "other than 0, 1 and 2"},
@@ -73,6 +78,39 @@ func TestMCPBindFlagError(t *testing.T) {
 				t.Fatalf("mcpBindFlagError = %v, want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// captureMCPBindOptions runs the mcp command through the declared surface with a
+// patched server constructor and returns the Options it was handed. The
+// constructor refuses, so the command exits after option validation.
+func captureMCPBindOptions(t *testing.T, args ...string) (mcpserver.Options, int) {
+	t.Helper()
+	var captured mcpserver.Options
+	orig := newMCPServerFn
+	newMCPServerFn = func(opts mcpserver.Options) (*mcpserver.Server, error) {
+		captured = opts
+		return nil, errors.New("capture only")
+	}
+	t.Cleanup(func() { newMCPServerFn = orig })
+	exit := runDeclared(append([]string{"mcp", "--no-autostart", "--supervisor-socket", filepath.Join(t.TempDir(), "s.sock")}, args...), io.Discard, io.Discard)
+	return captured, exit
+}
+
+// TestMCPBindWithoutOutputFDIsAValidLaunch pins that the pipe is optional: a
+// conversation declaration without --bind-output-fd passes option validation
+// and reaches the server constructor with no handoff, so the launch keeps the
+// identity in memory instead of writing it to a descriptor it never received.
+func TestMCPBindWithoutOutputFDIsAValidLaunch(t *testing.T) {
+	opts, exit := captureMCPBindOptions(t, "--bind-host", "poo", "--bind-session", "ses_nopipe")
+	if exit != 1 {
+		t.Fatalf("runDeclared = %d, want 1 after option validation (2 is a usage refusal)", exit)
+	}
+	if opts.BindHost != "poo" || opts.BindSession != "ses_nopipe" {
+		t.Fatalf("bound conversation = (%q, %q), want (poo, ses_nopipe)", opts.BindHost, opts.BindSession)
+	}
+	if opts.BindHandoff != nil {
+		t.Fatalf("BindHandoff = %v, want nil without --bind-output-fd", opts.BindHandoff)
 	}
 }
 
@@ -167,6 +205,11 @@ func TestMCPBindFlagRejections(t *testing.T) {
 		{
 			name:   "incomplete declaration",
 			args:   []string{"mcp", "--bind-host", "poo", "--bind-output-fd", "3"},
+			errMsg: "--bind-output-fd requires --bind-host and --bind-session",
+		},
+		{
+			name:   "host without session",
+			args:   []string{"mcp", "--bind-host", "poo"},
 			errMsg: "supplied together or not at all",
 		},
 		{
@@ -375,6 +418,78 @@ func TestMCPSubprocessHandsOverTheConversationIdentity(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), token) {
 		t.Fatal("the launched server reported the credential on stderr")
+	}
+}
+
+// TestMCPSubprocessBindsWithoutAHandoffPipe drives the real binary with a
+// conversation declaration and no --bind-output-fd: the launch binds and serves
+// without writing credentials anywhere, so the protocol round-trips and the
+// command exits cleanly when stdin closes.
+func TestMCPSubprocessBindsWithoutAHandoffPipe(t *testing.T) {
+	bin := buildAvenorBinary(t)
+	scratch, err := os.MkdirTemp("/tmp", "avmcp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	env := bindDriveEnv(scratch)
+	for _, dir := range []string{filepath.Join(scratch, "home"), filepath.Join(scratch, "avenor")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	socket := filepath.Join(scratch, "stable.sock")
+	startBindDriveSupervisor(t, bin, env, socket)
+
+	cmd := exec.Command(bin, "mcp", "--transport", "stdio",
+		"--supervisor-socket", socket, "--no-autostart",
+		"--bind-host", "poo", "--bind-session", "ses_nopipe")
+	cmd.Env = env
+	var stderr bindDriveStderr
+	cmd.Stderr = &stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start mcp: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "bind-drive", Version: "1"}, nil)
+	cs, err := client.Connect(ctx, &mcpsdk.IOTransport{Reader: stdout, Writer: stdin}, nil)
+	if err != nil {
+		t.Fatalf("connect over stdio: %v (stderr: %s)", err, stderr.String())
+	}
+	tools, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("tools/list over stdio: %v (stderr: %s)", err, stderr.String())
+	}
+	if len(tools.Tools) == 0 {
+		t.Fatal("tools/list returned no tools")
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("mcp exited with %v; stderr: %s", err, stderr.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the server did not exit after stdin closed")
 	}
 }
 

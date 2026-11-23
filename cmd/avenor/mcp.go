@@ -50,15 +50,18 @@ func mcpFlagError(transport string, allowedHosts []string) error {
 }
 
 // mcpBindFlagError rejects a conversation declaration the launch cannot make:
-// the three flags travel together, only on the stdio transport, and never on one
-// of the descriptors MCP itself reads or writes.
+// the host and session travel together and only on the stdio transport, while
+// the handoff descriptor is optional and never one of the descriptors MCP
+// itself reads or writes.
 func mcpBindFlagError(transport, host, session string, fd int, hostSet, sessionSet, fdSet bool) error {
-	declared := hostSet || sessionSet || fdSet
-	if !declared {
+	if !hostSet && !sessionSet && !fdSet {
 		return nil
 	}
-	if !(hostSet && sessionSet && fdSet) {
-		return errors.New("--bind-host, --bind-session and --bind-output-fd are supplied together or not at all")
+	if fdSet && !(hostSet && sessionSet) {
+		return errors.New("--bind-output-fd requires --bind-host and --bind-session")
+	}
+	if hostSet != sessionSet {
+		return errors.New("--bind-host and --bind-session are supplied together or not at all")
 	}
 	if transport != "stdio" {
 		return errors.New("--bind-host is only supported with --transport stdio, a transport that serves one conversation")
@@ -66,7 +69,7 @@ func mcpBindFlagError(transport, host, session string, fd int, hostSet, sessionS
 	if host == "" || session == "" {
 		return errors.New("--bind-host and --bind-session require non-empty values")
 	}
-	if fd < 3 {
+	if fdSet && fd < 3 {
 		return errors.New("--bind-output-fd must name a writable inherited descriptor other than 0, 1 and 2, which carry the MCP protocol and its diagnostics")
 	}
 	return nil

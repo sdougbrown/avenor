@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -107,12 +108,10 @@ func (w *writeCloserSpy) state() (writes int, closed bool) {
 }
 
 // declaredServer builds a server that serves one declared host conversation over
-// the injected control client, capturing its diagnostics.
+// the injected control client, capturing its diagnostics. A nil handoff means
+// the launch declared no pipe; a caller that wants a spy passes one explicitly.
 func declaredServer(t *testing.T, cl ControlClient, host, session string, handoff io.WriteCloser) (*Server, *bytes.Buffer) {
 	t.Helper()
-	if handoff == nil {
-		handoff = &writeCloserSpy{}
-	}
 	diag := &bytes.Buffer{}
 	s, err := NewServer(Options{
 		Transport:     "stdio",
@@ -202,10 +201,11 @@ func TestHostBindDeclaration(t *testing.T) {
 		wantDeclar bool
 	}{
 		{name: "none", transport: "stdio", wantDeclar: false},
-		{name: "host without session", transport: "stdio", host: "poo", wantErr: "needs a host, a session id and a handoff pipe together"},
-		{name: "session without host", transport: "stdio", session: "ses_poo", wantErr: "needs a host, a session id and a handoff pipe together"},
-		{name: "handoff without conversation", transport: "stdio", handoff: true, wantErr: "needs a host, a session id and a handoff pipe together"},
-		{name: "conversation without handoff", transport: "stdio", host: "poo", session: "ses_poo", wantErr: "needs a host, a session id and a handoff pipe together"},
+		{name: "host without session", transport: "stdio", host: "poo", wantErr: "needs a host and a session id together"},
+		{name: "session without host", transport: "stdio", session: "ses_poo", wantErr: "needs a host and a session id together"},
+		{name: "handoff without conversation", transport: "stdio", handoff: true, wantErr: "a handoff pipe requires a host and a session id"},
+		{name: "handoff without session", transport: "stdio", host: "poo", handoff: true, wantErr: "a handoff pipe requires a host and a session id"},
+		{name: "conversation without handoff", transport: "stdio", host: "poo", session: "ses_poo", wantDeclar: true},
 		{name: "shared transport", transport: "http", host: "poo", session: "ses_poo", handoff: true, wantErr: "declared only on the stdio transport"},
 		{name: "unserved host", transport: "stdio", host: "claude", session: "ses_1", handoff: true, wantErr: `host "claude" is not a native host the conversation bind serves`},
 		{name: "reuse-only host", transport: "stdio", host: "pi", session: "ses_pi", handoff: true, wantErr: "binds the supervisor's own run"},
@@ -240,6 +240,58 @@ func TestHostBindDeclaration(t *testing.T) {
 				t.Fatalf("declared = %v, want %v", declared, tc.wantDeclar)
 			}
 		})
+	}
+}
+
+// TestHostBindWithoutHandoffServesAndNamesParent pins the optional handoff: a
+// launch that declares a conversation and no pipe binds once, serves, names the
+// conversation's run as every spawn's parent, and retains the identity — its
+// credentials and resolved inbox directory — in memory without leaking them.
+func TestHostBindWithoutHandoffServesAndNamesParent(t *testing.T) {
+	stateHome := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateHome)
+	cl := &bindingClient{}
+	cl.spawnResult = map[string]any{"runtime_id": "rt_1", "session_id": "ses_1"}
+	cl.setResult(boundResult("run_poo", "tok_secret"))
+	s, diag := declaredServer(t, cl, "poo", "ses_poo", nil)
+
+	cs, err := serveDeclared(t, context.Background(), s)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	res, err := cs.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "spawn", Arguments: map[string]any{"dir": t.TempDir(), "prompt": "work"}})
+	if err != nil {
+		t.Fatalf("spawn tool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("spawn tool error: %+v", res.Content)
+	}
+	if got, _ := cl.spawnedParams()["parent_run_id"].(string); got != "run_poo" {
+		t.Fatalf("spawn parent_run_id = %q, want the conversation's bound run", got)
+	}
+	if cl.bindCount() != 1 {
+		t.Fatalf("binds = %d, want the launch's one bind", cl.bindCount())
+	}
+
+	bound, ok := s.hostBind.boundState()
+	if !ok || bound.result.RunID != "run_poo" {
+		t.Fatalf("bound state = (%+v, %v), want the bound run", bound, ok)
+	}
+	wantRoot := filepath.Join(stateHome, "avenor", "feed-asks")
+	if !strings.HasPrefix(bound.asksDir, wantRoot+string(filepath.Separator)) {
+		t.Fatalf("asksDir = %q, want a directory under %q", bound.asksDir, wantRoot)
+	}
+	if bound.result.RunToken != "tok_secret" {
+		t.Fatal("bound state did not retain the conversation's credentials")
+	}
+	if strings.Contains(diag.String(), "tok_secret") {
+		t.Fatalf("diagnostics leaked the credential: %s", diag.String())
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close server: %v", err)
 	}
 }
 
@@ -359,6 +411,35 @@ func TestHandoffDoesNotWaitOnAFullPipe(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the handoff waited on a reader that never drained the pipe")
+	}
+}
+
+// TestBindWithAnInvalidBrokerURLFailsBeforeServing pins the preflight: a bind
+// result whose broker URL cannot be resolved to an inbox directory fails the
+// launch before it hands anything over or remembers an identity, and the
+// failure names no credential.
+func TestBindWithAnInvalidBrokerURLFailsBeforeServing(t *testing.T) {
+	cl := &bindingClient{}
+	cl.setResult(messaging.MessageBindResult{
+		BrokerURL: "not a broker url",
+		RunID:     "run_poo",
+		RunToken:  "tok_secret",
+	})
+	s, diag := declaredServer(t, cl, "poo", "ses_poo", nil)
+	defer s.Close()
+
+	err := s.bindHostConversation(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid broker URL") {
+		t.Fatalf("bind = %v, want the invalid broker URL failure", err)
+	}
+	if _, ok := s.hostBind.boundState(); ok {
+		t.Fatal("a launch that could not resolve its inbox directory recorded an identity")
+	}
+	if strings.Contains(err.Error(), "tok_secret") || strings.Contains(diag.String(), "tok_secret") {
+		t.Fatalf("a failed bind leaked the credential: %v / %s", err, diag.String())
+	}
+	if cl.bindCount() != 1 {
+		t.Fatalf("binds = %d, want the launch's one bind", cl.bindCount())
 	}
 }
 
