@@ -9,6 +9,7 @@ import extensionFactory, {
   buildCompletionText,
   buildInspectPayload,
   CHANNEL_DELIVERY_ERROR,
+  CHANNEL_PEER_ERROR,
   CHANNEL_POLL_COMPLETED,
   CHANNEL_POLL_ERROR,
   CHANNEL_RUN_TERMINAL,
@@ -690,7 +691,7 @@ describe('Avenor Pi extension', () => {
     try {
       await waitFor(() => published.length === 1)
       // Wait for the failure to be recorded before the next turn reads the name.
-      await waitFor(() => errorLog.mock.calls.length === 1)
+      await waitFor(() => harness.emitted.some(([channel]) => channel === CHANNEL_PEER_ERROR))
       // The failed publish is forgotten, so the next turn sends the same name.
       await harness.eventHandlers.before_agent_start({}, harness.ctx)
       await waitFor(() => published.length === 2)
@@ -782,7 +783,7 @@ describe('Avenor Pi extension', () => {
       // The failure of the older attempt did not clear the newer record, so a
       // turn on the unchanged name does not republish 'second'.
       await harness.eventHandlers.before_agent_start({}, harness.ctx)
-      await waitFor(() => errorLog.mock.calls.length >= 1)
+      await waitFor(() => harness.emitted.some(([channel]) => channel === CHANNEL_PEER_ERROR))
       expect(received).toEqual(['first', 'second'])
     } finally {
       console.error = originalError
@@ -869,7 +870,7 @@ describe('Avenor Pi extension', () => {
       // start event fires.
       await waitFor(() => received.length === 1)
       // Wait for the failure to be recorded before the session start reads the name.
-      await waitFor(() => errorLog.mock.calls.length === 1)
+      await waitFor(() => harness.emitted.some(([channel]) => channel === CHANNEL_PEER_ERROR))
       // The session start republishes the name even though the failed
       // publish left no record.
       await harness.eventHandlers.session_start({}, harness.ctx)
@@ -919,7 +920,7 @@ describe('Avenor Pi extension', () => {
     try {
       await waitFor(() => published.length === 1)
       // Wait for the refusal to be recorded before the next turn reads the name.
-      await waitFor(() => errorLog.mock.calls.length === 1)
+      await waitFor(() => harness.emitted.some(([channel]) => channel === CHANNEL_PEER_ERROR))
       // The refused name is deterministic: no turn republishes it.
       const pollsBefore = polls
       await harness.eventHandlers.before_agent_start({}, harness.ctx)
