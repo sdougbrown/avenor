@@ -45,7 +45,6 @@ import {
   messageTool,
   normalizeTurnStopReason,
   observeRun,
-  PEER_MESSAGE_NOTICE,
   peersDetails,
   peersTool,
   renderPeerList,
@@ -2444,12 +2443,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
 
     // The session log shows an inbound peer frame's header and the sender's
     // text; the provenance notice and the reply instruction stay model-only in
-    // the message content. A frame written before details existed (a session
-    // resumed from an older build) falls back to its content minus the notice.
+    // the message content. Every frame carries its display details: the only
+    // writer is deliverPeerFrame, which introduced this message type.
     pi.registerMessageRenderer<InboundAskDisplay>(PEER_MESSAGE_CUSTOM_TYPE, (message, _options, theme: Theme) => {
-      const text = message.details
-        ? `${message.details.header}\n\n${message.details.body}`
-        : (typeof message.content === 'string' ? message.content : '').split(`${PEER_MESSAGE_NOTICE}\n\n`).join('')
+      const details = message.details as InboundAskDisplay
+      const text = `${details.header}\n\n${details.body}`
       const lines = text.split('\n')
       const rendered = lines.map((line, index) => index === 0 ? theme.fg('accent', theme.bold(line)) : line).join('\n')
       return new Text(rendered, 0, 0)
