@@ -682,10 +682,14 @@ func (p *Provider) resume(ctx context.Context, sessionID string, callOpts, opts 
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
 	}
-	// Thinking is per-call on resume: only an explicit value on this call may
-	// reach the session setter, so a constructor default never leaks into a
-	// resume that did not ask for it.
-	opts.Thinking = callOpts.Thinking
+	// Thinking is per-call on resume: only an option-aware call may reach the
+	// session setter, and only with the value it asked for, so a constructor
+	// default never leaks into a plain resume.
+	if optionAware {
+		opts.Thinking = callOpts.Thinking
+	} else {
+		opts.Thinking = ""
+	}
 
 	p.mu.Lock()
 	closing := p.closing

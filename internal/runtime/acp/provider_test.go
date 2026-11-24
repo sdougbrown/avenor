@@ -2487,3 +2487,43 @@ func TestProviderThinkingScopeStartVsResume(t *testing.T) {
 		t.Fatalf("plain Resume Thinking = %q, want empty", got)
 	}
 }
+
+// The optionAware flag is the gate, not the presence of callOpts: a resume that
+// is not option-aware never applies per-call thinking even when its caller
+// passes non-empty call options.
+func TestProviderThinkingResumeIgnoresCallOptsWhenNotOptionAware(t *testing.T) {
+	peer := newFakeInMemoryPeer(t)
+	var configured []runtime.StartOptions
+	p := NewProvider(ProviderConfig{
+		BackendID: "agy",
+		ConfigureSession: func(_ context.Context, _ *Session, opts runtime.StartOptions) error {
+			configured = append(configured, opts)
+			return nil
+		},
+	}).(*Provider)
+	p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+		return peer.client, nil
+	}
+	defer func() {
+		close(peer.client.events)
+		close(peer.client.done)
+		_ = p.Close()
+	}()
+
+	ctx := context.Background()
+	ses, err := p.Start(ctx, runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	callOpts := runtime.StartOptions{Thinking: "high"}
+	if _, err := p.resume(ctx, ses.SessionID, callOpts, runtime.MergeStartOptions(p.opts, callOpts), false); err != nil {
+		t.Fatalf("non-option-aware resume: %v", err)
+	}
+	if len(configured) == 0 {
+		t.Fatal("ConfigureSession was never called")
+	}
+	if got := configured[len(configured)-1].Thinking; got != "" {
+		t.Fatalf("non-option-aware resume Thinking = %q, want empty", got)
+	}
+}
