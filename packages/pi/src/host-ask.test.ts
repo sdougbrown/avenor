@@ -72,31 +72,33 @@ describe('host inbound ask delivery', () => {
     }
   })
 
-  it('keeps delivering the rest of a drained batch when one delivery fails', async () => {
-    // The receive drains the broker queue, so a failed delivery must not
-    // cost the batch its remainder. The failed ask reports on the bus and
-    // stays unregistered: a reply edge to an ask the model never saw would
-    // answer a question nobody asked.
+  it('redelivers a drained ask whose delivery failed, ahead of newer asks', async () => {
+    // The receive drains the broker queue, so host mode honors the same
+    // redelivery contract as the sub-agent path: a failed delivery parks the
+    // ask and the next tick retries it before anything newer, with the loss
+    // reported under its own operation.
     const asks = [
-      { message_id: 'ask-lost', from_run_id: 'rt_child', message: 'lost one', role: 'agent', expects_reply: true },
-      { message_id: 'ask-kept', from_run_id: 'rt_child', message: 'kept one', role: 'agent', expects_reply: true },
+      { message_id: 'ask-retry', from_run_id: 'rt_child', message: 'delivered second try', role: 'agent', expects_reply: true },
+      { message_id: 'ask-next', from_run_id: 'rt_child', message: 'queued behind it', role: 'agent', expects_reply: true },
     ]
     const brokerReceiveTool = drainOnce(asks)
-    const harness = await startHostExtension(brokerReceiveTool)
+    const harness = await startHostExtension(brokerReceiveTool, async () => {}, { pollIntervalMs: 10 })
     try {
       harness.sendMessage.mockImplementationOnce(async () => { throw new Error('session is not accepting messages') })
-      await waitFor(() => harness.sendMessage.mock.calls.length === 2)
-      const [lost, kept] = harness.sendMessage.mock.calls as Array<[Record<string, unknown>]>
-      expect(String(lost[0].content)).toContain('lost one')
-      expect(String(kept[0].content)).toContain('kept one')
+      await waitFor(() => harness.sendMessage.mock.calls.length >= 3, scaleMs(1500))
+      const bodies = harness.sendMessage.mock.calls.map(([m]) => String((m as Record<string, unknown>).content))
+      expect(bodies[0]).toContain('delivered second try')
+      expect(bodies[1]).toContain('delivered second try')
+      expect(bodies[2]).toContain('queued behind it')
       const deliveryErrors = harness.emitted.filter(([channel, payload]) =>
         channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver')
       expect(deliveryErrors).toHaveLength(1)
-      // The lost ask has no reply edge; the kept one answers normally.
-      const lostReply = await harness.registeredTools.avenor_message.execute('t1', { action: 'reply', reply_to: 'ask-lost', message: 'x' })
-      expect(lostReply.details.outcome).toBe('edge-absent')
-      const keptReply = await harness.registeredTools.avenor_message.execute('t2', { action: 'reply', reply_to: 'ask-kept', message: 'go ahead' })
-      expect(keptReply.details.outcome).toBe('replied')
+      // Both asks hold a reply edge once delivered: the retried ask's edge
+      // exists only after its delivery succeeds.
+      const retriedReply = await harness.registeredTools.avenor_message.execute('t1', { action: 'reply', reply_to: 'ask-retry', message: 'yes' })
+      expect(retriedReply.details.outcome).toBe('replied')
+      const nextReply = await harness.registeredTools.avenor_message.execute('t2', { action: 'reply', reply_to: 'ask-next', message: 'yes' })
+      expect(nextReply.details.outcome).toBe('replied')
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
     }

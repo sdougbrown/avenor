@@ -896,6 +896,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let hostReceiveGeneration: string | undefined
     // pending inbound asks keyed by broker message_id so a reply can reach the asker.
     const hostPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
+    // Drained asks awaiting delivery. The receive consumes the broker queue,
+    // so a failed delivery parks the ask here — the same redelivery contract
+    // the sub-agent path honors with queuedMessages — instead of losing it.
+    const hostDeliveryQueue: InboundAsk[] = []
 
     function stopHostAskPoll(): void {
       hostPollGeneration++
@@ -940,16 +944,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (generation !== hostPollGeneration) return
           if (received.generation) hostReceiveGeneration = received.generation
           for (const ask of received.asks) {
-            // The receive already drained the broker queue, so one failed
-            // delivery must not cost the batch its remainder: report the
-            // loss and keep delivering. The failed ask stays unregistered —
-            // a reply edge to an ask the model never saw would answer a
-            // question nobody asked.
+            // New asks line up behind the redeliveries they must not overtake.
+            hostDeliveryQueue.push(ask)
+          }
+          while (hostDeliveryQueue.length > 0) {
+            const ask = hostDeliveryQueue[0]
             try {
               await surfaceInboundAsk(hostPendingAsks, ask, 'Ask from sub-agent')
             } catch (error) {
+              // The failed ask stays queued — the next tick retries it ahead
+              // of the asks that follow — and the loss reports under its own
+              // operation rather than the broker's health.
               reportPeerFailure('deliver', error, { deliver: notifyOrLog })
+              break
             }
+            hostDeliveryQueue.shift()
           }
         } catch {
           // No supervisor/broker yet — this is expected until a supervisor starts a broker.
