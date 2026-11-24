@@ -559,6 +559,7 @@ func TestMessagingTakeCheck(t *testing.T) {
 	opts := helperStartOptions()
 	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "take", token, true
 	info := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_cli"}}}
+	renamed := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_tool"}}}
 	baseline := time.Now()
 	t.Setenv(helperEnv, "messaging-poll")
 	c, err := startClient(context.Background(), opts, nil)
@@ -578,8 +579,9 @@ func TestMessagingTakeCheck(t *testing.T) {
 		failure bool
 	}{
 		{"old poll", opts, info, "no poll", true},
+		{"old poll, renamed tool", opts, renamed, "no poll", true},
 		{"no poll", func() avruntime.StartOptions { o := opts; o.RuntimeID = "empty"; return o }(), info, "no poll", true},
-		{"no tool", opts, protocol.SessionInfo{}, "call_cli", true},
+		{"no tool", opts, protocol.SessionInfo{}, "call_cli nor call_tool", true},
 		{"missing record", func() avruntime.StartOptions { o := opts; o.RuntimeID = "missing"; return o }(), info, "no run record", false},
 		{"no broker", func() avruntime.StartOptions { o := opts; o.Broker = nil; return o }(), info, "not provisioned", true},
 	} {
