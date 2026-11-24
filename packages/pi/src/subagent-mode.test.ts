@@ -270,6 +270,49 @@ describe('sub-agent broker mode (integration)', () => {
     }
   })
 
+  it('keeps a transient broker outage off the child log while the bus records it', async () => {
+    const errorLog: string[] = []
+    const originalError = console.error
+    console.error = ((...args: unknown[]) => { errorLog.push(args.map(String).join(' ')) }) as typeof console.error
+    // Three 503s, then the broker recovers: one full episode, recovery
+    // included, and none of it belongs on the supervisor's record.
+    const fetchStub = stubBrokerFetch([], 0, 0, 3)
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub, pollIntervalMs: 5 })
+      await waitFor(() => harness!.emitted.some(([channel]) => channel === CHANNEL_PEER_ERROR))
+      // The recovery branch must also have run: the poll count passes the
+      // three failures plus the successful tick that cleared the episode.
+      await waitFor(() => fetchStub.calls.filter(call => call.path === '/poll-control').length >= 5)
+      expect(errorLog.join('\n')).not.toContain('broker poll')
+    } finally {
+      console.error = originalError
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('delivers one stderr line when the broker keeps refusing the child identity', async () => {
+    const errorLog: string[] = []
+    const originalError = console.error
+    console.error = ((...args: unknown[]) => { errorLog.push(args.map(String).join(' ')) }) as typeof console.error
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/poll-control': () => Response.json({}, { status: 401 }),
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub, pollIntervalMs: 5 })
+      await waitFor(() => errorLog.some(line => line.includes('central broker poll failed')))
+      // The refusal latches: later polls keep failing without another line.
+      await waitFor(() => fetchStub.calls.filter(call => call.path === '/poll-control').length >= 5)
+      expect(errorLog.filter(line => line.includes('central broker poll failed'))).toHaveLength(1)
+    } finally {
+      console.error = originalError
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
   it('answers a shared ask at most once under concurrent replies', async () => {
     let sends = 0
     const fetchStub = stubBrokerFetch(

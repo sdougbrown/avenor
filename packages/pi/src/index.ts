@@ -755,7 +755,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let topLevelTerminal = false
     let peerPollAbort: AbortController | null = null
     /** Peer operations that have already raised their one notice this episode. */
-    const peerFailureReported = new Set<PeerErrorOperation>()
+    const peerFailureReported = new Set<string>()
     let subAgentPollTimer: ReturnType<typeof setTimeout> | null = null
     // Bumped on every start/stop so an in-flight tick cannot reschedule
     // itself after the poll was stopped.
@@ -885,7 +885,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (consecutiveFailures >= 3) {
             clearPeerFailure('poll')
             if (topLevelEnv) sessionCtx?.ui.notify('[avenor] central broker poll recovered', 'info')
-            else console.error('[avenor] sub-agent broker poll recovered')
           }
           consecutiveFailures = 0
           queuedMessages.push(...msgs)
@@ -908,8 +907,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
           consecutiveFailures++
           if (consecutiveFailures === 1 || consecutiveFailures === 3) {
-            if (topLevelEnv) reportPeerFailure(operation, error)
-            else console.error('[avenor] sub-agent broker poll failing:', error instanceof Error ? error.message : error)
+            reportPeerFailure(operation, error)
           }
         }
         if (generation !== subAgentPollGeneration) return
@@ -2097,10 +2095,13 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // output while composing its next message, so console.error is wrong here.
     //
     // This is the one boundary every peer failure crosses: the event bus for
-    // observers, then exactly one human-facing line. A child's stderr is the
-    // supervisor's record, not a person's terminal, so a child keeps console.error.
-    // The notice latches per operation for the same reason the last-turn notice
-    // does: a two-second poll must not raise a toast every time it fails.
+    // observers, then at most one human-facing line. A host has a person reading
+    // its UI, so every episode delivers there. A child's stderr is the
+    // supervisor's record, not a person's terminal, and an outage an ordinary
+    // poll retried is noise in that record — so a child delivers a line only for
+    // a refusal the broker will keep repeating, and a transient failure stays
+    // bus-only. The notice latches per episode for the same reason the last-turn
+    // notice does: a two-second poll must not raise a toast every time it fails.
     function reportPeerFailure(
       operation: PeerErrorOperation,
       error: unknown,
@@ -2110,6 +2111,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const detail = error instanceof Error ? error.message : String(error)
       const message = options.message ?? `[avenor] ${peerOperationLabel(operation)} failed`
       const terminal = options.terminal ?? false
+      // A refusal the broker will keep repeating is worth a line everywhere; a
+      // transient failure is worth one only where a person is actually reading.
+      const refusal = terminal || peerFailureTerminal(operation, error)
       reportFailure({
         emit: () => emitAvenorEvent(pi.events, CHANNEL_PEER_ERROR, createPeerErrorPayload({
           operation,
@@ -2120,16 +2124,24 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           timestamp: Date.now(),
         })),
         firstInEpisode: () => {
-          if (peerFailureReported.has(operation)) return false
-          peerFailureReported.add(operation)
+          // Transient and terminal failures latch separately: an outage that
+          // turns into a refusal must still get its one line.
+          const episode = refusal ? `${operation}:refusal` : operation
+          if (peerFailureReported.has(episode)) return false
+          peerFailureReported.add(episode)
           return true
         },
         text: `${message}: ${detail}`,
         // A shutdown report outlives the session state it would read, so it
         // carries its own target rather than asking whether a host is still set.
-        deliver: options.deliver ?? notifyOrLog,
+        deliver: options.deliver ?? (topLevelEnv || refusal ? notifyOrLog : deliverNowhere),
       })
     }
+
+    /** A transient failure in a child keeps its event-bus record and writes no
+     * line: the supervisor's log is not a person's terminal, and the poll
+     * recovers from the outage on its own. */
+    const deliverNowhere = (_text: string): void => {}
 
     // One decision, asked once per failure: does this refusal end the session?
     // Everything that latches terminal and everything that reports `terminal` on
@@ -2180,9 +2192,12 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       }
     }
 
-    /** Clear the latch for an operation that just succeeded. */
+    /** Clear the latch for an operation that just succeeded. Both episode
+     * kinds go: a recovery makes the next failure, transient or refusal, a
+     * fresh episode. */
     function clearPeerFailure(operation: PeerErrorOperation): void {
       peerFailureReported.delete(operation)
+      peerFailureReported.delete(`${operation}:refusal`)
     }
 
     // The host's own last-turn producer. Every turn's end is recorded, including
