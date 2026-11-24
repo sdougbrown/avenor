@@ -577,6 +577,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         },
         { triggerTurn: true, deliverAs: 'steer' as const },
       )
+      // A delivered frame ends the delivery-failure episode, so a failure
+      // after healthy delivery reports again instead of staying latched.
+      clearPeerFailure('deliver')
     }
 
     interface InterruptibleWait {
@@ -812,8 +815,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const ask = parseControlMessage(msg)
           if (ask) {
             // The tell branch lives inside surfaceInboundAsk: expects_reply
-            // alone decides, in every mode.
-            await surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
+            // alone decides, in every mode. A delivery failure stops this
+            // pass with the failed frame still queued — the next tick
+            // retries it ahead of the frames that follow, and the failure
+            // never touches the broker-health machinery in the tick's catch.
+            try {
+              await surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
+            } catch (error) {
+              reportPeerFailure('deliver', error, { deliver: notifyOrLog })
+              return
+            }
           }
           queuedMessages.shift()
         }
@@ -929,7 +940,16 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (generation !== hostPollGeneration) return
           if (received.generation) hostReceiveGeneration = received.generation
           for (const ask of received.asks) {
-            await surfaceInboundAsk(hostPendingAsks, ask, 'Ask from sub-agent')
+            // The receive already drained the broker queue, so one failed
+            // delivery must not cost the batch its remainder: report the
+            // loss and keep delivering. The failed ask stays unregistered —
+            // a reply edge to an ask the model never saw would answer a
+            // question nobody asked.
+            try {
+              await surfaceInboundAsk(hostPendingAsks, ask, 'Ask from sub-agent')
+            } catch (error) {
+              reportPeerFailure('deliver', error, { deliver: notifyOrLog })
+            }
           }
         } catch {
           // No supervisor/broker yet — this is expected until a supervisor starts a broker.
@@ -2112,6 +2132,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         case 'register': return 'central peer registration'
         case 'publish-turn': return 'central last-turn publication'
         case 'retire': return 'central peer retirement confirmation'
+        case 'deliver': return 'inbound peer delivery'
       }
     }
 

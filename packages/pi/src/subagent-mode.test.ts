@@ -2,6 +2,7 @@ import { describe, expect, it, mock } from 'bun:test'
 import type { ExtensionDeps } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
 import { messageTool as realMessageTool } from '@dougbots/avenor-core'
+import { CHANNEL_PEER_ERROR } from './events.js'
 import { makeMessageProvider, settleWithin, startExtensionHarness, waitFor, waitUntilAborted } from './test-fixtures.js'
 
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
@@ -235,6 +236,35 @@ describe('sub-agent broker mode (integration)', () => {
       const [message] = sendMessage.mock.calls[0]!
       expect(String(message.content)).toContain('after the error')
     } finally {
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('keeps a delivery failure out of the broker-health counters and retries the frame', async () => {
+    const errorLog: string[] = []
+    const originalError = console.error
+    console.error = ((...args: unknown[]) => { errorLog.push(args.map(String).join(' ')) }) as typeof console.error
+    // The broker stays healthy; the session refuses every delivery. The
+    // failed frame stays queued, so the tick retries it while the failure
+    // is reported on its own channel — never as a broker poll failure.
+    const fetchStub = stubBrokerFetch([
+      [{ type: 'agent_message', payload: { id: 'ask-d', from_run_id: 'supervisor', message: 'undeliverable', expects_reply: true } }],
+    ])
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub, pollIntervalMs: 5 })
+      harness.sendMessage.mockImplementation(async () => { throw new Error('session is not accepting messages') })
+      await waitFor(() => harness!.sendMessage.mock.calls.length >= 2)
+      await waitFor(() => harness!.emitted.some(([channel, payload]) =>
+        channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver'))
+      expect(errorLog.join('\n')).toContain('inbound peer delivery failed')
+      expect(errorLog.join('\n')).not.toContain('broker poll failed')
+      // The poll itself was healthy throughout: no poll-failure latch fired.
+      expect(harness!.emitted.some(([channel, payload]) =>
+        channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'poll')).toBe(false)
+    } finally {
+      console.error = originalError
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()
     }
