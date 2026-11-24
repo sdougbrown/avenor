@@ -48,6 +48,16 @@ const (
 	StartOnly
 )
 
+// supportedBackendsFallback is the literal set used when the schema cannot be
+// read at init time. It must stay in sync with the schema's eitherOf branches;
+// a test compares its keys against the backend set derived from the schema.
+var supportedBackendsFallback = map[string]bool{
+	"codex-app-server": true,
+	"pi":               true,
+	"claude":           true,
+	"agy":              true,
+}
+
 // supportedBackends is the set of backends that have thinking support, derived
 // from the Umpire schema's eitherOf branches at init time.
 var supportedBackends = func() map[string]bool {
@@ -55,11 +65,7 @@ var supportedBackends = func() map[string]bool {
 	if err != nil {
 		// Fallback: derive from the generated branch constants. The schema
 		// includes branches for these backends in their condIn expressions.
-		return map[string]bool{
-			"codex-app-server": true,
-			"pi":               true,
-			"claude":           true,
-		}
+		return supportedBackendsFallback
 	}
 	return extractBackendsFromRules(data)
 }()

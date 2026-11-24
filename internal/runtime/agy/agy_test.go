@@ -2,6 +2,7 @@ package agy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -141,8 +142,13 @@ while IFS= read -r line; do
       ;;
     *'"method":"session/set_config_option"'*)
       case "$line" in
+        *'"value":"hang"'*)
+          ;;
         *bad-model*)
           printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"Unknown model ID"}}\n' "$id"
+          ;;
+        *thought_level*xhigh*)
+          printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32602,"message":"thinking level xhigh not supported by model"}}\n' "$id"
           ;;
         *)
           printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
@@ -989,4 +995,260 @@ func TestCloseTerminatesChild(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	assertPIDGone(t, ses.PID)
+}
+
+// loggedRequest is one NDJSON frame the fake `agy` received, decoded so a test
+// asserts the exact wire sequence instead of searching for substrings.
+type loggedRequest struct {
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+}
+
+// readLoggedRequests decodes every NDJSON frame the fake recorded. It retries
+// while the child may still be appending, and fails the test on a frame that is
+// not JSON so a malformed log never passes as an empty sequence.
+func readLoggedRequests(t *testing.T, path string) []loggedRequest {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			reqs, ok := decodeLoggedRequests(raw)
+			if ok {
+				return reqs
+			}
+		}
+		if time.Now().After(deadline) {
+			raw, _ := os.ReadFile(path)
+			t.Fatalf("timed out decoding %s; log:\n%s", path, raw)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func decodeLoggedRequests(raw []byte) ([]loggedRequest, bool) {
+	var reqs []loggedRequest
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var req loggedRequest
+		if err := json.Unmarshal([]byte(line), &req); err != nil {
+			return nil, false
+		}
+		reqs = append(reqs, req)
+	}
+	return reqs, true
+}
+
+// sessionConfigSteps projects the logged frames onto the steps configureSession
+// owns: the session open, then each config option it set, in order.
+func sessionConfigSteps(t *testing.T, reqs []loggedRequest) []string {
+	t.Helper()
+	var steps []string
+	for _, req := range reqs {
+		switch req.Method {
+		case "session/new", "session/resume":
+			steps = append(steps, req.Method)
+		case "session/set_config_option":
+			var params struct {
+				ConfigID string `json:"configId"`
+				Value    string `json:"value"`
+			}
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				t.Fatalf("decode set_config_option params: %v", err)
+			}
+			steps = append(steps, params.ConfigID+"="+params.Value)
+		}
+	}
+	return steps
+}
+
+// TestConfigureSessionModelAndThinkingMatrix pins the exact wire order for every
+// model × thinking combination on both a fresh start and an explicit resume. The
+// model slug is passed through unchanged, and neither setter runs when its value
+// is empty.
+func TestConfigureSessionModelAndThinkingMatrix(t *testing.T) {
+	cases := []struct {
+		name     string
+		model    string
+		thinking string
+		want     []string
+	}{
+		{name: "neither", want: nil},
+		{name: "model only", model: "gemini-3.8-flash-low", want: []string{"model=gemini-3.8-flash-low"}},
+		{name: "thinking only", thinking: "high", want: []string{"thought_level=high"}},
+		{name: "model then thinking", model: "gemini-3.8-flash-low", thinking: "high", want: []string{"model=gemini-3.8-flash-low", "thought_level=high"}},
+	}
+	for _, launch := range []string{"new", "resume"} {
+		for _, tc := range cases {
+			t.Run(launch+"/"+tc.name, func(t *testing.T) {
+				logPath := filepath.Join(t.TempDir(), "acp.log")
+				installFakeAGY(t, logPath, "")
+				p := newProviderWithDeps(t, runtime.StartOptions{}, testDeps())
+				defer func() { _ = p.Close() }()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				opts := runtime.StartOptions{Dir: t.TempDir(), Model: tc.model, Thinking: tc.thinking}
+				var err error
+				if launch == "new" {
+					_, err = p.Start(ctx, opts)
+				} else {
+					_, err = p.ResumeWithOptions(ctx, "ses_fake_1", opts)
+				}
+				if err != nil {
+					t.Fatalf("%s: %v", launch, err)
+				}
+
+				want := append([]string{"session/" + launch}, tc.want...)
+				if got := sessionConfigSteps(t, readLoggedRequests(t, logPath)); !slices.Equal(got, want) {
+					t.Fatalf("wire steps = %v, want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+// TestConfigureSessionModelErrorSkipsThinking proves a rejected model stops the
+// launch before the thought level is sent, so a caller never gets a session
+// whose model failed but whose effort was applied.
+func TestConfigureSessionModelErrorSkipsThinking(t *testing.T) {
+	for _, launch := range []string{"new", "resume"} {
+		t.Run(launch, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "acp.log")
+			installFakeAGY(t, logPath, "")
+			p := newProviderWithDeps(t, runtime.StartOptions{}, testDeps())
+			defer func() { _ = p.Close() }()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			opts := runtime.StartOptions{Dir: t.TempDir(), Model: "bad-model", Thinking: "high"}
+			var err error
+			if launch == "new" {
+				_, err = p.Start(ctx, opts)
+			} else {
+				_, err = p.ResumeWithOptions(ctx, "ses_fake_1", opts)
+			}
+			if err == nil || !strings.Contains(err.Error(), "Unknown model ID") || !strings.Contains(err.Error(), "-32602") {
+				t.Fatalf("%s err = %v, want the unknown-model rejection", launch, err)
+			}
+			want := []string{"session/" + launch, "model=bad-model"}
+			if got := sessionConfigSteps(t, readLoggedRequests(t, logPath)); !slices.Equal(got, want) {
+				t.Fatalf("wire steps = %v, want %v (no thought_level after a model error)", got, want)
+			}
+		})
+	}
+}
+
+// TestConfigureSessionThinkingRejected covers a value the static policy admits
+// but the selected model refuses: the error names the backend, the requested
+// value, the method, and the peer's message and code. A fresh start and a cold
+// resume close the session they opened; a warm resume keeps the owned session
+// and never closes it.
+func TestConfigureSessionThinkingRejected(t *testing.T) {
+	assertThoughtError := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected the thought-level rejection to fail the launch")
+		}
+		for _, want := range []string{
+			`agy thinking "xhigh"`,
+			"json-rpc session/set_config_option failed",
+			"thinking level xhigh not supported by model",
+			"-32602",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("err = %q, want it to contain %q", err.Error(), want)
+			}
+		}
+	}
+
+	t.Run("fresh start closes the session", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "acp.log")
+		installFakeAGY(t, logPath, "")
+		p := newProviderWithDeps(t, runtime.StartOptions{}, testDeps())
+		defer func() { _ = p.Close() }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, err := p.Start(ctx, runtime.StartOptions{Dir: t.TempDir(), Thinking: "xhigh"})
+		assertThoughtError(t, err)
+
+		if log := readLog(t, logPath); !strings.Contains(log, `"method":"session/close"`) {
+			t.Fatalf("failed start did not close the session; log:\n%s", log)
+		}
+		if err := p.Prompt(ctx, "ses_fake_1", "hi"); err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("Prompt after failed start = %v, want the session to be unregistered", err)
+		}
+	})
+
+	t.Run("cold resume closes the session", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "acp.log")
+		installFakeAGY(t, logPath, "")
+		p := newProviderWithDeps(t, runtime.StartOptions{}, testDeps())
+		defer func() { _ = p.Close() }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, err := p.ResumeWithOptions(ctx, "ses_fake_1", runtime.StartOptions{Dir: t.TempDir(), Thinking: "xhigh"})
+		assertThoughtError(t, err)
+
+		if log := readLog(t, logPath); !strings.Contains(log, `"method":"session/close"`) {
+			t.Fatalf("failed cold resume did not close the session; log:\n%s", log)
+		}
+		if err := p.Prompt(ctx, "ses_fake_1", "hi"); err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("Prompt after failed cold resume = %v, want the session to be unregistered", err)
+		}
+	})
+
+	t.Run("warm resume keeps the owned session", func(t *testing.T) {
+		logPath := filepath.Join(t.TempDir(), "acp.log")
+		installFakeAGY(t, logPath, "")
+		p := newProviderWithDeps(t, runtime.StartOptions{}, testDeps())
+		defer func() { _ = p.Close() }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if _, err := p.Start(ctx, runtime.StartOptions{Dir: t.TempDir()}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		_, err := p.ResumeWithOptions(ctx, "ses_fake_1", runtime.StartOptions{Thinking: "xhigh"})
+		assertThoughtError(t, err)
+
+		if log := readLog(t, logPath); strings.Contains(log, `"method":"session/close"`) {
+			t.Fatalf("failed warm resume closed the owned session; log:\n%s", log)
+		}
+		if err := p.Prompt(ctx, "ses_fake_1", "still usable"); err != nil {
+			t.Fatalf("Prompt after failed warm resume: %v", err)
+		}
+	})
+}
+
+// TestConfigureSessionThinkingErrorWrapsCancellation proves the thought setter's
+// context error stays inspectable through the backend's wrapping.
+func TestConfigureSessionThinkingErrorWrapsCancellation(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "acp.log")
+	installFakeAGY(t, logPath, "")
+	p := newProviderWithDeps(t, runtime.StartOptions{}, testDeps())
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := p.Start(ctx, runtime.StartOptions{Dir: t.TempDir(), Thinking: "hang"})
+		errc <- err
+	}()
+
+	waitForLog(t, logPath, `"value":"hang"`)
+	cancel()
+
+	err := <-errc
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want it to wrap context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), `agy thinking "hang"`) {
+		t.Fatalf("err = %q, want the backend and requested value", err.Error())
+	}
 }

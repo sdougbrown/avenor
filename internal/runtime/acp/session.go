@@ -145,10 +145,10 @@ func setSessionModeParams(sessionID string, modeID string) map[string]any {
 	}
 }
 
-func setSessionModelParams(sessionID string, modelID string) map[string]any {
+func setSessionConfigOptionParams(sessionID string, configID string, value string) map[string]any {
 	return map[string]any{
 		"sessionId": sessionID,
-		"configId":  "model",
-		"value":     modelID,
+		"configId":  configID,
+		"value":     value,
 	}
 }

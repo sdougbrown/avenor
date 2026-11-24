@@ -129,7 +129,7 @@ func TestRunWorkflowPhaseRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) 
 
 	dir := t.TempDir()
 	rosterPath := filepath.Join(dir, "roster.json")
-	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"agy","agent":"executor","thinking":"low"}}`), 0o600); err != nil {
+	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"gemini-acp","agent":"executor","thinking":"low"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loopPath := filepath.Join(dir, "loop.json")
@@ -141,7 +141,7 @@ func TestRunWorkflowPhaseRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) 
 	if got := run([]string{"--dir", dir, "--loop-file", loopPath, "--roster-file", rosterPath}, func(string) string { return "" }, &stderr); got != 1 {
 		t.Fatalf("run() = %d, want 1; stderr=%s", got, stderr.String())
 	}
-	if called || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
+	if called || !strings.Contains(stderr.String(), "gemini-acp") || !strings.Contains(stderr.String(), "thinking") {
 		t.Fatalf("called=%v stderr=%q, want effective-backend thinking rejection", called, stderr.String())
 	}
 }
@@ -162,7 +162,7 @@ func TestRosterSuppliedThinkingIsCheckedAgainstTheBackend(t *testing.T) {
 
 	dir := t.TempDir()
 	rosterPath := filepath.Join(dir, "roster.json")
-	contents := `{"horse":{"backend":"agy","agent":"windsurf-swe","thinking":"low"}}`
+	contents := `{"horse":{"backend":"gemini-acp","agent":"windsurf-swe","thinking":"low"}}`
 	if err := os.WriteFile(rosterPath, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestRosterSuppliedThinkingIsCheckedAgainstTheBackend(t *testing.T) {
 	}, func(string) string { return "" }, &stderr); code == 0 {
 		t.Fatalf("run = %d, want non-zero; stderr=%s", code, stderr.String())
 	}
-	if called || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
+	if called || !strings.Contains(stderr.String(), "gemini-acp") || !strings.Contains(stderr.String(), "thinking") {
 		t.Fatalf("called=%v stderr=%q", called, stderr.String())
 	}
 }

@@ -4,6 +4,7 @@
 
 - Single run over `agy acp --stdio` (`session.start`, streamed `agent.message_chunk`, terminal `session.end` with `stop_reason: end_turn` and normalized snake_case `usage`)
 - Strict model validation via ACP `session/set_config_option` (`configId: "model"`; rejects unknown model slugs with `-32602` without writing a `DONE` sentinel)
+- Thinking control via ACP `session/set_config_option` (`configId: "thought_level"`): `low`, `medium`, `high`, and `xhigh` on a fresh start and an explicit resume, an omitted level on resume applying no setter, and `off` rejected by the static policy before `agy` spawns
 - Retired `AVENOR_AGY_TRANSPORT` migration refusal (any non-empty value fails before spawning `agy`)
 - Interactive tool permission relay (`permission.request` → `avenor answer` / `avenor control answer-permission`)
 - Mid-turn cancellation (`avenor control cancel`)
@@ -61,6 +62,56 @@ SID=$(awk -F= '/^SESSION=/{print $2}' "$SCRATCH/done.env")
 echo "resume_exit=$?"
 cat "$SCRATCH/resume-done.env"
 cat "$SCRATCH/resume-result.txt"
+
+# 5. Thinking: start with a level, resume with a changed level, then resume with none
+./avenor run --backend agy --model gemini-3.8-flash-low --thinking high \
+  --prompt "Reply with the single word THINK and nothing else." \
+  --dir "$SCRATCH" \
+  --on-event "$SCRATCH/think-events.ndjson" \
+  --sentinel-file "$SCRATCH/think-done.env" \
+  --result-file "$SCRATCH/think-result.txt" \
+  --timeout 90s --label verify-agy-thinking
+echo "thinking_exit=$?"
+cat "$SCRATCH/think-done.env"
+cat "$SCRATCH/think-result.txt"
+
+TSID=$(awk -F= '/^SESSION=/{print $2}' "$SCRATCH/think-done.env")
+
+./avenor run --backend agy --resume "$TSID" --thinking low \
+  --prompt "Reply with the single word LOWER and nothing else." \
+  --dir "$SCRATCH" \
+  --on-event "$SCRATCH/think-resume-events.ndjson" \
+  --sentinel-file "$SCRATCH/think-resume-done.env" \
+  --result-file "$SCRATCH/think-resume-result.txt" \
+  --timeout 90s --label verify-agy-thinking-resume
+echo "thinking_resume_exit=$?"
+cat "$SCRATCH/think-resume-done.env"
+cat "$SCRATCH/think-resume-result.txt"
+
+./avenor run --backend agy --resume "$TSID" \
+  --prompt "Reply with the single word DEFAULT and nothing else." \
+  --dir "$SCRATCH" \
+  --sentinel-file "$SCRATCH/think-resume-default-done.env" \
+  --result-file "$SCRATCH/think-resume-default-result.txt" \
+  --timeout 90s --label verify-agy-thinking-resume-default
+echo "thinking_resume_default_exit=$?"
+cat "$SCRATCH/think-resume-default-result.txt"
+
+# 6. A rejected thinking value fails before agy spawns
+./avenor run --backend agy --thinking off \
+  --prompt "Reply OK" --dir "$SCRATCH" \
+  --sentinel-file "$SCRATCH/think-off.env" 2>"$SCRATCH/think-off.err"
+echo "thinking_off_exit=$?"
+grep 'does not support thinking value "off"' "$SCRATCH/think-off.err"
+! grep -q '^DONE$' "$SCRATCH/think-off.env"
+
+# 7. A model-unsupported level fails after session open with the ACP rejection
+./avenor run --backend agy --model gemini-3.8-flash --thinking xhigh \
+  --prompt "Reply OK" --dir "$SCRATCH" \
+  --sentinel-file "$SCRATCH/think-xhigh.env" 2>"$SCRATCH/think-xhigh.err"
+echo "thinking_xhigh_exit=$?"
+grep 'agy thinking "xhigh": json-rpc session/set_config_option failed' "$SCRATCH/think-xhigh.err"
+! grep -q '^DONE$' "$SCRATCH/think-xhigh.env"
 ```
 
 For supervisor-mode permission relay and `avenor-channel-tools` messaging, start `avenor stable --control-socket "$SCRATCH/stable.sock" --idle-timeout 5m`, spawn `--backend agy --model gemini-3.8-flash-low --no-park --permission-handler "file:$SCRATCH/perm" --timeout 90` with a shell-tool prompt, wait for `$SCRATCH/perm.req`, read the offered allow `optionId` (for example `allow` or `allow-once`) from `$SCRATCH/perm.req`, approve via `./avenor answer --option <allow-option-id> "$SCRATCH/perm"`, verify the file side effect, verify a broker `tell` via `avenor-channel-tools` (`--auto-approve`), and shut down the stable cleanly.
@@ -71,4 +122,7 @@ For supervisor-mode permission relay and `avenor-channel-tools` messaging, start
 - Step 2 exits non-zero with `-32602` / `"Unknown model ID"`.
 - Step 3 exits `0`; `done.env` carries `DONE`, `SESSION=<uuid>`, `STOP_REASON=end_turn`, `RESULT=`; `events.ndjson` contains `session.start` (`backend: "agy"`) and `session.end` with normalized `usage`; `result.txt` holds `OK`.
 - Step 4 exits `0` against a fresh `agy acp` process with the same `SESSION=<uuid>` and `RESUMED` in `resume-result.txt`.
-- Supervisor drive proves `permission.request` → `answer_permission` execution, mid-turn `cancel`, and `avenor-channel-tools` broker send + receipt, with zero credentials in captured logs/evidence.
+- Step 5 exits `0` three times on the same session: start with `--thinking high` (`THINK` in `think-result.txt`), cold resume with `--thinking low` (`LOWER`), and cold resume with no `--thinking` (`DEFAULT`). Note that `--on-event` records Avenor events rather than outgoing ACP `session/set_config_option` frames; outgoing frame ordering and omission on resume are pinned by `internal/runtime/agy/agy_test.go`, and Step 7 proves live wire delivery to `agy acp`.
+- Step 6 exits non-zero pre-spawn with `backend "agy" does not support thinking value "off" (allowed: low, medium, high, xhigh)` and writes no `DONE` sentinel.
+- Step 7 exits non-zero after session open with `agy thinking "xhigh": json-rpc session/set_config_option failed: ... (-32602)` and writes no `DONE` sentinel, proving the live binary sends `thought_level` over ACP and surfaces model-specific refusals.
+- Supervisor drive proves `permission.request` → `answer-permission` execution, mid-turn `cancel`, and `avenor-channel-tools` broker send + receipt, with zero credentials in captured logs/evidence.

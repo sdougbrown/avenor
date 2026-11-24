@@ -1,7 +1,8 @@
 // Package agy adapts the Antigravity CLI's ACP stdio server (`agy acp
 // --stdio`) to the avenor runtime.Provider contract. Broker messaging rides on
 // the standard ACP `mcpServers` session parameter, which `agy acp` spawns
-// natively; model selection uses the `model` session config option.
+// natively; model and thinking selection use the `model` and `thought_level`
+// session config options.
 package agy
 
 import (
@@ -125,11 +126,21 @@ func buildSessionOpenOptions(d deps, runID, brokerToken, brokerURL string) (acp.
 	}, nil
 }
 
-// configureSession applies the per-session model selection. The backend's ACP
-// modes are permission modes, so opts.Agent is not applied here.
+// configureSession applies the per-session model selection and the thinking
+// level. The backend's ACP modes are permission modes, so opts.Agent is not
+// applied here. The model is passed through unchanged: a suffixed model slug
+// is the caller's choice, not an inference about effort. A model rejection
+// stops the launch before the thought level is sent.
 func configureSession(ctx context.Context, session *acp.Session, opts runtime.StartOptions) error {
 	if opts.Model != "" {
-		return session.Client.SetSessionModel(ctx, session.SessionID, opts.Model)
+		if err := session.Client.SetSessionModel(ctx, session.SessionID, opts.Model); err != nil {
+			return err
+		}
+	}
+	if opts.Thinking != "" {
+		if err := session.Client.SetSessionConfigOption(ctx, session.SessionID, "thought_level", opts.Thinking); err != nil {
+			return fmt.Errorf("%s thinking %q: %w", backendID, opts.Thinking, err)
+		}
 	}
 	return nil
 }

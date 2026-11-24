@@ -54,8 +54,27 @@ func TestSpawnThinkingValidationPrecedesReservation(t *testing.T) {
 		providerCalled = true
 		return &thinkingCaptureProvider{}, nil
 	}
-	_, err := sup.spawn(SpawnParams{Prompt: "work", Backend: "agy", Thinking: "low"})
-	if err == nil || !strings.Contains(err.Error(), "agy") || !strings.Contains(err.Error(), "thinking") {
+	_, err := sup.spawn(SpawnParams{Prompt: "work", Backend: "gemini-acp", Thinking: "low"})
+	if err == nil || !strings.Contains(err.Error(), "gemini-acp") || !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("error = %v", err)
+	}
+	if providerCalled || len(sup.runtimes) != 0 || sup.nextID != 0 {
+		t.Fatalf("provider=%v runtimes=%d nextID=%d", providerCalled, len(sup.runtimes), sup.nextID)
+	}
+}
+
+// A canonical value the backend has no native control for is a value error, not
+// a capability error, and it is still rejected before anything is reserved.
+func TestSpawnThinkingValueValidationPrecedesReservation(t *testing.T) {
+	t.Parallel()
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-value-validation.sock", MaxRuntimes: 1})
+	providerCalled := false
+	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
+		providerCalled = true
+		return &thinkingCaptureProvider{}, nil
+	}
+	_, err := sup.spawn(SpawnParams{Prompt: "work", Backend: "agy", Thinking: "off"})
+	if err == nil || !strings.Contains(err.Error(), `backend "agy" does not support thinking value "off"`) || !strings.Contains(err.Error(), "allowed: low, medium, high, xhigh") {
 		t.Fatalf("error = %v", err)
 	}
 	if providerCalled || len(sup.runtimes) != 0 || sup.nextID != 0 {
@@ -249,7 +268,7 @@ func TestSpawnAcceptsThinkingWithExplicitPiBackendAndModel(t *testing.T) {
 func TestSpawnKeepsTheResumedBackendInTheThinkingError(t *testing.T) {
 	t.Parallel()
 	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/thinking-resumed-backend.sock", MaxRuntimes: 1})
-	sup.rememberSessionIdentity("ses_resumed", effectiveIdentity{Backend: "agy"}, nil)
+	sup.rememberSessionIdentity("ses_resumed", effectiveIdentity{Backend: "gemini-acp"}, nil)
 	providerCalled := false
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		providerCalled = true
@@ -259,7 +278,7 @@ func TestSpawnKeepsTheResumedBackendInTheThinkingError(t *testing.T) {
 	if err == nil {
 		t.Fatal("resume with thinking on a backend that rejects it: want an error")
 	}
-	if !strings.Contains(err.Error(), `backend "agy" does not support parameter "thinking"`) {
+	if !strings.Contains(err.Error(), `backend "gemini-acp" does not support parameter "thinking"`) {
 		t.Fatalf("error = %q, want the resumed backend's own verdict", err)
 	}
 	if strings.Contains(err.Error(), "backend was omitted") {

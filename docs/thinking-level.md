@@ -37,14 +37,20 @@ The native mechanisms below were verified with Codex CLI 0.144.6, Pi 0.83.0, and
 | `opencode-http` | unsupported | unsupported | none verified |
 | `gemini-acp` | unsupported | unsupported | none verified |
 | `cursor-acp` | unsupported | unsupported | none verified |
-| `agy` | unsupported | unsupported | ACP `thought_level` not yet wired |
+| `agy` | `low`, `medium`, `high`, `xhigh` | `low`, `medium`, `high`, `xhigh` | ACP `session/set_config_option` (`thought_level`) |
 | `pony` | unsupported | unsupported | none |
 | `poo` | unsupported | unsupported | none: the binary's settings choose the model |
 
 Every explicit value on an unsupported path fails with an error such as:
 
 ```text
-backend "agy" does not support parameter "thinking"
+backend "gemini-acp" does not support parameter "thinking"
+```
+
+A backend that supports thinking in general but not one canonical value rejects that value on its own:
+
+```text
+backend "agy" does not support thinking value "off" (allowed: low, medium, high, xhigh)
 ```
 
 The rejection occurs before Avenor starts a provider, reserves a stable runtime, creates session artifacts, or sends a prompt. The MCP and control clients validate the enum for early feedback. The stable supervisor and direct CLI apply the authoritative backend policy.
@@ -75,10 +81,16 @@ Claude checks that `claude --help` advertises `--effort <level>` before an expli
 
 The effort flag is startup-only. Claude rejects every explicit resume value, even if the live in-process session appears to use the same value. Omitted thinking keeps the existing in-memory resume behavior.
 
+### Agy
+
+`agy` applies thinking per session over ACP `session/set_config_option` with `configId: "thought_level"`, on a fresh start and on an explicit resume. The level is set after the model and only when the caller supplied one: a resume without a level sends no `thought_level` request, even when the provider was constructed with a default. A model slug is passed to `agy acp` unchanged, so an effort-suffixed slug and an explicit level are independent choices.
+
+The static policy admits `low`, `medium`, `high`, and `xhigh` before Avenor starts a provider. `agy acp` validates the level against the selected model when it applies it, after the session is open. If that model does not offer the requested level, Avenor reports the backend, the requested value, and the `agy acp` rejection instead of presenting the static allowed-values error. The failed launch sends no prompt: a fresh start or cold resume closes the session it opened, while a warm resume leaves its owned session and event poller in place. Avenor does not roll back a model change `agy acp` already accepted.
+
 ## Unsupported backends
 
 OpenCode ACP 1.18.3 has no verified thinking config option. OpenCode HTTP SDK 1.15.3 exposes model variants, but a variant name is not a canonical thinking level. Avenor does not infer a mapping or add an unverified payload field.
 
-Gemini ACP and Cursor ACP have no verified session control for this setting. Pony's model request has no thinking field. A poo binary takes its model and its options from its own settings file, and its wire protocol has no reasoning field, so the backend rejects an explicit level rather than ignoring it. Agy now uses ACP (`agy acp`), which exposes `thought_level`, but `--thinking` policy wiring for Agy is tracked separately; this release still rejects `--thinking` on Agy (effort-suffixed model slugs remain selectable via `--model`).
+Gemini ACP and Cursor ACP have no verified session control for this setting. Pony's model request has no thinking field. A poo binary takes its model and its options from its own settings file, and its wire protocol has no reasoning field, so the backend rejects an explicit level rather than ignoring it. Agy no longer appears here: it uses ACP (`agy acp`) and applies `thought_level`; see its section above for values and model-specific validation.
 
 None of these backends receives a prompt prefix, system instruction, warning-only fallback, or silent no-op.

@@ -30,8 +30,14 @@ func TestBackendPolicyGenerated(t *testing.T) {
 		{"claude", str("low"), true, false, true},  // start-only
 		{"claude", str("medium"), false, true, true},
 
+		// Agy: low..xhigh on start and resume
+		{"agy", str("low"), false, true, true},
+		{"agy", str("xhigh"), true, true, true},
+		{"agy", str("off"), false, false, true},
+		{"agy", str("max"), true, false, true},
+
 		// Backends with no thinking support
-		{"agy", str("low"), false, false, true},
+		{"gemini-acp", str("low"), false, false, true},
 		{"opencode-acp", str("off"), false, false, true},
 		{"pony", str("high"), true, false, true},
 
@@ -88,14 +94,26 @@ func TestBackendPolicyActiveBranch(t *testing.T) {
 		t.Errorf("claude low start branch = %v, want ClaudeStart", avail.ActiveThinkingPolicyBranch)
 	}
 
+	// Agy + low + either resume mode → Agy
+	for _, resume := range []bool{false, true} {
+		avail = Check(
+			ThinkingPolicyFields{Thinking: str("low")},
+			ThinkingPolicyConditions{Backend: "agy", Resume: resume},
+			ThinkingPolicyFields{},
+		)
+		if avail.ActiveThinkingPolicyBranch != Agy {
+			t.Errorf("agy low (resume=%v) branch = %v, want Agy", resume, avail.ActiveThinkingPolicyBranch)
+		}
+	}
+
 	// Unknown backend + value → no branch
 	avail = Check(
 		ThinkingPolicyFields{Thinking: str("low")},
-		ThinkingPolicyConditions{Backend: "agy", Resume: false},
+		ThinkingPolicyConditions{Backend: "gemini-acp", Resume: false},
 		ThinkingPolicyFields{},
 	)
 	if avail.ActiveThinkingPolicyBranch != thinkingPolicyBranchNone {
-		t.Errorf("agy low branch = %v, want None", avail.ActiveThinkingPolicyBranch)
+		t.Errorf("gemini-acp low branch = %v, want None", avail.ActiveThinkingPolicyBranch)
 	}
 }
 

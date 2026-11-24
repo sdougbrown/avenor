@@ -131,13 +131,13 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 | Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
 | Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
-| Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
+| Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
 | External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
 | Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
-Thinking control is native for Codex and Pi. Claude supports five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
+Thinking control is native for Codex, Pi, and Agy. Agy accepts `low` through `xhigh` on both a fresh start and an explicit resume, and rejects `off`, `minimal`, and `max` before spawning. Claude supports five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
 
 Session resume for `claude` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by this backend.
 
@@ -397,7 +397,8 @@ avenor \
 ```
 
 - **Working directory & wrapper**: Avenor sets the child process working directory to `--dir` and passes `--add-dir <abs-dir>` plus ACP `cwd`. Launch wrappers (`--launch-wrapper`) are supported on both fresh starts and cold resumes.
-- **Model selection**: `--model` is applied per session via ACP `session/set_config_option` (`configId: "model"`). Both base model names and effort-suffixed slugs (for example `gemini-4-argon-high`) are accepted; unknown model IDs fail cleanly with `agy acp`'s `-32602` error without installing a session.
+- **Model selection**: `--model` is applied per session via ACP `session/set_config_option` (`configId: "model"`). Both base model names and effort-suffixed slugs (for example `gemini-4-argon-high`) are accepted; unknown model IDs fail cleanly with `agy acp`'s `-32602` error without installing a session. The slug is passed through unchanged: Avenor never strips an effort suffix or infers a thinking level from it.
+- **Thinking level**: `--thinking` is applied per session via ACP `session/set_config_option` (`configId: "thought_level"`), after the model, on both fresh starts and explicit resumes. `low`, `medium`, `high`, and `xhigh` are admitted; `off`, `minimal`, and `max` fail the static policy before `agy` spawns. An omitted level sends no `thought_level` request, and a resume without one clears the constructor default instead of reapplying it. `agy acp` validates the level against the selected model after the session opens, so a model that does not offer a statically allowed level (for example `xhigh`) fails the launch with `agy`'s own error rather than the static allowed-values error; a fresh start or cold resume then closes the session, while a warm resume keeps its owned session.
 - **Agent selection**: `--agent` is passed on the `agy acp` command line (ACP session modes select permission modes such as `default`, `accept-edits`, `auto`, and `plan`, not agent personas).
 - **Permissions, tools, and cancellation**: Avenor never passes `--dangerously-skip-permissions`. Tool approval requests arrive via ACP `session/request_permission` and are relayed as canonical `permission.request` events; tool calls stream as `tool.call` and `tool.call_update`; `session/cancel` cancels active turns.
 - **Multi-turn & cross-process resume**: A live `agy acp` child handles follow-up turns in place, and cold resumes reattach across process restarts via ACP `session/resume`. Legacy pre-ACP conversation IDs may not resume across the protocol boundary unless recognized by `agy acp`.

@@ -185,13 +185,46 @@ func TestDirectCLIThinkingPropagation(t *testing.T) {
 }
 
 func TestDirectCLIRejectsUnsupportedThinkingBeforeAttempt(t *testing.T) {
-	called := stubRunAttempt(t)
-	var stderr strings.Builder
-	if code := run([]string{"--backend", "agy", "--thinking", "low", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
-		t.Fatalf("run = %d", code)
+	t.Run("unsupported capability", func(t *testing.T) {
+		called := stubRunAttempt(t)
+		var stderr strings.Builder
+		if code := run([]string{"--backend", "gemini-acp", "--thinking", "low", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+			t.Fatalf("run = %d", code)
+		}
+		if called() || !strings.Contains(stderr.String(), "gemini-acp") || !strings.Contains(stderr.String(), "thinking") {
+			t.Fatalf("called=%v stderr=%q", called(), stderr.String())
+		}
+	})
+
+	t.Run("unsupported value", func(t *testing.T) {
+		called := stubRunAttempt(t)
+		var stderr strings.Builder
+		if code := run([]string{"--backend", "agy", "--thinking", "off", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
+			t.Fatalf("run = %d", code)
+		}
+		if called() || !strings.Contains(stderr.String(), `backend "agy" does not support thinking value "off"`) || !strings.Contains(stderr.String(), "allowed: low, medium, high, xhigh") {
+			t.Fatalf("called=%v stderr=%q", called(), stderr.String())
+		}
+	})
+}
+
+// Agy admits low through xhigh on the direct CLI path, so the value must reach
+// the attempt unchanged.
+func TestDirectCLIPropagatesAgyThinking(t *testing.T) {
+	var captured runtime.StartOptions
+	oldRunAttempt := runAttempt
+	t.Cleanup(func() { runAttempt = oldRunAttempt })
+	runAttempt = func(_ context.Context, cfg attemptConfig, _ attemptDeps) attemptResult {
+		captured = cfg.startOptions
+		return attemptResult{exitCode: 0, sessionID: "session", stopReason: "end_turn"}
 	}
-	if called() || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
-		t.Fatalf("called=%v stderr=%q", called(), stderr.String())
+
+	var stderr strings.Builder
+	if code := run([]string{"--backend", "agy", "--thinking", "high", "--dir", t.TempDir(), "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 0 {
+		t.Fatalf("run = %d, stderr=%s", code, stderr.String())
+	}
+	if captured.Thinking != "high" {
+		t.Fatalf("thinking = %q, want high", captured.Thinking)
 	}
 }
 
@@ -220,14 +253,14 @@ func TestDirectCLIKeepsTheRosterBackendInTheThinkingError(t *testing.T) {
 	called := stubRunAttempt(t)
 	dir := t.TempDir()
 	rosterPath := filepath.Join(dir, "roster.json")
-	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"agy","agent":"executor"}}`), 0o600); err != nil {
+	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"gemini-acp","agent":"executor"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stderr strings.Builder
 	if code := run([]string{"--dir", dir, "--roster-file", rosterPath, "--roster-entry", "slow", "--thinking", "low", "--prompt", "work"}, func(string) string { return "" }, &stderr); code != 1 {
 		t.Fatalf("run = %d", code)
 	}
-	if !strings.Contains(stderr.String(), `backend "agy" does not support parameter "thinking"`) {
+	if !strings.Contains(stderr.String(), `backend "gemini-acp" does not support parameter "thinking"`) {
 		t.Fatalf("stderr = %q, want the roster backend's own verdict", stderr.String())
 	}
 	if strings.Contains(stderr.String(), "backend was omitted") {
