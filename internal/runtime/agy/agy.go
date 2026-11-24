@@ -95,11 +95,10 @@ func buildClientArgs(opts runtime.StartOptions, absDir string) []string {
 
 // buildSessionOpenOptions adds the avenor channel-tools MCP server so the child
 // can send and receive broker messages natively. Without broker credentials
-// there is nothing to register, and the session opens with no MCP servers.
-//
-// The run token rides in the server's environment rather than its argv: an
-// argv is readable by any same-user process through /proc/<pid>/cmdline for the
-// lifetime of the child, and the token authenticates as this run.
+// there is nothing to register, and the session opens with no MCP servers. The
+// registration itself comes from runtime.ChannelToolsMCPFor, which the
+// opencode-acp adapter renders into its own config shape; this function only
+// maps it onto an ACP server entry.
 func buildSessionOpenOptions(d deps, runID, brokerToken, brokerURL string) (acp.SessionOpenOptions, error) {
 	if runID == "" || brokerToken == "" || brokerURL == "" {
 		return acp.SessionOpenOptions{}, nil
@@ -108,12 +107,20 @@ func buildSessionOpenOptions(d deps, runID, brokerToken, brokerURL string) (acp.
 	if err != nil {
 		return acp.SessionOpenOptions{}, fmt.Errorf("agy: resolve avenor executable for channel-tools: %w", err)
 	}
+	server, ok := runtime.ChannelToolsMCPFor(bin, runID, brokerToken, brokerURL)
+	if !ok {
+		return acp.SessionOpenOptions{}, nil
+	}
+	env := make([]acp.EnvVar, len(server.Env))
+	for i, pair := range server.Env {
+		env[i] = acp.EnvVar{Name: pair.Name, Value: pair.Value}
+	}
 	return acp.SessionOpenOptions{
 		MCPServers: []acp.MCPServer{{
-			Name:    "avenor-channel-tools",
-			Command: bin,
-			Args:    []string{"channel-tools", "--run-id", runID, "--broker-url", brokerURL},
-			Env:     []acp.EnvVar{{Name: runtime.EnvBrokerToken, Value: brokerToken}},
+			Name:    server.Name,
+			Command: server.Command,
+			Args:    server.Args,
+			Env:     env,
 		}},
 	}, nil
 }
