@@ -29,8 +29,10 @@ type MCPServer struct {
 	Env     []EnvVar `json:"env"`
 }
 
+// SessionOpenOptions is what a backend adds to session/new and session/resume.
+// MCPServers is the ACP-standard server list and the only way a session gets
+// MCP servers.
 type SessionOpenOptions struct {
-	MCP        map[string]any
 	MCPServers []MCPServer
 }
 
@@ -125,9 +127,6 @@ func sessionOpenParams(dir string, opts SessionOpenOptions, extra ...any) map[st
 			servers[i] = copied
 		}
 		params["mcpServers"] = servers
-	}
-	if len(opts.MCP) > 0 {
-		params["mcp"] = opts.MCP
 	}
 	for i := 0; i+1 < len(extra); i += 2 {
 		key, ok := extra[i].(string)

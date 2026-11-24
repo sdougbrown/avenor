@@ -23,30 +23,6 @@ func TestSessionOpenParams(t *testing.T) {
 	if len(servers) != 0 {
 		t.Fatalf("mcpServers len = %d, want 0", len(servers))
 	}
-	if _, exists := got["mcp"]; exists {
-		t.Fatalf("unexpected mcp key in params: %#v", got["mcp"])
-	}
-}
-
-func TestSessionOpenParamsWithMCP(t *testing.T) {
-	got := sessionOpenParams("/repo", SessionOpenOptions{
-		MCP: map[string]any{"tool-a": map[string]any{"type": "local"}},
-	})
-
-	mcp, ok := got["mcp"].(map[string]any)
-	if !ok {
-		t.Fatalf("mcp has type %T, want map[string]any", got["mcp"])
-	}
-	if len(mcp) != 1 {
-		t.Fatalf("mcp len = %d, want 1", len(mcp))
-	}
-	server, ok := mcp["tool-a"].(map[string]any)
-	if !ok {
-		t.Fatalf("mcp[tool-a] has type %T, want map[string]any", mcp["tool-a"])
-	}
-	if server["type"] != "local" {
-		t.Fatalf("server type = %v, want local", server["type"])
-	}
 }
 
 func TestSessionOpenParamsWithMCPServersCopiesAndNormalizesNilSlices(t *testing.T) {
