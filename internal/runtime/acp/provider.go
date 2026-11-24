@@ -1213,39 +1213,37 @@ func resolveAbsDir(dir string) (string, error) {
 	return filepath.Abs(dir)
 }
 
-func (p *Provider) checkWarmLaunchCompat(opts runtime.StartOptions, absDir string, installed clientLaunchSpec) error {
+// checkLaunchCompat reports whether an installed client can serve this launch.
+// The strict form compares every launch field; the warm form compares only the
+// fields this caller set, because a warm launch may reuse a client that was
+// started under defaults the caller never named.
+func (p *Provider) checkLaunchCompat(opts runtime.StartOptions, candidate, installed clientLaunchSpec, strict bool) error {
 	if p.buildClientArgs == nil && !p.setCmdDir {
 		return nil
 	}
-	if opts.Dir != "" && installed.absDir != "" && absDir != installed.absDir {
-		return fmt.Errorf("%s: client already running in dir %q, cannot reuse for %q", p.backendID, installed.absDir, absDir)
+	if (strict || opts.Dir != "") && installed.absDir != "" && candidate.absDir != installed.absDir {
+		return fmt.Errorf("%s: client already running in dir %q, cannot reuse for %q", p.backendID, installed.absDir, candidate.absDir)
 	}
-	if opts.Agent != "" && opts.Agent != installed.agent {
-		return fmt.Errorf("%s: client already running with agent %q, cannot reuse for %q", p.backendID, installed.agent, opts.Agent)
+	if (strict || opts.Agent != "") && candidate.agent != installed.agent {
+		return fmt.Errorf("%s: client already running with agent %q, cannot reuse for %q", p.backendID, installed.agent, candidate.agent)
 	}
-	if len(opts.LaunchWrapper) > 0 && !slices.Equal(opts.LaunchWrapper, installed.wrapper) {
-		return fmt.Errorf("%s: client already running with launch wrapper %v, cannot reuse for %v", p.backendID, installed.wrapper, opts.LaunchWrapper)
+	if (strict || len(opts.LaunchWrapper) > 0) && !slices.Equal(candidate.wrapper, installed.wrapper) {
+		return fmt.Errorf("%s: client already running with launch wrapper %v, cannot reuse for %v", p.backendID, installed.wrapper, candidate.wrapper)
 	}
 	return nil
 }
 
+// checkWarmLaunchCompat compares an existing client against a launch that may
+// adopt it as-is, so a field the launch did not set is not a mismatch.
+func (p *Provider) checkWarmLaunchCompat(opts runtime.StartOptions, candidate, installed clientLaunchSpec) error {
+	return p.checkLaunchCompat(opts, candidate, installed, false)
+}
+
+// checkConcurrentLaunchCompat compares the launch that lost an install race
+// against the winner. Both launches are fully specified here, so every field
+// must match.
 func (p *Provider) checkConcurrentLaunchCompat(opts runtime.StartOptions, candidate, installed clientLaunchSpec) error {
-	if p.buildClientArgs == nil && !p.setCmdDir {
-		return nil
-	}
-	if err := p.checkWarmLaunchCompat(opts, candidate.absDir, installed); err != nil {
-		return err
-	}
-	if installed.absDir != "" && candidate.absDir != installed.absDir {
-		return fmt.Errorf("%s: client already running in dir %q, cannot reuse for %q", p.backendID, installed.absDir, candidate.absDir)
-	}
-	if candidate.agent != installed.agent {
-		return fmt.Errorf("%s: client already running with agent %q, cannot reuse for %q", p.backendID, installed.agent, candidate.agent)
-	}
-	if !slices.Equal(candidate.wrapper, installed.wrapper) {
-		return fmt.Errorf("%s: client already running with launch wrapper %v, cannot reuse for %v", p.backendID, installed.wrapper, candidate.wrapper)
-	}
-	return nil
+	return p.checkLaunchCompat(opts, candidate, installed, true)
 }
 
 // ensureClient returns the provider's client, starting one when none is
@@ -1276,7 +1274,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	installedSpec := p.clientLaunch
 	p.mu.Unlock()
 	if client != nil {
-		if err := p.checkWarmLaunchCompat(opts, absDir, installedSpec); err != nil {
+		if err := p.checkWarmLaunchCompat(opts, spec, installedSpec); err != nil {
 			return nil, nil, err
 		}
 		return client, func() {}, nil

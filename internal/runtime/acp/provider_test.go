@@ -1440,6 +1440,68 @@ func TestLaunchCompatibilityWarmAndConcurrentLoser(t *testing.T) {
 	})
 }
 
+// TestCheckLaunchCompatGuardsDifferByMode pins the one difference between the
+// warm and strict compatibility checks: the warm check only compares a field the
+// launch set, while the strict check compares every field of a fully specified
+// launch. Both modes still skip the dir comparison when the installed client
+// recorded no dir.
+func TestCheckLaunchCompatGuardsDifferByMode(t *testing.T) {
+	installed := clientLaunchSpec{absDir: "/installed", agent: "jockey", wrapper: []string{"/bin/wrap", "--a"}}
+	candidate := clientLaunchSpec{absDir: "/candidate", agent: "mule", wrapper: []string{"/bin/wrap", "--b"}}
+	p := NewProvider(ProviderConfig{BackendID: "agy", SetCmdDir: true}).(*Provider)
+
+	t.Run("warm skips fields the launch left unset", func(t *testing.T) {
+		if err := p.checkWarmLaunchCompat(runtime.StartOptions{}, candidate, installed); err != nil {
+			t.Fatalf("warm compat with no overrides = %v, want nil", err)
+		}
+	})
+
+	cases := []struct {
+		name string
+		opts runtime.StartOptions
+		want string
+	}{
+		{"dir", runtime.StartOptions{Dir: "/candidate"}, "already running in dir"},
+		{"agent", runtime.StartOptions{Agent: "mule"}, "already running with agent"},
+		{"wrapper", runtime.StartOptions{LaunchWrapper: []string{"/bin/wrap", "--b"}}, "already running with launch wrapper"},
+	}
+	for _, c := range cases {
+		t.Run("warm compares the set "+c.name, func(t *testing.T) {
+			if err := p.checkWarmLaunchCompat(c.opts, candidate, installed); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("warm compat err = %v, want %q", err, c.want)
+			}
+		})
+	}
+
+	t.Run("strict compares a field the launch left unset", func(t *testing.T) {
+		// No opts.Dir: the warm check would skip the dir comparison, the strict
+		// check still refuses the reuse.
+		if err := p.checkConcurrentLaunchCompat(runtime.StartOptions{}, candidate, installed); err == nil || !strings.Contains(err.Error(), "already running in dir") {
+			t.Fatalf("strict compat err = %v, want a dir mismatch", err)
+		}
+	})
+
+	t.Run("both modes skip a dir the installed client never recorded", func(t *testing.T) {
+		noDir := clientLaunchSpec{agent: "mule", wrapper: candidate.wrapper}
+		if err := p.checkWarmLaunchCompat(runtime.StartOptions{Dir: "/candidate"}, candidate, noDir); err != nil {
+			t.Fatalf("warm compat against an installed client with no dir = %v, want nil", err)
+		}
+		if err := p.checkConcurrentLaunchCompat(runtime.StartOptions{}, candidate, noDir); err != nil {
+			t.Fatalf("strict compat against an installed client with no dir = %v, want nil", err)
+		}
+	})
+
+	t.Run("backends that ignore dir and args skip both modes", func(t *testing.T) {
+		q := NewProvider(ProviderConfig{BackendID: "gemini-acp"}).(*Provider)
+		if err := q.checkWarmLaunchCompat(runtime.StartOptions{Dir: "/candidate"}, candidate, installed); err != nil {
+			t.Fatalf("warm compat = %v, want nil for a backend with no per-run argv", err)
+		}
+		if err := q.checkConcurrentLaunchCompat(runtime.StartOptions{}, candidate, installed); err != nil {
+			t.Fatalf("strict compat = %v, want nil for a backend with no per-run argv", err)
+		}
+	})
+}
+
 func TestColdWarmPlainAndOptionAwareResumeContract(t *testing.T) {
 	b1 := broker.New("")
 	if err := b1.Start(); err != nil {
