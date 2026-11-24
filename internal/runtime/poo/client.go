@@ -105,7 +105,18 @@ func startClient(ctx context.Context, opts runtime.StartOptions, observe func(se
 	if opts.Launch.Command == "" {
 		return nil, errors.New("no poo executable was resolved for this launch")
 	}
-	proc := launcher.Command(ctx, opts.LaunchWrapper, opts.Launch.Command, LaunchArgs(opts.Launch)...)
+	args := LaunchArgs(opts.Launch)
+	// The session's profile is the agent the launch resolved, and it belongs
+	// in the process arguments: poo serve resolves the settings' own profile
+	// at startup, and that resolution loads the manifest directories the
+	// default profile's words select — a collision with the manifests this
+	// launch adds to the environment when the operator's default directories
+	// name the same entries. Naming the profile here makes the startup word
+	// the session's own.
+	if opts.Agent != "" {
+		args = append(args, "--profile", opts.Agent)
+	}
+	proc := launcher.Command(ctx, opts.LaunchWrapper, opts.Launch.Command, args...)
 	proc.Dir = opts.Dir
 	// The child receives this launch's identity and none of the parent's.
 	// Broker credentials require messaging.
