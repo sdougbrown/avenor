@@ -108,18 +108,44 @@ export interface InboundAskBodyOptions {
  * sender's own claim about its authority.
  */
 export function formatInboundAskBody(ask: InboundAsk, options: InboundAskBodyOptions): string {
-  const sender = ask.from_run_id
-  const from = sender ? ` from \`${sender}\`` : ''
-  // A tell opens no edge, so its reply instruction is absent and the header is
-  // the only place the id a reply names can appear. An ask already carries its
-  // id in that instruction, so it keeps the bare header.
-  const idSegment = !ask.expects_reply && ask.message_id !== ''
-    ? ` (message id \`${sanitize(ask.message_id)}\`)` : ''
+  const { from, idSegment } = inboundAskSegments(ask)
   const body =
     `**📨 ${options.heading}**${from}${idSegment}\n\n` +
     `${PEER_MESSAGE_NOTICE}\n\n` +
     `${ask.message}`
   if (!ask.expects_reply) return body
   return body + `\n\nTo answer, use avenor_message({ action: "reply", reply_to: ${JSON.stringify(ask.message_id)}, message: "..." }).`
+}
+
+/** The header segments every inbound frame shares: the sender segment, and the
+ * tell-only id segment — a tell opens no edge, so its header is the only place
+ * the id a reply names can appear, while an ask already carries its id in the
+ * reply instruction. The model-facing body and the display header both build
+ * from these, so the two halves cannot drift. */
+function inboundAskSegments(ask: InboundAsk): { from: string; idSegment: string } {
+  return {
+    from: ask.from_run_id ? ` from \`${ask.from_run_id}\`` : '',
+    idSegment: !ask.expects_reply && ask.message_id !== ''
+      ? ` (message id \`${sanitize(ask.message_id)}\`)` : '',
+  }
+}
+
+/** The custom message type every inbound peer frame is delivered as. */
+export const PEER_MESSAGE_CUSTOM_TYPE = 'avenor-peer-message'
+
+/** The display half of an inbound peer frame: what the session log shows for a
+ * message whose model-facing content keeps the provenance notice and the reply
+ * instruction. Built from the same segments as the body so the two halves
+ * cannot drift. */
+export interface InboundAskDisplay {
+  /** The plain-text header line: heading, sender, and (for a tell) its id. */
+  header: string
+  /** The sender's own message, exactly as the model reads it. */
+  body: string
+}
+
+export function inboundAskDisplay(ask: InboundAsk, options: InboundAskBodyOptions): InboundAskDisplay {
+  const { from, idSegment } = inboundAskSegments(ask)
+  return { header: `📨 ${options.heading}${from}${idSegment}`, body: ask.message }
 }
 

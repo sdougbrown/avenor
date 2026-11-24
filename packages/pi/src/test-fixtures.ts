@@ -22,6 +22,7 @@ export async function startExtensionHarness(options: {
   sessionManager?: unknown
   onEmit?: (channel: string, payload: unknown) => void
   sendUserMessage?: (text: string, options: { deliverAs: string }) => void
+  sendMessage?: (message: Record<string, unknown>, options?: Record<string, unknown>) => void
 } = {}) {
   const registeredTools: Record<string, any> = {}
   const registeredCommands: Record<string, any> = {}
@@ -32,13 +33,39 @@ export async function startExtensionHarness(options: {
   const sendUserMessage = mock<(text: string, options: { deliverAs: string }) => void>(
     options.sendUserMessage ?? (() => {}),
   )
+  // The default simulates the pinned runtime: sendMessage is void, and a
+  // delivered frame lands in the transcript, which the extension observes as
+  // message_end. Tests stub failures by throwing synchronously — the runtime
+  // itself never does, but the executor's throw is the delivery failure.
+  const sendMessage = mock<(message: Record<string, unknown>, options?: Record<string, unknown>) => void>(
+    options.sendMessage ?? ((message: Record<string, unknown>) => {
+      eventHandlers['message_end']?.({
+        message: {
+          role: 'custom',
+          customType: message.customType,
+          content: message.content,
+          display: message.display,
+          details: message.details,
+        },
+      })
+    }),
+  )
   const emitted: Array<[string, unknown]> = []
   const mockPi = {
-    on: (event: string, handler: any) => { eventHandlers[event] = handler },
+    // Pi supports several handlers per event; the composition keeps the
+    // callable shape, so direct-call sites run every handler in load order.
+    on: (event: string, handler: any) => {
+      const previous = eventHandlers[event]
+      eventHandlers[event] = (...args: any[]) => {
+        previous?.(...args)
+        return handler(...args)
+      }
+    },
     registerTool: (definition: { name: string }) => { registeredTools[definition.name] = definition },
     registerCommand: (name: string, definition: any) => { registeredCommands[name] = definition },
     registerMessageRenderer: () => {},
     sendUserMessage,
+    sendMessage,
     events: {
       emit: mock((channel: string, payload: unknown) => {
         emitted.push([channel, payload])
@@ -89,7 +116,7 @@ export async function startExtensionHarness(options: {
     isIdle: () => true,
   }
   await eventHandlers.session_start({}, ctx)
-  return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, setStatus, setWidget }
+  return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, sendMessage, setStatus, setWidget }
 }
 
 /** A bound provider fake; host-mode tools pass one to the core handlers. */

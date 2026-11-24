@@ -41,7 +41,7 @@ test('top-level peer receives and replies centrally while local child tools keep
     const peers = await tools.avenor_peers.execute('peers', {})
     expect(peers.details.peers.map((p: { label: string }) => p.label)).toEqual(['local-child', 'pi-host', 'claude'])
     b.inbox.push({ type: 'agent_message', payload: { id: 'inbound', from_run_id: 'claude-peer', message: 'ping', expects_reply: true } })
-    await waitFor(() => h!.sendUserMessage.mock.calls.length > 0)
+    await waitFor(() => h!.sendMessage.mock.calls.length > 0)
     expect((await tools.avenor_message.execute('reply', { action: 'reply', reply_to: 'inbound', message: 'pong' })).details.outcome).toBe('replied')
     const reply = b.calls.find(c => c.path === '/send')!.body
     expect(reply.from_run_id).toBe(b.calls.find(c => c.path === '/register')!.body.run_id)
@@ -66,8 +66,8 @@ test('central-only peer listing does not create a supervisor and a tell frame do
     const peers = await h.registeredTools.avenor_peers.execute('p', {})
     expect(peers.details.peers).toHaveLength(2)
     b.inbox.push({ type: 'agent_message', payload: { id: 'tell', from_run_id: 'claude-peer', message: 'hello' } })
-    await waitFor(() => h!.sendUserMessage.mock.calls.length > 0)
-    const frame = String(h.sendUserMessage.mock.calls[0][0])
+    await waitFor(() => h!.sendMessage.mock.calls.length > 0)
+    const frame = String(h.sendMessage.mock.calls[0][0].content)
     expect(frame).toContain('hello')
     expect(frame).toContain('Message from peer')
     // The framing is what makes a peer's words read as a peer's, so it is pinned
@@ -484,10 +484,15 @@ test('retained drained batches retry failed injection in order and install reply
     h = await startExtensionHarness({
       deps: { messageTool },
       extOptions: { topLevelBrokerUrl: 'https://broker.test' },
-      sendUserMessage: text => {
+      sendMessage: (message: Record<string, unknown>) => {
         attempts++
         if (attempts === 1) throw new Error('injection temporarily unavailable')
-        delivered.push(text)
+        delivered.push(String(message.content))
+        // A successful send confirms the same way the runtime does: the frame
+        // lands in the transcript and comes back through message_end.
+        h?.eventHandlers['message_end']?.({
+          message: { role: 'custom', customType: 'avenor-peer-message', details: message.details },
+        })
       },
     })
     for (const [id, message] of [['ask-first', 'first batch message'], ['ask-second', 'second batch message']]) {

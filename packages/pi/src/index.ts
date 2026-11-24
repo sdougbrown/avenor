@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { hostname as osHostname } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { combinePeerProviders } from './peer-provider.js'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
@@ -9,14 +10,17 @@ import {
   createTopLevelPeerEnv,
   registerTopLevelPeer,
   formatInboundAskBody,
+  inboundAskDisplay,
   isInvalidNameRefusal,
   parseControlMessage,
+  PEER_MESSAGE_CUSTOM_TYPE,
   postBroker,
   publishHarnessName,
   publishLastTurn,
   readSubAgentEnv,
   type InboundAsk,
   type InboundAskBodyOptions,
+  type InboundAskDisplay,
   type SubAgentEnv,
 } from './subagent-broker.js'
 import {
@@ -124,6 +128,11 @@ function asStatusResult(raw: StatusResult | StatusListResult): StatusResult {
 }
 
 const POLL_INTERVAL_MS = 3_000
+// A peer frame's send is void — Pi swallows rejections into host-private error
+// listeners — so delivery is confirmed by the frame's own message_end. A frame
+// unconfirmed this long is treated as lost and redelivered by the queue that
+// sent it.
+const PEER_DELIVERY_CONFIRM_TIMEOUT_MS = 30_000
 // Pi's sendUserMessage returns void and swallows async rejections, so an
 // accepted prompt may never come back through message_end. Re-arm delivery
 // after this long instead of leaving the run skipped with its notice unread.
@@ -536,23 +545,76 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * cannot answer. A tell has no reply edge: expects_reply alone decides, so
      * a tell is delivered unregistered, uninterrupting, and without the reply
      * instruction — the same decision the hooks' frames make. */
-    function surfaceInboundAsk(
+    // In-flight peer frame sends, keyed by confirmation id. A frame's own
+    // message_end resolves its entry; the timeout path rejects it.
+    const pendingDeliveries = new Map<string, () => void>()
+
+    async function surfaceInboundAsk(
       pending: Map<string, { from_run_id: string; message_id: string }>,
       ask: InboundAsk,
       heading: InboundAskBodyOptions['heading'],
-    ): void {
+    ): Promise<void> {
       // No role: the wire carries none the broker stamps, so a payload's claim to
       // one is the sender's to make up.
       if (!ask.expects_reply) {
         // The heading parameter names the ask reader; a tell is always a
         // peer's message, so its heading is fixed here. The reply line is the
         // formatter's own decision, derived from expects_reply.
-        pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Message from peer' }), { deliverAs: 'steer' as const })
+        await deliverPeerFrame(ask, { heading: 'Message from peer' })
         return
       }
-      pi.sendUserMessage(formatInboundAskBody(ask, { heading }), { deliverAs: 'steer' as const })
+      await deliverPeerFrame(ask, { heading })
       pending.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
       interruptWaitsForAsk(ask)
+    }
+
+    /** Deliver one inbound peer frame as a custom message. The model reads the
+     * full body (notice and reply instruction included); the registered
+     * 'avenor-peer-message' renderer shows the session log only the header and
+     * the sender's text, so provenance framing stays model-only. A steer
+     * reaches a streaming run mid-flight and triggerTurn starts one when idle,
+     * matching sendUserMessage's delivery without pinning the frame to the
+     * user-message transcript shape.
+     *
+     * Pi's sendMessage is void and swallows rejections into host-private error
+     * listeners, so failure cannot be awaited. Delivery is tracked explicitly:
+     * the send is confirmed by the frame's own message_end landing in the
+     * transcript (every path that lands it — idle append or steering-queue
+     * drain — emits that event with the same message), and a frame unconfirmed
+     * within the timeout rejects. The rejection is what the queues act on:
+     * the sub-agent path leaves the frame queued and the host path parks it
+     * for redelivery, and the loss reports under the deliver operation. */
+    function deliverPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions): Promise<void> {
+      return new Promise<void>((resolve, reject) => {
+        // A fresh key per attempt: a late confirmation from an earlier attempt
+        // that actually landed must not clear a later attempt's pending state.
+        // The key rides in details under confirm_id — message_id stays the
+        // broker's vocabulary (the id a reply correlates against).
+        const confirmKey = randomUUID()
+        const confirm = () => {
+          pendingDeliveries.delete(confirmKey)
+          clearTimeout(timer)
+          // A delivered frame ends the delivery-failure episode, so a failure
+          // after healthy delivery reports again instead of staying latched.
+          clearPeerFailure('deliver')
+          resolve()
+        }
+        const timer = setTimeout(() => {
+          pendingDeliveries.delete(confirmKey)
+          reject(new Error('delivery not confirmed'))
+        }, PEER_DELIVERY_CONFIRM_TIMEOUT_MS)
+        timer.unref?.()
+        pendingDeliveries.set(confirmKey, confirm)
+        pi.sendMessage(
+          {
+            customType: PEER_MESSAGE_CUSTOM_TYPE,
+            content: formatInboundAskBody(ask, options),
+            display: true,
+            details: { ...inboundAskDisplay(ask, options), confirm_id: confirmKey },
+          },
+          { triggerTurn: true, deliverAs: 'steer' as const },
+        )
+      })
     }
 
     interface InterruptibleWait {
@@ -782,14 +844,22 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const intervalMs = options.pollIntervalMs ?? 2000
       let consecutiveFailures = 0
       const queuedMessages: Array<Record<string, unknown>> = []
-      function deliverQueuedMessages(): void {
+      async function deliverQueuedMessages(): Promise<void> {
         while (queuedMessages.length > 0) {
           const msg = queuedMessages[0]
           const ask = parseControlMessage(msg)
           if (ask) {
             // The tell branch lives inside surfaceInboundAsk: expects_reply
-            // alone decides, in every mode.
-            surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
+            // alone decides, in every mode. A delivery failure stops this
+            // pass with the failed frame still queued — the next tick
+            // retries it ahead of the frames that follow, and the failure
+            // never touches the broker-health machinery in the tick's catch.
+            try {
+              await surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
+            } catch (error) {
+              reportPeerFailure('deliver', error, { deliver: notifyOrLog })
+              return
+            }
           }
           queuedMessages.shift()
         }
@@ -808,7 +878,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             await registerCentralPeer(abort.signal)
             attemptedRegistration = false
           }
-          deliverQueuedMessages()
+          await deliverQueuedMessages()
           // The broker encodes an empty queue as JSON null.
           const msgs = ((await postBroker(env, '/poll-control', {}, fetch, AbortSignal.any([abort.signal, AbortSignal.timeout(15000)]))) ?? []) as Array<Record<string, unknown>>
           if (generation !== subAgentPollGeneration) return
@@ -819,7 +889,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
           consecutiveFailures = 0
           queuedMessages.push(...msgs)
-          deliverQueuedMessages()
+          await deliverQueuedMessages()
           await publishCentralTurn()
         } catch (error) {
           // Broker unreachable while it is starting up is expected; persistent
@@ -861,6 +931,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     let hostReceiveGeneration: string | undefined
     // pending inbound asks keyed by broker message_id so a reply can reach the asker.
     const hostPendingAsks = new Map<string, { from_run_id: string; message_id: string }>()
+    // Drained asks awaiting delivery. The receive consumes the broker queue,
+    // so a failed delivery parks the ask here — the same redelivery contract
+    // the sub-agent path honors with queuedMessages — instead of losing it.
+    const hostDeliveryQueue: InboundAsk[] = []
 
     function stopHostAskPoll(): void {
       hostPollGeneration++
@@ -905,7 +979,21 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (generation !== hostPollGeneration) return
           if (received.generation) hostReceiveGeneration = received.generation
           for (const ask of received.asks) {
-            surfaceInboundAsk(hostPendingAsks, ask, 'Ask from sub-agent')
+            // New asks line up behind the redeliveries they must not overtake.
+            hostDeliveryQueue.push(ask)
+          }
+          while (hostDeliveryQueue.length > 0) {
+            const ask = hostDeliveryQueue[0]
+            try {
+              await surfaceInboundAsk(hostPendingAsks, ask, 'Ask from sub-agent')
+            } catch (error) {
+              // The failed ask stays queued — the next tick retries it ahead
+              // of the asks that follow — and the loss reports under its own
+              // operation rather than the broker's health.
+              reportPeerFailure('deliver', error, { deliver: notifyOrLog })
+              break
+            }
+            hostDeliveryQueue.shift()
           }
         } catch {
           // No supervisor/broker yet — this is expected until a supervisor starts a broker.
@@ -2088,6 +2176,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         case 'register': return 'central peer registration'
         case 'publish-turn': return 'central last-turn publication'
         case 'retire': return 'central peer retirement confirmation'
+        case 'deliver': return 'inbound peer delivery'
       }
     }
 
@@ -2386,6 +2475,30 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (i < lines.length - 1) text += '\n'
       }
       return new Text(text, 0, 0)
+    })
+
+    // The session log shows an inbound peer frame's header and the sender's
+    // text; the provenance notice and the reply instruction stay model-only in
+    // the message content. Every frame carries its display details: the only
+    // writer is deliverPeerFrame, which introduced this message type.
+    pi.registerMessageRenderer<InboundAskDisplay>(PEER_MESSAGE_CUSTOM_TYPE, (message, _options, theme: Theme) => {
+      const details = message.details as InboundAskDisplay
+      const text = `${details.header}\n\n${details.body}`
+      const lines = text.split('\n')
+      const rendered = lines.map((line, index) => index === 0 ? theme.fg('accent', theme.bold(line)) : line).join('\n')
+      return new Text(rendered, 0, 0)
+    })
+
+    // A peer frame's delivery is confirmed by the frame's own message_end:
+    // every path that lands the custom message in the transcript — appended
+    // when idle, or processed from the steering queue mid-run — emits that
+    // event with the same message object.
+    pi.on('message_end', (event) => {
+      const message = event.message
+      if (!message) return
+      if (message.role !== 'custom' || message.customType !== PEER_MESSAGE_CUSTOM_TYPE) return
+      const details = message.details as { confirm_id?: string } | undefined
+      if (details?.confirm_id) pendingDeliveries.get(details.confirm_id)?.()
     })
 
     pi.registerTool({

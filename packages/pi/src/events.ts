@@ -37,6 +37,7 @@ export type PeerErrorOperation =
   | 'register'
   | 'publish-turn'
   | 'retire'
+  | 'deliver'
 
 export interface PeerErrorPayload {
   /** Which peer operation failed. */
