@@ -843,6 +843,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const generation = subAgentPollGeneration
       const intervalMs = options.pollIntervalMs ?? 2000
       let consecutiveFailures = 0
+      // Whether this episode has already reported a refusal. A class flip
+      // mid-episode reports immediately and once: transient failures spend
+      // the 1/3 gate, but the refusal the broker will keep repeating must be
+      // heard even when it arrives at tick four or later.
+      let episodeReportedRefusal = false
       const queuedMessages: Array<Record<string, unknown>> = []
       async function deliverQueuedMessages(): Promise<void> {
         while (queuedMessages.length > 0) {
@@ -888,6 +893,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           // Any clean poll ends the failure episode — a brief one-tick outage
           // clears the latch too, so the next episode still reports.
           if (consecutiveFailures > 0) clearPeerFailure('poll')
+          episodeReportedRefusal = false
           consecutiveFailures = 0
           queuedMessages.push(...msgs)
           await deliverQueuedMessages()
@@ -908,7 +914,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             return
           }
           consecutiveFailures++
-          if (consecutiveFailures === 1 || consecutiveFailures === 3) {
+          const refusal = peerFailureTerminal(operation, error)
+          if (refusal && !episodeReportedRefusal) {
+            episodeReportedRefusal = true
+            reportPeerFailure(operation, error)
+          } else if (consecutiveFailures === 1 || consecutiveFailures === 3) {
             reportPeerFailure(operation, error)
           }
         }

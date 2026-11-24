@@ -3,7 +3,7 @@ import type { ExtensionDeps } from './index.js'
 import type { SubAgentEnv } from './subagent-broker.js'
 import { messageTool as realMessageTool } from '@dougbots/avenor-core'
 import { CHANNEL_PEER_ERROR } from './events.js'
-import { makeMessageProvider, settleWithin, startExtensionHarness, waitFor, waitUntilAborted } from './test-fixtures.js'
+import { makeMessageProvider, scaleMs, settleWithin, startExtensionHarness, waitFor, waitUntilAborted } from './test-fixtures.js'
 
 const subAgentEnv = { brokerUrl: 'http://127.0.0.1:1', runId: 'rt_child', token: 'tok' } as const
 
@@ -263,6 +263,34 @@ describe('sub-agent broker mode (integration)', () => {
       // The poll itself was healthy throughout: no poll-failure latch fired.
       expect(harness!.emitted.some(([channel, payload]) =>
         channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'poll')).toBe(false)
+    } finally {
+      console.error = originalError
+      await harness?.eventHandlers.session_shutdown({}, {})
+      fetchStub.restore()
+    }
+  })
+
+  it('reports a refusal that arrives mid-episode after transient failures', async () => {
+    const errorLog: string[] = []
+    const originalError = console.error
+    console.error = ((...args: unknown[]) => { errorLog.push(args.map(String).join(' ')) }) as typeof console.error
+    // Three 503s spend the 1/3 gate, then the broker flips to refusing this
+    // identity forever. The refusal is a failure class the person has not
+    // heard about, so it must report even though the episode's gate is spent.
+    let pollTicks = 0
+    const fetchStub = stubBrokerFetch([], 0, 0, 0, {
+      '/poll-control': () => {
+        pollTicks++
+        return pollTicks < 4 ? Response.json({}, { status: 503 }) : Response.json({}, { status: 401 })
+      },
+    })
+    let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
+    try {
+      harness = await startSubAgentExtension({ fetchStub, pollIntervalMs: 5 })
+      await waitFor(() => errorLog.filter(line => line.includes('central broker poll failed')).length === 1, scaleMs(5000))
+      // The refusal latch holds: later ticks keep failing without another line.
+      await waitFor(() => pollTicks >= 8, scaleMs(5000))
+      expect(errorLog.filter(line => line.includes('central broker poll failed'))).toHaveLength(1)
     } finally {
       console.error = originalError
       await harness?.eventHandlers.session_shutdown({}, {})
