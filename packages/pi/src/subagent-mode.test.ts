@@ -254,7 +254,7 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub, pollIntervalMs: 5 })
-      harness.sendMessage.mockImplementation(async () => { throw new Error('session is not accepting messages') })
+      harness.sendMessage.mockImplementation(() => { throw new Error('session is not accepting messages') })
       await waitFor(() => harness!.sendMessage.mock.calls.length >= 2)
       await waitFor(() => harness!.emitted.some(([channel, payload]) =>
         channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver'))

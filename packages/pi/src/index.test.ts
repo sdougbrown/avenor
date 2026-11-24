@@ -961,7 +961,13 @@ describe('Avenor Pi extension', () => {
         registeredRenderers.push(type)
       },
       sendUserMessage: mock(() => {}),
-      sendMessage: mock(async () => {}),
+      sendMessage: mock((message: Record<string, unknown>) => {
+        // Simulate the runtime's confirm path: a delivered frame lands in the
+        // transcript and comes back through message_end.
+        for (const handler of eventHandlers.get('message_end') ?? []) {
+          handler({ message: { role: 'custom', customType: message.customType, content: message.content, display: message.display, details: message.details } })
+        }
+      }),
       events: mockBus,
     }
 
@@ -3891,7 +3897,7 @@ describe('Avenor Pi extension', () => {
 
     // The ask body never reaches the session, so the agent has nothing to
     // answer and the wait must keep holding instead of reporting the ask.
-    h.sendMessage.mockImplementation(async () => { throw new Error('session is not accepting messages') })
+    h.sendMessage.mockImplementation(() => { throw new Error('session is not accepting messages') })
     const receivesBefore = brokerReceiveTool.mock.calls.length
     deliver()
     await waitFor(() => brokerReceiveTool.mock.calls.length >= receivesBefore + 2)

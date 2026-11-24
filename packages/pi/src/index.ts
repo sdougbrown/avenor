@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { hostname as osHostname } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { combinePeerProviders } from './peer-provider.js'
 import { Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
@@ -127,6 +128,11 @@ function asStatusResult(raw: StatusResult | StatusListResult): StatusResult {
 }
 
 const POLL_INTERVAL_MS = 3_000
+// A peer frame's send is void — Pi swallows rejections into host-private error
+// listeners — so delivery is confirmed by the frame's own message_end. A frame
+// unconfirmed this long is treated as lost and redelivered by the queue that
+// sent it.
+const PEER_DELIVERY_CONFIRM_TIMEOUT_MS = 30_000
 // Pi's sendUserMessage returns void and swallows async rejections, so an
 // accepted prompt may never come back through message_end. Re-arm delivery
 // after this long instead of leaving the run skipped with its notice unread.
@@ -539,6 +545,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * cannot answer. A tell has no reply edge: expects_reply alone decides, so
      * a tell is delivered unregistered, uninterrupting, and without the reply
      * instruction — the same decision the hooks' frames make. */
+    // In-flight peer frame sends, keyed by confirmation id. A frame's own
+    // message_end resolves its entry; the timeout path rejects it.
+    const pendingDeliveries = new Map<string, () => void>()
+
     async function surfaceInboundAsk(
       pending: Map<string, { from_run_id: string; message_id: string }>,
       ask: InboundAsk,
@@ -564,21 +574,45 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * the sender's text, so provenance framing stays model-only. A steer
      * reaches a streaming run mid-flight and triggerTurn starts one when idle,
      * matching sendUserMessage's delivery without pinning the frame to the
-     * user-message transcript shape. Rejections propagate so a failed delivery
-     * stays queued for the next tick instead of being dropped. */
-    async function deliverPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions): Promise<void> {
-      await pi.sendMessage(
-        {
-          customType: PEER_MESSAGE_CUSTOM_TYPE,
-          content: formatInboundAskBody(ask, options),
-          display: true,
-          details: inboundAskDisplay(ask, options),
-        },
-        { triggerTurn: true, deliverAs: 'steer' as const },
-      )
-      // A delivered frame ends the delivery-failure episode, so a failure
-      // after healthy delivery reports again instead of staying latched.
-      clearPeerFailure('deliver')
+     * user-message transcript shape.
+     *
+     * Pi's sendMessage is void and swallows rejections into host-private error
+     * listeners, so failure cannot be awaited. Delivery is tracked explicitly:
+     * the send is confirmed by the frame's own message_end landing in the
+     * transcript (every path that lands it — idle append or steering-queue
+     * drain — emits that event with the same message), and a frame unconfirmed
+     * within the timeout rejects. The rejection is what the queues act on:
+     * the sub-agent path leaves the frame queued and the host path parks it
+     * for redelivery, and the loss reports under the deliver operation. */
+    function deliverPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions): Promise<void> {
+      return new Promise<void>((resolve, reject) => {
+        // A fresh key per attempt: a late confirmation from an earlier attempt
+        // that actually landed must not clear a later attempt's pending state.
+        const confirmKey = randomUUID()
+        const confirm = () => {
+          pendingDeliveries.delete(confirmKey)
+          clearTimeout(timer)
+          // A delivered frame ends the delivery-failure episode, so a failure
+          // after healthy delivery reports again instead of staying latched.
+          clearPeerFailure('deliver')
+          resolve()
+        }
+        const timer = setTimeout(() => {
+          pendingDeliveries.delete(confirmKey)
+          reject(new Error('delivery not confirmed'))
+        }, PEER_DELIVERY_CONFIRM_TIMEOUT_MS)
+        timer.unref?.()
+        pendingDeliveries.set(confirmKey, confirm)
+        pi.sendMessage(
+          {
+            customType: PEER_MESSAGE_CUSTOM_TYPE,
+            content: formatInboundAskBody(ask, options),
+            display: true,
+            details: { ...inboundAskDisplay(ask, options), message_id: confirmKey },
+          },
+          { triggerTurn: true, deliverAs: 'steer' as const },
+        )
+      })
     }
 
     interface InterruptibleWait {
@@ -2451,6 +2485,17 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const lines = text.split('\n')
       const rendered = lines.map((line, index) => index === 0 ? theme.fg('accent', theme.bold(line)) : line).join('\n')
       return new Text(rendered, 0, 0)
+    })
+
+    // A peer frame's delivery is confirmed by the frame's own message_end:
+    // every path that lands the custom message in the transcript — appended
+    // when idle, or processed from the steering queue mid-run — emits that
+    // event with the same message object.
+    pi.on('message_end', (event) => {
+      const message = event.message
+      if (message.role !== 'custom' || message.customType !== PEER_MESSAGE_CUSTOM_TYPE) return
+      const details = message.details as { message_id?: string } | undefined
+      if (details?.message_id) pendingDeliveries.get(details.message_id)?.()
     })
 
     pi.registerTool({

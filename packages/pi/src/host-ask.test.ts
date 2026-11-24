@@ -84,7 +84,7 @@ describe('host inbound ask delivery', () => {
     const brokerReceiveTool = drainOnce(asks)
     const harness = await startHostExtension(brokerReceiveTool, async () => {}, { pollIntervalMs: 10 })
     try {
-      harness.sendMessage.mockImplementationOnce(async () => { throw new Error('session is not accepting messages') })
+      harness.sendMessage.mockImplementationOnce(() => { throw new Error('session is not accepting messages') })
       await waitFor(() => harness.sendMessage.mock.calls.length >= 3, scaleMs(1500))
       const bodies = harness.sendMessage.mock.calls.map(([m]) => String((m as Record<string, unknown>).content))
       expect(bodies[0]).toContain('delivered second try')

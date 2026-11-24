@@ -484,10 +484,15 @@ test('retained drained batches retry failed injection in order and install reply
     h = await startExtensionHarness({
       deps: { messageTool },
       extOptions: { topLevelBrokerUrl: 'https://broker.test' },
-      sendMessage: async (message: { content?: unknown }) => {
+      sendMessage: (message: Record<string, unknown>) => {
         attempts++
         if (attempts === 1) throw new Error('injection temporarily unavailable')
         delivered.push(String(message.content))
+        // A successful send confirms the same way the runtime does: the frame
+        // lands in the transcript and comes back through message_end.
+        h?.eventHandlers['message_end']?.({
+          message: { role: 'custom', customType: 'avenor-peer-message', details: message.details },
+        })
       },
     })
     for (const [id, message] of [['ask-first', 'first batch message'], ['ask-second', 'second batch message']]) {
