@@ -554,9 +554,8 @@ func TestSessionStartAndMCPServers(t *testing.T) {
 		waitForLog(t, logPath, `"method":"session/new"`)
 		log := readLog(t, logPath)
 		for _, want := range []string{
-			`"mcpServers":[{"name":"avenor-channel-tools","command":"/opt/avenor","args":["channel-tools","--run-id","run_mcp","--token","`,
-			`"--broker-url","` + b.URL() + `"`,
-			`"env":[]`,
+			`"mcpServers":[{"name":"avenor-channel-tools","command":"/opt/avenor","args":["channel-tools","--run-id","run_mcp","--broker-url","` + b.URL() + `"],"env":[{"name":"AVENOR_BROKER_TOKEN","value":"`,
+			`"}]}]`,
 		} {
 			if !strings.Contains(log, want) {
 				t.Fatalf("session/new missing %q; log:\n%s", want, log)

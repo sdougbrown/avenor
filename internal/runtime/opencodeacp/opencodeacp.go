@@ -41,7 +41,9 @@ func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerURL str
 
 	// Inject the avenor-channel-tools MCP server when broker info is available.
 	// Without a broker (e.g. CLI-only runs), skip the MCP injection — the mode
-	// override below is the only thing needed.
+	// override below is the only thing needed. The run token rides in the
+	// server's environment, never its command: a command array becomes an argv
+	// readable by any same-user process through /proc/<pid>/cmdline.
 	mcpOverride := map[string]any{}
 	if runID != "" && brokerToken != "" && brokerURL != "" {
 		avenorBin, err := os.Executable()
@@ -53,7 +55,10 @@ func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerURL str
 				"avenor-channel-tools": map[string]any{
 					"type":    "local",
 					"enabled": true,
-					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", brokerURL},
+					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--broker-url", brokerURL},
+					"environment": map[string]any{
+						runtime.EnvBrokerToken: brokerToken,
+					},
 				},
 			},
 			"tools": map[string]any{

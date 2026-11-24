@@ -96,6 +96,10 @@ func buildClientArgs(opts runtime.StartOptions, absDir string) []string {
 // buildSessionOpenOptions adds the avenor channel-tools MCP server so the child
 // can send and receive broker messages natively. Without broker credentials
 // there is nothing to register, and the session opens with no MCP servers.
+//
+// The run token rides in the server's environment rather than its argv: an
+// argv is readable by any same-user process through /proc/<pid>/cmdline for the
+// lifetime of the child, and the token authenticates as this run.
 func buildSessionOpenOptions(d deps, runID, brokerToken, brokerURL string) (acp.SessionOpenOptions, error) {
 	if runID == "" || brokerToken == "" || brokerURL == "" {
 		return acp.SessionOpenOptions{}, nil
@@ -108,8 +112,8 @@ func buildSessionOpenOptions(d deps, runID, brokerToken, brokerURL string) (acp.
 		MCPServers: []acp.MCPServer{{
 			Name:    "avenor-channel-tools",
 			Command: bin,
-			Args:    []string{"channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", brokerURL},
-			Env:     []acp.EnvVar{},
+			Args:    []string{"channel-tools", "--run-id", runID, "--broker-url", brokerURL},
+			Env:     []acp.EnvVar{{Name: runtime.EnvBrokerToken, Value: brokerToken}},
 		}},
 	}, nil
 }

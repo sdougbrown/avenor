@@ -1473,7 +1473,8 @@ func TestColdWarmPlainAndOptionAwareResumeContract(t *testing.T) {
 					{
 						Name:    "avenor-channel-tools",
 						Command: "/bin/avenor",
-						Args:    []string{"channel-tools", "--run-id", runID, "--token", token, "--broker-url", url},
+						Args:    []string{"channel-tools", "--run-id", runID, "--broker-url", url},
+						Env:     []EnvVar{{Name: runtime.EnvBrokerToken, Value: token}},
 					},
 				},
 			}, nil

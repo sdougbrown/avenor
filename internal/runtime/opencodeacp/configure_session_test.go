@@ -222,14 +222,28 @@ func TestBuildClientEnv(t *testing.T) {
 		}
 		command = append(command, value)
 	}
-	if len(command) != 8 {
-		t.Fatalf("command len = %d, want 8", len(command))
+	if len(command) != 6 {
+		t.Fatalf("command len = %d, want 6", len(command))
 	}
-	if command[0] != mustExecutable(t) || command[1] != "channel-tools" || command[2] != "--run-id" || command[3] != "run_123" || command[4] != "--token" || command[5] != "tok_456" || command[6] != "--broker-url" {
+	if command[0] != mustExecutable(t) || command[1] != "channel-tools" || command[2] != "--run-id" || command[3] != "run_123" || command[4] != "--broker-url" {
 		t.Fatalf("unexpected command: %#v", command)
 	}
-	if command[7] != "http://127.0.0.1:9999" {
-		t.Fatalf("broker url arg = %q, want http://127.0.0.1:9999", command[7])
+	if command[5] != "http://127.0.0.1:9999" {
+		t.Fatalf("broker url arg = %q, want http://127.0.0.1:9999", command[5])
+	}
+	// The run token must not appear on the command line: a spawned MCP server's
+	// argv is readable through /proc/<pid>/cmdline.
+	for _, arg := range command {
+		if strings.Contains(arg, "tok_456") {
+			t.Fatalf("run token leaked into the command: %#v", command)
+		}
+	}
+	environment, ok := server["environment"].(map[string]any)
+	if !ok {
+		t.Fatalf("server environment has type %T, want map[string]any", server["environment"])
+	}
+	if environment[runtime.EnvBrokerToken] != "tok_456" {
+		t.Fatalf("environment[%s] = %v, want tok_456", runtime.EnvBrokerToken, environment[runtime.EnvBrokerToken])
 	}
 	tools, ok := payload["tools"].(map[string]any)
 	if !ok {
