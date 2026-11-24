@@ -83,7 +83,7 @@ The response is also JSON:
 |-------|---------|---------------|
 | `outcome` | "selected" | Either "selected" (the operator chose one of the provided options) or "cancelled" (the request was cancelled, blocking execution). Omit to default to "selected". |
 | `option_id` | Required | The `optionId` from the request's option list. Avenor uses this to determine whether to allow or deny. |
-| `message` | Empty string | Optional valid UTF-8 note relayed to the backend, up to 64 KiB. It must be nonempty when the selected option has `requiresMessage: true`, including an `agy` question write-in. |
+| `message` | Empty string | Optional valid UTF-8 note relayed to the backend, up to 64 KiB. It must be nonempty when the selected option has `requiresMessage: true`. |
 
 ## Important: Stale response cleanup
 

@@ -31,6 +31,7 @@ type ClientConfig struct {
 	// owns the backend process tree.
 	Wrapper              []string
 	Dir                  string
+	SetCmdDir            bool
 	Env                  map[string]string
 	AutoAnswerPermission bool
 	AppendCWDArg         bool
@@ -48,6 +49,9 @@ type Client struct {
 	dir                  string
 	autoAnswerPermission bool
 	events               chan events.Event
+	stopEvents           chan struct{}
+	stopEventsOnce       sync.Once
+	reqWG                sync.WaitGroup
 	done                 chan struct{}
 	readErr              error
 	nextID               atomic.Uint64
@@ -75,6 +79,9 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		args = append(args, "--cwd", absDir)
 	}
 	cmd := launcher.Command(ctx, cfg.Wrapper, cfg.Bin, args...)
+	if cfg.SetCmdDir {
+		cmd.Dir = absDir
+	}
 	cmd.Env = runtime.LaunchEnv(mergeEnviron(os.Environ(), cfg.Env), cfg.Provenance)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -91,6 +98,7 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		stdout:               stdout,
 		dir:                  absDir,
 		events:               make(chan events.Event, 128),
+		stopEvents:           make(chan struct{}),
 		done:                 make(chan struct{}),
 		pending:              map[string]chan rpcEnvelope{},
 		permissions:          map[string]rpcEnvelope{},
@@ -125,16 +133,27 @@ func (c *Client) Events() <-chan events.Event {
 	return c.events
 }
 
+func (c *Client) closeStopEvents() {
+	if c.stopEvents != nil {
+		c.stopEventsOnce.Do(func() {
+			close(c.stopEvents)
+		})
+	}
+}
+
 func (c *Client) Close() error {
-	_ = c.stdin.Close()
-	if c.cmd.Process != nil {
+	c.closeStopEvents()
+	if c.stdin != nil {
+		_ = c.stdin.Close()
+	}
+	if c.cmd != nil && c.cmd.Process != nil {
 		_ = c.cmd.Process.Signal(syscall.SIGTERM)
 	}
 
 	select {
 	case <-c.done:
 	case <-time.After(2 * time.Second):
-		if c.cmd.Process != nil {
+		if c.cmd != nil && c.cmd.Process != nil {
 			_ = c.cmd.Process.Kill()
 		}
 		<-c.done
@@ -227,8 +246,12 @@ func (c *Client) write(msg rpcEnvelope) error {
 }
 
 func (c *Client) readLoop() {
-	defer close(c.done)
-	defer close(c.events)
+	defer func() {
+		c.closeStopEvents()
+		c.reqWG.Wait()
+		close(c.events)
+		close(c.done)
+	}()
 
 	reader := bufio.NewReader(c.stdout)
 	for {
@@ -267,7 +290,11 @@ func (c *Client) dispatch(msg rpcEnvelope) {
 	}
 
 	if len(msg.ID) > 0 && msg.Method != "" {
-		go c.handleRequest(msg)
+		c.reqWG.Add(1)
+		go func() {
+			defer c.reqWG.Done()
+			c.handleRequest(msg)
+		}()
 		return
 	}
 
@@ -277,7 +304,10 @@ func (c *Client) dispatch(msg rpcEnvelope) {
 
 	event, err := mapSessionUpdate(msg.Params)
 	if err == nil {
-		c.events <- event
+		select {
+		case c.events <- event:
+		case <-c.stopEvents:
+		}
 	}
 }
 
@@ -290,7 +320,10 @@ func (c *Client) handleRequest(msg rpcEnvelope) {
 			c.permissions[requestID] = msg
 			c.permissionMu.Unlock()
 		}
-		c.events <- mapPermissionRequestWithID(msg.Params, requestID)
+		select {
+		case c.events <- mapPermissionRequestWithID(msg.Params, requestID):
+		case <-c.stopEvents:
+		}
 		if c.autoAnswerPermission {
 			_ = c.write(rpcEnvelope{
 				JSONRPC: "2.0",

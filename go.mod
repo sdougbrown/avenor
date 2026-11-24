@@ -14,7 +14,6 @@ require (
 	github.com/sdougbrown/poo v0.2.1-0.20261109194840-03fb08010428
 	github.com/umpire-tools/umpire-go v0.1.0
 	golang.org/x/sys v0.42.0
-	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
 

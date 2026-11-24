@@ -87,9 +87,9 @@ func app() *clicontract.App {
 				Name:  "channel-tools",
 				Short: "run the channel tools loop for one broker run",
 				Flags: []clicontract.Flag{
-					{Name: "run-id", Kind: clicontract.String, Usage: "broker run id", Required: true},
-					{Name: "token", Kind: clicontract.String, Usage: "broker auth token", Required: true},
-					{Name: "broker-url", Kind: clicontract.String, Usage: "broker HTTP base URL", Required: true},
+					{Name: "run-id", Kind: clicontract.String, Usage: "broker run id (default: $AVENOR_RUN_ID)"},
+					{Name: "token", Kind: clicontract.String, Usage: "broker auth token (default: $AVENOR_BROKER_TOKEN; prefer the environment to argv)"},
+					{Name: "broker-url", Kind: clicontract.String, Usage: "broker HTTP base URL (default: $AVENOR_BROKER_URL)"},
 				},
 				Handle: handleChannelTools,
 			},

@@ -1,6 +1,11 @@
 package acp
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestMergeEnvironReplacesExistingKeys(t *testing.T) {
 	base := []string{
@@ -94,5 +99,33 @@ func TestMergeEnvironReplacesMultiple(t *testing.T) {
 	}
 	if len(merged) != 4 {
 		t.Fatalf("len(merged) = %d, want 4", len(merged))
+	}
+}
+
+// TestClientPermissionRequestThenImmediateEOFDoesNotRace verifies that a child
+// emitting session/request_permission right before exiting never triggers a
+// send-on-closed-channel panic in handleRequest vs readLoop.
+func TestClientPermissionRequestThenImmediateEOFDoesNotRace(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "perm-eof.sh")
+	body := `#!/bin/sh
+for i in 1 2 3 4 5 6 7 8; do
+  printf '{"jsonrpc":"2.0","id":%d,"method":"session/request_permission","params":{"sessionId":"ses_race","options":[{"optionId":"allow","kind":"allow"}]}}\n' "$i"
+done
+exit 0
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	for iter := 0; iter < 20; iter++ {
+		client, err := NewClient(context.Background(), ClientConfig{
+			Bin: script,
+		})
+		if err != nil {
+			t.Fatalf("iter %d NewClient: %v", iter, err)
+		}
+		for range client.Events() {
+		}
+		_ = client.Close()
 	}
 }

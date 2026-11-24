@@ -6,7 +6,7 @@ import (
 )
 
 func TestMapPromptResponseNormalisesUsage(t *testing.T) {
-	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": { "inputTokens": 10, "outputTokens": 5, "totalTokens": 15, "cachedReadTokens": 3 } }`)
+	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": { "inputTokens": 10, "outputTokens": 5, "totalTokens": 15, "cachedReadTokens": 3, "cachedWriteTokens": 4, "thoughtTokens": 6 } }`)
 
 	event, err := mapPromptResponse("ses_test", raw)
 	if err != nil {
@@ -38,23 +38,22 @@ func TestMapPromptResponseNormalisesUsage(t *testing.T) {
 	if usage["cached_read_tokens"] != float64(3) {
 		t.Errorf("usage.cached_read_tokens = %v, want 3", usage["cached_read_tokens"])
 	}
+	if usage["cached_write_tokens"] != float64(4) {
+		t.Errorf("usage.cached_write_tokens = %v, want 4", usage["cached_write_tokens"])
+	}
+	if usage["thought_tokens"] != float64(6) {
+		t.Errorf("usage.thought_tokens = %v, want 6", usage["thought_tokens"])
+	}
 
-	if _, exists := event.Fields["inputTokens"]; exists {
-		t.Error("event.Fields[\"inputTokens\"] exists at top level, should be nested under usage")
-	}
-	if _, exists := event.Fields["outputTokens"]; exists {
-		t.Error("event.Fields[\"outputTokens\"] exists at top level")
-	}
-	if _, exists := event.Fields["totalTokens"]; exists {
-		t.Error("event.Fields[\"totalTokens\"] exists at top level")
-	}
-	if _, exists := event.Fields["cachedReadTokens"]; exists {
-		t.Error("event.Fields[\"cachedReadTokens\"] exists at top level")
+	for _, topKey := range []string{"inputTokens", "outputTokens", "totalTokens", "cachedReadTokens", "cachedWriteTokens", "thoughtTokens"} {
+		if _, exists := event.Fields[topKey]; exists {
+			t.Errorf("event.Fields[%q] exists at top level, should be nested under usage", topKey)
+		}
 	}
 }
 
 func TestMapPromptResponseSnakeCaseFallback(t *testing.T) {
-	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": { "input_tokens": 7, "output_tokens": 3, "total_tokens": 10, "cached_read_tokens": 2 } }`)
+	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": { "input_tokens": 7, "output_tokens": 3, "total_tokens": 10, "cached_read_tokens": 2, "cached_write_tokens": 9, "thought_tokens": 11 } }`)
 
 	event, err := mapPromptResponse("ses_snake", raw)
 	if err != nil {
@@ -74,8 +73,40 @@ func TestMapPromptResponseSnakeCaseFallback(t *testing.T) {
 	if usage["output_tokens"] != float64(3) {
 		t.Errorf("usage.output_tokens = %v, want 3", usage["output_tokens"])
 	}
+	if usage["total_tokens"] != float64(10) {
+		t.Errorf("usage.total_tokens = %v, want 10", usage["total_tokens"])
+	}
 	if usage["cached_read_tokens"] != float64(2) {
 		t.Errorf("usage.cached_read_tokens = %v, want 2", usage["cached_read_tokens"])
+	}
+	if usage["cached_write_tokens"] != float64(9) {
+		t.Errorf("usage.cached_write_tokens = %v, want 9", usage["cached_write_tokens"])
+	}
+	if usage["thought_tokens"] != float64(11) {
+		t.Errorf("usage.thought_tokens = %v, want 11", usage["thought_tokens"])
+	}
+}
+
+func TestMapPromptResponsePreservesExplicitZeroUsage(t *testing.T) {
+	raw := json.RawMessage(`{ "stopReason": "end_turn", "usage": { "inputTokens": 0, "outputTokens": 0, "totalTokens": 0, "cachedReadTokens": 0, "cachedWriteTokens": 0, "thoughtTokens": 0 } }`)
+
+	event, err := mapPromptResponse("ses_zero", raw)
+	if err != nil {
+		t.Fatalf("mapPromptResponse() error = %v", err)
+	}
+	usage, ok := event.Fields["usage"].(map[string]any)
+	if !ok {
+		t.Fatal("event.Fields[\"usage\"] is missing or not a map")
+	}
+	for _, key := range []string{"input_tokens", "output_tokens", "total_tokens", "cached_read_tokens", "cached_write_tokens", "thought_tokens"} {
+		val, exists := usage[key]
+		if !exists {
+			t.Errorf("usage[%q] was omitted, want explicit 0 preserved", key)
+			continue
+		}
+		if val != float64(0) {
+			t.Errorf("usage[%q] = %v, want 0", key, val)
+		}
 	}
 }
 
@@ -93,14 +124,10 @@ func TestMapPromptResponseOmitsNilUsageKeys(t *testing.T) {
 	if usage["output_tokens"] != float64(5) {
 		t.Errorf("usage.output_tokens = %v, want 5", usage["output_tokens"])
 	}
-	if _, exists := usage["input_tokens"]; exists {
-		t.Error("usage.input_tokens should be omitted when absent")
-	}
-	if _, exists := usage["total_tokens"]; exists {
-		t.Error("usage.total_tokens should be omitted when absent")
-	}
-	if _, exists := usage["cached_read_tokens"]; exists {
-		t.Error("usage.cached_read_tokens should be omitted when absent")
+	for _, absentKey := range []string{"input_tokens", "total_tokens", "cached_read_tokens", "cached_write_tokens", "thought_tokens"} {
+		if _, exists := usage[absentKey]; exists {
+			t.Errorf("usage.%s should be omitted when absent", absentKey)
+		}
 	}
 }
 

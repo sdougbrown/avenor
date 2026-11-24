@@ -6250,14 +6250,15 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 		SessionID: "ses_usage",
 		Fields: map[string]any{
 			"usage": map[string]any{
-				"input_tokens":  float64(5),
-				"output_tokens": float64(2),
-				"total_tokens":  float64(7),
+				"input_tokens":        float64(5),
+				"output_tokens":       float64(2),
+				"total_tokens":        float64(7),
+				"cached_read_tokens":  float64(1),
+				"cached_write_tokens": float64(4),
+				"thought_tokens":      float64(6),
 			},
 		},
 	}
-
-	timeoutCh := make(chan time.Time, 1)
 
 	provider := &cliFakeProvider{}
 	var wg sync.WaitGroup
@@ -6265,13 +6266,13 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_usage", "run_usage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(500*time.Millisecond), io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_usage", "run_usage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(800*time.Millisecond), io.Discard)
 	}()
 
 	usageWritten := make(chan struct{})
 	go func() {
 		for i := 0; i < 100; i++ {
-			time.Sleep(25 * time.Millisecond)
+			time.Sleep(15 * time.Millisecond)
 			data, _ := os.ReadFile(eventsPath)
 			if strings.Contains(string(data), `"input_tokens":5`) {
 				close(usageWritten)
@@ -6284,8 +6285,6 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("usage event not written within 5 seconds")
 	}
-
-	timeoutCh <- time.Now()
 
 	wg.Wait()
 	if err := writer.Close(); err != nil {
@@ -6318,6 +6317,15 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 	if result.Usage["total_tokens"] != float64(7) {
 		t.Errorf("Usage.total_tokens = %v, want 7", result.Usage["total_tokens"])
 	}
+	if result.Usage["cached_read_tokens"] != float64(1) {
+		t.Errorf("Usage.cached_read_tokens = %v, want 1", result.Usage["cached_read_tokens"])
+	}
+	if result.Usage["cached_write_tokens"] != float64(4) {
+		t.Errorf("Usage.cached_write_tokens = %v, want 4", result.Usage["cached_write_tokens"])
+	}
+	if result.Usage["thought_tokens"] != float64(6) {
+		t.Errorf("Usage.thought_tokens = %v, want 6", result.Usage["thought_tokens"])
+	}
 	usage, ok := last.Fields["usage"].(map[string]any)
 	if !ok {
 		t.Fatalf("usage missing from synthetic session.end event")
@@ -6330,6 +6338,15 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 	}
 	if usage["total_tokens"] != float64(7) {
 		t.Errorf("event usage.total_tokens = %v, want 7", usage["total_tokens"])
+	}
+	if usage["cached_read_tokens"] != float64(1) {
+		t.Errorf("event usage.cached_read_tokens = %v, want 1", usage["cached_read_tokens"])
+	}
+	if usage["cached_write_tokens"] != float64(4) {
+		t.Errorf("event usage.cached_write_tokens = %v, want 4", usage["cached_write_tokens"])
+	}
+	if usage["thought_tokens"] != float64(6) {
+		t.Errorf("event usage.thought_tokens = %v, want 6", usage["thought_tokens"])
 	}
 }
 
@@ -6344,7 +6361,6 @@ func TestCancelAndEndNilUsage(t *testing.T) {
 	}
 
 	eventCh := make(chan events.Event, 1)
-	timeoutCh := make(chan time.Time, 1)
 
 	provider := &cliFakeProvider{}
 	var wg sync.WaitGroup
@@ -6352,11 +6368,8 @@ func TestCancelAndEndNilUsage(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_nousage", "run_nousage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(500*time.Millisecond), io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_nousage", "run_nousage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(50*time.Millisecond), io.Discard)
 	}()
-
-	// No usage-bearing event — fire timeout immediately.
-	timeoutCh <- time.Now()
 
 	wg.Wait()
 	if err := writer.Close(); err != nil {

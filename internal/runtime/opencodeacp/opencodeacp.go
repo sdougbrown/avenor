@@ -41,23 +41,35 @@ func buildClientEnv(opts runtime.StartOptions, runID, brokerToken, brokerURL str
 
 	// Inject the avenor-channel-tools MCP server when broker info is available.
 	// Without a broker (e.g. CLI-only runs), skip the MCP injection — the mode
-	// override below is the only thing needed.
+	// override below is the only thing needed. The registration comes from
+	// runtime.ChannelToolsMCPFor, the same source the agy adapter renders into
+	// its ACP `mcpServers` entry; this function only maps it onto opencode's
+	// local-server config shape.
 	mcpOverride := map[string]any{}
 	if runID != "" && brokerToken != "" && brokerURL != "" {
 		avenorBin, err := os.Executable()
 		if err != nil {
 			return nil, nil
 		}
+		server, ok := runtime.ChannelToolsMCPFor(avenorBin, runID, brokerToken, brokerURL)
+		if !ok {
+			return nil, nil
+		}
+		environment := make(map[string]any, len(server.Env))
+		for _, pair := range server.Env {
+			environment[pair.Name] = pair.Value
+		}
 		mergeConfig(mcpOverride, map[string]any{
 			"mcp": map[string]any{
-				"avenor-channel-tools": map[string]any{
-					"type":    "local",
-					"enabled": true,
-					"command": []string{avenorBin, "channel-tools", "--run-id", runID, "--token", brokerToken, "--broker-url", brokerURL},
+				server.Name: map[string]any{
+					"type":        "local",
+					"enabled":     true,
+					"command":     append([]string{server.Command}, server.Args...),
+					"environment": environment,
 				},
 			},
 			"tools": map[string]any{
-				"avenor-channel-tools*": true,
+				server.Name + "*": true,
 			},
 		})
 		hasOverrides = true

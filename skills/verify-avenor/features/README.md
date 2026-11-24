@@ -29,3 +29,4 @@ state named in each file is the acceptance bar for that feature.
 | Top-level Pi–Claude peers | [top-level-peers.md](top-level-peers.md) | independent sessions → central broker over outbound polling, combined local-child peers, identity lifecycle |
 | Codex peer layer | [codex-peers.md](codex-peers.md) | plugin `hooks/codex.json` command hooks → identity-bound `message`/`peers`, `codex queue` idle delivery |
 | OpenCode conversations | [opencode-conversations.md](opencode-conversations.md) | native OpenCode host per-conversation messaging (tell, ask, reply, withdraw, child-parent routing) |
+| Agy ACP backend | [agy-acp.md](agy-acp.md) | `avenor --backend agy` over `agy acp --stdio` → single run, `AVENOR_AGY_TRANSPORT` migration refusal, permission relay, cancel, cold cross-process resume, broker channel-tools |
