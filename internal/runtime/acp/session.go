@@ -17,8 +17,21 @@ type Session struct {
 	SessionID   string
 }
 
+type EnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type MCPServer struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	Env     []EnvVar `json:"env"`
+}
+
 type SessionOpenOptions struct {
-	MCP map[string]any
+	MCP        map[string]any
+	MCPServers []MCPServer
 }
 
 func (c *Client) NewSession(ctx context.Context) (*Session, error) {
@@ -26,7 +39,7 @@ func (c *Client) NewSession(ctx context.Context) (*Session, error) {
 }
 
 func (c *Client) NewSessionWithOptions(ctx context.Context, opts SessionOpenOptions) (*Session, error) {
-	result, err := c.request(ctx, "session/new", sessionOpenParams(c.dir, opts.MCP))
+	result, err := c.request(ctx, "session/new", sessionOpenParams(c.dir, opts))
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +58,7 @@ func (c *Client) NewSessionWithOptions(ctx context.Context, opts SessionOpenOpti
 }
 
 func (c *Client) LoadSession(ctx context.Context, sessionID string) (*Session, error) {
-	_, err := c.request(ctx, "session/load", sessionOpenParams(c.dir, nil, "sessionId", sessionID))
+	_, err := c.request(ctx, "session/load", sessionOpenParams(c.dir, SessionOpenOptions{}, "sessionId", sessionID))
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +66,11 @@ func (c *Client) LoadSession(ctx context.Context, sessionID string) (*Session, e
 }
 
 func (c *Client) ResumeSession(ctx context.Context, sessionID string) (*Session, error) {
-	_, err := c.request(ctx, "session/resume", sessionOpenParams(c.dir, nil, "sessionId", sessionID))
+	return c.ResumeSessionWithOptions(ctx, sessionID, SessionOpenOptions{})
+}
+
+func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string, opts SessionOpenOptions) (*Session, error) {
+	_, err := c.request(ctx, "session/resume", sessionOpenParams(c.dir, opts, "sessionId", sessionID))
 	if err != nil {
 		return nil, err
 	}
@@ -89,13 +106,28 @@ func (s *Session) Close(ctx context.Context) error {
 	return err
 }
 
-func sessionOpenParams(dir string, mcp map[string]any, extra ...any) map[string]any {
+func sessionOpenParams(dir string, opts SessionOpenOptions, extra ...any) map[string]any {
 	params := map[string]any{
 		"cwd":        dir,
 		"mcpServers": []any{},
 	}
-	if len(mcp) > 0 {
-		params["mcp"] = mcp
+	if len(opts.MCPServers) > 0 {
+		servers := make([]MCPServer, len(opts.MCPServers))
+		for i, srv := range opts.MCPServers {
+			copied := MCPServer{
+				Name:    srv.Name,
+				Command: srv.Command,
+				Args:    make([]string, len(srv.Args)),
+				Env:     make([]EnvVar, len(srv.Env)),
+			}
+			copy(copied.Args, srv.Args)
+			copy(copied.Env, srv.Env)
+			servers[i] = copied
+		}
+		params["mcpServers"] = servers
+	}
+	if len(opts.MCP) > 0 {
+		params["mcp"] = opts.MCP
 	}
 	for i := 0; i+1 < len(extra); i += 2 {
 		key, ok := extra[i].(string)

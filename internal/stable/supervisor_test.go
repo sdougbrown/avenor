@@ -2691,7 +2691,7 @@ func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
 
 	sink := &metadataCaptureSink{}
 	writer := &runtimeFanoutWriter{base: sink, runtimeID: child.id, child: child, supervisor: sup, control: sup.control}
-	if err := writer.Write(events.Event{Event: "session.end", SessionID: "ses_meta", Fields: map[string]any{"stop_reason": "end_turn", "usage": map[string]any{"total_tokens": 7}, "final_output": "final text"}}); err != nil {
+	if err := writer.Write(events.Event{Event: "session.end", SessionID: "ses_meta", Fields: map[string]any{"stop_reason": "end_turn", "usage": map[string]any{"total_tokens": 7, "cached_read_tokens": 1, "cached_write_tokens": 4, "thought_tokens": 6}, "final_output": "final text"}}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if len(sink.events) != 1 {
@@ -2721,9 +2721,11 @@ func TestRuntimeStatusMetadataIncludesUsageFinalOutputAndStamp(t *testing.T) {
 		t.Fatalf("list agent_profile = %v, want cloud", got)
 	}
 	usage, _ := status["usage"].(map[string]any)
-	if got, _ := usage["total_tokens"].(int); got != 7 {
-		if gotf, _ := usage["total_tokens"].(float64); int(gotf) != 7 {
-			t.Fatalf("usage.total_tokens = %v, want 7", usage["total_tokens"])
+	for key, want := range map[string]int{"total_tokens": 7, "cached_read_tokens": 1, "cached_write_tokens": 4, "thought_tokens": 6} {
+		if got, _ := usage[key].(int); got != want {
+			if gotf, _ := usage[key].(float64); int(gotf) != want {
+				t.Fatalf("usage.%s = %v, want %d", key, usage[key], want)
+			}
 		}
 	}
 	if got, _ := status["latest_seq"].(int64); got == 0 {

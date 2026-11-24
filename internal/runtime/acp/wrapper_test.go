@@ -67,6 +67,45 @@ func TestNewClientWrapperPrefixesBackendArgv(t *testing.T) {
 	waitForArgv(t, argvPath, []string{wrapper, "--flag", bin, "acp", "--pure"})
 }
 
+func TestNewClientSetCmdDirBareAndWrapped(t *testing.T) {
+	workDir := t.TempDir()
+	pwdPath := filepath.Join(t.TempDir(), "pwd.txt")
+	bin := filepath.Join(t.TempDir(), "pwd-recorder.sh")
+	body := "#!/bin/sh\npwd > " + shellQuotePath(pwdPath) + "\n"
+	if err := os.WriteFile(bin, []byte(body), 0o755); err != nil {
+		t.Fatalf("write pwd recorder: %v", err)
+	}
+
+	client, err := NewClient(context.Background(), ClientConfig{
+		Bin:       bin,
+		Dir:       workDir,
+		SetCmdDir: true,
+	})
+	if err != nil {
+		t.Fatalf("NewClient bare: %v", err)
+	}
+	waitForArgv(t, pwdPath, []string{workDir})
+	_ = client.Close()
+
+	// Also verify with a wrapper that execs "$@".
+	_ = os.Remove(pwdPath)
+	wrapper := filepath.Join(t.TempDir(), "exec-wrapper.sh")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec \"$@\"\n"), 0o755); err != nil {
+		t.Fatalf("write exec wrapper: %v", err)
+	}
+	clientWrapped, err := NewClient(context.Background(), ClientConfig{
+		Bin:       bin,
+		Wrapper:   []string{wrapper},
+		Dir:       workDir,
+		SetCmdDir: true,
+	})
+	if err != nil {
+		t.Fatalf("NewClient wrapped: %v", err)
+	}
+	waitForArgv(t, pwdPath, []string{workDir})
+	_ = clientWrapped.Close()
+}
+
 // waitForArgv polls until the recorder file lists exactly want. The wrapper
 // and backend run concurrently with this test, so the file fills asynchronously.
 func waitForArgv(t *testing.T, argvPath string, want []string) {

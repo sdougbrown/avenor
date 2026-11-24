@@ -101,6 +101,14 @@ func mapPromptResponse(sessionID string, result json.RawMessage) (events.Event, 
 					if cachedReadTokens == nil {
 						cachedReadTokens, _ = usageMap["cached_read_tokens"]
 					}
+					cachedWriteTokens, _ := usageMap["cachedWriteTokens"]
+					if cachedWriteTokens == nil {
+						cachedWriteTokens, _ = usageMap["cached_write_tokens"]
+					}
+					thoughtTokens, _ := usageMap["thoughtTokens"]
+					if thoughtTokens == nil {
+						thoughtTokens, _ = usageMap["thought_tokens"]
+					}
 					if inputTokens != nil {
 						u["input_tokens"] = inputTokens
 					}
@@ -112,6 +120,12 @@ func mapPromptResponse(sessionID string, result json.RawMessage) (events.Event, 
 					}
 					if cachedReadTokens != nil {
 						u["cached_read_tokens"] = cachedReadTokens
+					}
+					if cachedWriteTokens != nil {
+						u["cached_write_tokens"] = cachedWriteTokens
+					}
+					if thoughtTokens != nil {
+						u["thought_tokens"] = thoughtTokens
 					}
 					fields["usage"] = u
 				}
