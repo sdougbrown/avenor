@@ -772,11 +772,14 @@ func TestOverlappingPromptRejected(t *testing.T) {
 	}
 
 	first := make(chan error, 1)
-	go func() { first <- p.Prompt(ctx, ses.SessionID, "slow first") }()
-	waitForLog(t, logPath, `"text":"slow first"`)
+	go func() { first <- p.Prompt(ctx, ses.SessionID, "hold first") }()
+	waitForLog(t, logPath, `"text":"hold first"`)
 
 	if err := p.Prompt(ctx, ses.SessionID, "second"); err == nil || !strings.Contains(err.Error(), "already in flight") {
 		t.Fatalf("overlapping Prompt = %v, want an already-in-flight rejection", err)
+	}
+	if err := p.Cancel(ctx, ses.SessionID); err != nil {
+		t.Fatalf("Cancel: %v", err)
 	}
 	if err := <-first; err != nil {
 		t.Fatalf("first Prompt: %v", err)
@@ -891,6 +894,56 @@ func TestColdResume(t *testing.T) {
 		} {
 			if !strings.Contains(log, want) {
 				t.Fatalf("session/resume missing %q; log:\n%s", want, log)
+			}
+		}
+
+		evCh, err := p.Events(ctx, resumed.SessionID)
+		if err != nil {
+			t.Fatalf("Events after cold resume: %v", err)
+		}
+		if err := p.Prompt(ctx, resumed.SessionID, "after cold resume"); err != nil {
+			t.Fatalf("Prompt after cold resume: %v", err)
+		}
+		got := collectUntil(t, evCh, 10*time.Second, func(ev events.Event) bool { return ev.Event == "session.end" })
+		if kinds := eventKinds(got); !slices.Contains(kinds, "agent.message_chunk") || !slices.Contains(kinds, "session.end") {
+			t.Fatalf("post-resume events = %v, want message_chunk and session.end", kinds)
+		}
+	})
+
+	t.Run("plain Resume with constructor broker carries mcpServers and model", func(t *testing.T) {
+		b := newBroker(t)
+		sessionID := startSession(t, testDeps())
+
+		logPath := filepath.Join(t.TempDir(), "resume-ctor.log")
+		installFakeAGY(t, logPath, "")
+		p := newProviderWithDeps(t, runtime.StartOptions{
+			Dir:       t.TempDir(),
+			Broker:    b,
+			RuntimeID: "run_ctor_resume",
+			Model:     "gemini-4-argon-high",
+		}, testDeps())
+		defer func() { _ = p.Close() }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		resumed, err := p.Resume(ctx, sessionID)
+		if err != nil {
+			t.Fatalf("plain Resume with constructor broker: %v", err)
+		}
+		if resumed.SessionID != sessionID {
+			t.Fatalf("resumed SessionID = %q, want %q", resumed.SessionID, sessionID)
+		}
+		waitForLog(t, logPath, `"method":"session/resume"`)
+		log := readLog(t, logPath)
+		for _, want := range []string{
+			`"mcpServers":[{"name":"avenor-channel-tools"`,
+			`"channel-tools","--run-id","run_ctor_resume"`,
+			`"--broker-url","` + b.URL() + `"`,
+			`"configId":"model"`,
+			`"value":"gemini-4-argon-high"`,
+		} {
+			if !strings.Contains(log, want) {
+				t.Fatalf("plain Resume with constructor broker missing %q; log:\n%s", want, log)
 			}
 		}
 	})

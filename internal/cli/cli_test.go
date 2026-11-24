@@ -6260,21 +6260,19 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 		},
 	}
 
-	timeoutCh := make(chan time.Time, 1)
-
 	provider := &cliFakeProvider{}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_usage", "run_usage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(500*time.Millisecond), io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_usage", "run_usage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(800*time.Millisecond), io.Discard)
 	}()
 
 	usageWritten := make(chan struct{})
 	go func() {
 		for i := 0; i < 100; i++ {
-			time.Sleep(25 * time.Millisecond)
+			time.Sleep(15 * time.Millisecond)
 			data, _ := os.ReadFile(eventsPath)
 			if strings.Contains(string(data), `"input_tokens":5`) {
 				close(usageWritten)
@@ -6287,8 +6285,6 @@ func TestCancelAndEndIncludesBufferedUsage(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("usage event not written within 5 seconds")
 	}
-
-	timeoutCh <- time.Now()
 
 	wg.Wait()
 	if err := writer.Close(); err != nil {
@@ -6365,7 +6361,6 @@ func TestCancelAndEndNilUsage(t *testing.T) {
 	}
 
 	eventCh := make(chan events.Event, 1)
-	timeoutCh := make(chan time.Time, 1)
 
 	provider := &cliFakeProvider{}
 	var wg sync.WaitGroup
@@ -6373,11 +6368,8 @@ func TestCancelAndEndNilUsage(t *testing.T) {
 	var result sessionResult
 	go func() {
 		defer wg.Done()
-		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_nousage", "run_nousage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(500*time.Millisecond), io.Discard)
+		result = waitForSessionForTest(context.Background(), provider, writer, nil, nil, eventCh, nil, nil, "ses_nousage", "run_nousage", "", true, DefaultPermissionClaimTimeout, time.Now().Add(50*time.Millisecond), io.Discard)
 	}()
-
-	// No usage-bearing event — fire timeout immediately.
-	timeoutCh <- time.Now()
 
 	wg.Wait()
 	if err := writer.Close(); err != nil {

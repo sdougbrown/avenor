@@ -5,7 +5,7 @@
 - Single run over `agy acp --stdio` (`session.start`, streamed `agent.message_chunk`, terminal `session.end` with `stop_reason: end_turn` and normalized snake_case `usage`)
 - Strict model validation via ACP `session/set_config_option` (`configId: "model"`; rejects unknown model slugs with `-32602` without writing a `DONE` sentinel)
 - Retired `AVENOR_AGY_TRANSPORT` migration refusal (any non-empty value fails before spawning `agy`)
-- Interactive tool permission relay (`permission.request` → `avenor control answer_permission`)
+- Interactive tool permission relay (`permission.request` → `avenor answer` / `avenor control answer-permission`)
 - Mid-turn cancellation (`avenor control cancel`)
 - Cold cross-process resume (`avenor run --resume <session_id>` against a fresh `agy acp` process with a different backend PID)
 - Native broker messaging via ACP `mcpServers` (`avenor channel-tools` send + inbound receipt)
@@ -63,7 +63,7 @@ cat "$SCRATCH/resume-done.env"
 cat "$SCRATCH/resume-result.txt"
 ```
 
-For supervisor-mode permission relay and `avenor-channel-tools` messaging, start `avenor stable --control-socket "$SCRATCH/stable.sock" --idle-timeout 5m`, spawn `--backend agy --model gemini-3.8-flash-low --no-park --permission-handler "file:$SCRATCH/perm" --timeout 90` with a shell-tool prompt, wait for `$SCRATCH/perm.req`, approve via `./avenor answer --option allow "$SCRATCH/perm"`, verify the file side effect, verify a broker `tell` via `avenor-channel-tools` (`--auto-approve`), and shut down the stable cleanly.
+For supervisor-mode permission relay and `avenor-channel-tools` messaging, start `avenor stable --control-socket "$SCRATCH/stable.sock" --idle-timeout 5m`, spawn `--backend agy --model gemini-3.8-flash-low --no-park --permission-handler "file:$SCRATCH/perm" --timeout 90` with a shell-tool prompt, wait for `$SCRATCH/perm.req`, read the offered allow `optionId` (for example `allow` or `allow-once`) from `$SCRATCH/perm.req`, approve via `./avenor answer --option <allow-option-id> "$SCRATCH/perm"`, verify the file side effect, verify a broker `tell` via `avenor-channel-tools` (`--auto-approve`), and shut down the stable cleanly.
 
 ## Observable end state (the proof)
 

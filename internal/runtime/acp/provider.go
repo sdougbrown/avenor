@@ -77,9 +77,12 @@ type eventSubscriber struct {
 	ch            chan events.Event
 	done          chan struct{}
 	doneOnce      sync.Once
-	sendMu        sync.Mutex
+	mu            sync.Mutex
+	queue         []events.Event
+	eof           bool
 	closed        bool
 	stopAfterFunc func() bool
+	wake          chan struct{}
 }
 
 func (s *eventSubscriber) matches(ev events.Event) bool {
@@ -92,59 +95,111 @@ func (s *eventSubscriber) closeDone() {
 	})
 }
 
-func (s *eventSubscriber) closeChannel() {
+func (s *eventSubscriber) signalWake() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *eventSubscriber) enqueue(ev events.Event) {
+	s.mu.Lock()
+	if s.closed || s.eof {
+		s.mu.Unlock()
+		return
+	}
+	s.queue = append(s.queue, ev)
+	s.mu.Unlock()
+	s.signalWake()
+}
+
+func (s *eventSubscriber) markEOF() {
+	s.mu.Lock()
+	stop := s.stopAfterFunc
+	s.stopAfterFunc = nil
+	s.eof = true
+	s.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	s.signalWake()
+}
+
+func (s *eventSubscriber) abort() {
 	s.closeDone()
-	if s.stopAfterFunc != nil {
-		s.stopAfterFunc()
+	s.mu.Lock()
+	stop := s.stopAfterFunc
+	s.stopAfterFunc = nil
+	s.closed = true
+	s.queue = nil
+	s.mu.Unlock()
+	if stop != nil {
+		stop()
 	}
-	s.sendMu.Lock()
-	if !s.closed {
-		s.closed = true
-		close(s.ch)
+	s.signalWake()
+}
+
+func (s *eventSubscriber) run(hubStop <-chan struct{}) {
+	defer close(s.ch)
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-hubStop:
+			return
+		default:
+		}
+
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return
+		}
+		if len(s.queue) > 0 {
+			ev := s.queue[0]
+			s.queue[0] = events.Event{}
+			s.queue = s.queue[1:]
+			if len(s.queue) == 0 {
+				s.queue = nil
+			}
+			s.mu.Unlock()
+
+			select {
+			case s.ch <- ev:
+			case <-s.done:
+				return
+			case <-hubStop:
+				return
+			}
+			continue
+		}
+		if s.eof {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+
+		select {
+		case <-s.wake:
+		case <-s.done:
+			return
+		case <-hubStop:
+			return
+		}
 	}
-	s.sendMu.Unlock()
 }
 
 func isDroppableChunk(eventName string) bool {
 	return eventName == "agent.message_chunk" || eventName == "agent.thought_chunk"
 }
 
-func (s *eventSubscriber) deliver(ev events.Event, hubClosed <-chan struct{}) {
-	select {
-	case <-s.done:
-		return
-	case <-hubClosed:
-		return
-	default:
-	}
-
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	if s.closed {
-		return
-	}
-
-	if isDroppableChunk(ev.Event) {
-		select {
-		case s.ch <- ev:
-		default:
-		}
-		return
-	}
-
-	select {
-	case s.ch <- ev:
-	case <-s.done:
-	case <-hubClosed:
-	}
-}
-
 type eventHub struct {
-	mu           sync.Mutex
-	closed       bool
-	firstSubSeen bool
-	backlog      []events.Event
-	subs         []*eventSubscriber
+	mu              sync.Mutex
+	closed          bool
+	wildcardSubSeen bool
+	sessionSubSeen  map[string]bool
+	backlog         []events.Event
+	subs            []*eventSubscriber
 
 	ordered   chan orderedEvent
 	asyncWake chan struct{}
@@ -159,11 +214,12 @@ type eventHub struct {
 
 func newEventHub() *eventHub {
 	return &eventHub{
-		ordered:   make(chan orderedEvent, 64),
-		asyncWake: make(chan struct{}, 1),
-		stop:      make(chan struct{}),
-		closedCh:  make(chan struct{}),
-		pumpDone:  make(chan struct{}),
+		sessionSubSeen: map[string]bool{},
+		ordered:        make(chan orderedEvent, 64),
+		asyncWake:      make(chan struct{}, 1),
+		stop:           make(chan struct{}),
+		closedCh:       make(chan struct{}),
+		pumpDone:       make(chan struct{}),
 	}
 }
 
@@ -193,12 +249,12 @@ func (h *eventHub) requestStop() {
 	})
 }
 
-func (h *eventHub) finishPump() {
-	h.closeAll()
+func (h *eventHub) finishPump(abort bool) {
+	h.closeAll(abort)
 	close(h.pumpDone)
 }
 
-func (h *eventHub) closeAll() {
+func (h *eventHub) closeAll(abort bool) {
 	h.closedOnce.Do(func() {
 		close(h.closedCh)
 	})
@@ -211,7 +267,11 @@ func (h *eventHub) closeAll() {
 	h.mu.Unlock()
 
 	for _, sub := range subs {
-		sub.closeChannel()
+		if abort {
+			sub.abort()
+		} else {
+			sub.markEOF()
+		}
 	}
 }
 
@@ -225,37 +285,65 @@ func (h *eventHub) subscribe(ctx context.Context, sessionID string) (<-chan even
 	}
 
 	var backlog []events.Event
-	if !h.firstSubSeen {
-		h.firstSubSeen = true
-		backlog = h.backlog
-		h.backlog = nil
-	}
-
-	bufCap := subscriberBufferCap
-	if len(backlog) > bufCap {
-		bufCap = len(backlog)
-	}
-	sub := &eventSubscriber{
-		sessionID: sessionID,
-		ch:        make(chan events.Event, bufCap),
-		done:      make(chan struct{}),
-	}
-	// Hold sub.sendMu before releasing h.mu so any concurrent broadcast that
-	// snapshots sub waits until backlog events are enqueued in order first.
-	sub.sendMu.Lock()
-	h.subs = append(h.subs, sub)
-	h.mu.Unlock()
-
-	for _, ev := range backlog {
-		if sub.matches(ev) {
-			sub.ch <- cloneEvent(ev)
+	if sessionID == "" {
+		if !h.wildcardSubSeen {
+			h.wildcardSubSeen = true
+			backlog = h.backlog
+			h.backlog = nil
+			for _, ev := range backlog {
+				if ev.SessionID != "" {
+					h.sessionSubSeen[ev.SessionID] = true
+				}
+			}
+		}
+	} else if !h.sessionSubSeen[sessionID] {
+		h.sessionSubSeen[sessionID] = true
+		remaining := h.backlog[:0]
+		for _, ev := range h.backlog {
+			if ev.SessionID == "" || ev.SessionID == sessionID {
+				backlog = append(backlog, ev)
+			} else {
+				remaining = append(remaining, ev)
+			}
+		}
+		if len(remaining) == 0 {
+			h.backlog = nil
+		} else {
+			clear(h.backlog[len(remaining):])
+			h.backlog = remaining
 		}
 	}
-	sub.sendMu.Unlock()
+
+	sub := &eventSubscriber{
+		sessionID: sessionID,
+		ch:        make(chan events.Event, subscriberBufferCap),
+		done:      make(chan struct{}),
+		wake:      make(chan struct{}, 1),
+	}
+	for _, ev := range backlog {
+		if !sub.matches(ev) {
+			continue
+		}
+		cloned := cloneEvent(ev)
+		select {
+		case sub.ch <- cloned:
+		default:
+			sub.queue = append(sub.queue, cloned)
+		}
+	}
+	// Hold sub.mu before publishing sub into h.subs so concurrent broadcast,
+	// closeAll, or an already-cancelled ctx callback cannot race with
+	// stopAfterFunc registration or backlog ordering.
+	sub.mu.Lock()
+	h.subs = append(h.subs, sub)
+	h.mu.Unlock()
 
 	sub.stopAfterFunc = context.AfterFunc(ctx, func() {
 		h.unsubscribe(sub)
 	})
+	sub.mu.Unlock()
+
+	go sub.run(h.stop)
 	return sub.ch, nil
 }
 
@@ -271,7 +359,34 @@ func (h *eventHub) unsubscribe(sub *eventSubscriber) {
 	}
 	h.mu.Unlock()
 
-	sub.closeChannel()
+	sub.abort()
+}
+
+func (h *eventHub) appendBacklogLocked(ev events.Event) {
+	cloned := cloneEvent(ev)
+	if len(h.backlog) < hubBacklogCap {
+		h.backlog = append(h.backlog, cloned)
+		return
+	}
+	if isDroppableChunk(ev.Event) {
+		return
+	}
+	// Preserve non-droppable lifecycle/permission events by evicting the oldest
+	// droppable chunk (preferring thought chunks first) when at capacity.
+	evictIdx := -1
+	for i, existing := range h.backlog {
+		if existing.Event == "agent.thought_chunk" {
+			evictIdx = i
+			break
+		}
+		if evictIdx == -1 && isDroppableChunk(existing.Event) {
+			evictIdx = i
+		}
+	}
+	if evictIdx >= 0 {
+		h.backlog = slices.Delete(h.backlog, evictIdx, evictIdx+1)
+	}
+	h.backlog = append(h.backlog, cloned)
 }
 
 func (h *eventHub) broadcast(ev events.Event) {
@@ -280,21 +395,25 @@ func (h *eventHub) broadcast(ev events.Event) {
 		h.mu.Unlock()
 		return
 	}
-	if !h.firstSubSeen {
-		if len(h.backlog) < hubBacklogCap {
-			h.backlog = append(h.backlog, cloneEvent(ev))
+	var subs []*eventSubscriber
+	for _, sub := range h.subs {
+		if sub.matches(ev) {
+			subs = append(subs, sub)
 		}
-		h.mu.Unlock()
-		return
 	}
-	subs := slices.Clone(h.subs)
+	shouldBacklog := false
+	if ev.SessionID != "" {
+		shouldBacklog = !h.sessionSubSeen[ev.SessionID] && !h.wildcardSubSeen
+	} else {
+		shouldBacklog = !h.wildcardSubSeen && len(h.sessionSubSeen) == 0
+	}
+	if shouldBacklog {
+		h.appendBacklogLocked(ev)
+	}
 	h.mu.Unlock()
 
 	for _, sub := range subs {
-		if !sub.matches(ev) {
-			continue
-		}
-		sub.deliver(cloneEvent(ev), h.closedCh)
+		sub.enqueue(cloneEvent(ev))
 	}
 }
 
@@ -309,7 +428,8 @@ type Provider struct {
 	clientLaunch   clientLaunchSpec
 	hub            *eventHub
 	sessions       map[string]*Session
-	activePrompts  map[string]bool
+	activePrompts  map[string]chan struct{}
+	injectReserved map[string]int
 	pendingOptions map[string]map[string][]any
 
 	// startClient starts the backend process and completes its handshake.
@@ -361,7 +481,8 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		bin:                     cfg.Bin,
 		args:                    cfg.Args,
 		sessions:                map[string]*Session{},
-		activePrompts:           map[string]bool{},
+		activePrompts:           map[string]chan struct{}{},
+		injectReserved:          map[string]int{},
 		runIDs:                  map[string]string{},
 		pollContexts:            map[string]context.Context{},
 		pollCancels:             map[string]context.CancelFunc{},
@@ -387,7 +508,10 @@ func (p *Provider) ensureMapsLocked() {
 		p.sessions = map[string]*Session{}
 	}
 	if p.activePrompts == nil {
-		p.activePrompts = map[string]bool{}
+		p.activePrompts = map[string]chan struct{}{}
+	}
+	if p.injectReserved == nil {
+		p.injectReserved = map[string]int{}
 	}
 	if p.runIDs == nil {
 		p.runIDs = map[string]string{}
@@ -574,7 +698,7 @@ func (p *Provider) resume(ctx context.Context, sessionID string, callOpts, opts 
 		if err != nil {
 			return runtime.Session{}, err
 		}
-	} else if optionAware {
+	} else {
 		id = p.launchRun(opts)
 		var err error
 		openOpts, err = p.sessionOpenOptions(opts, id)
@@ -831,13 +955,17 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		return fmt.Errorf("session %q not found", sessionID)
 	}
 	if p.activePrompts == nil {
-		p.activePrompts = map[string]bool{}
+		p.activePrompts = map[string]chan struct{}{}
 	}
-	if p.activePrompts[sessionID] {
+	if p.injectReserved == nil {
+		p.injectReserved = map[string]int{}
+	}
+	if p.activePrompts[sessionID] != nil || p.injectReserved[sessionID] > 0 {
 		p.mu.Unlock()
 		return fmt.Errorf("%s: prompt already in flight for session %q", p.backendID, sessionID)
 	}
-	p.activePrompts[sessionID] = true
+	myDone := make(chan struct{})
+	p.activePrompts[sessionID] = myDone
 	hub := p.hub
 	if hub != nil {
 		hub.beginAsyncOp()
@@ -846,8 +974,11 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	defer func() {
 		p.mu.Lock()
-		delete(p.activePrompts, sessionID)
+		if p.activePrompts[sessionID] == myDone {
+			delete(p.activePrompts, sessionID)
+		}
 		p.mu.Unlock()
+		close(myDone)
 		if hub != nil {
 			hub.endAsyncOp()
 		}
@@ -945,7 +1076,8 @@ func (p *Provider) Close() error {
 	p.clientEnvCleanup = nil
 	p.pendingOptions = nil
 	p.sessions = map[string]*Session{}
-	p.activePrompts = map[string]bool{}
+	p.activePrompts = map[string]chan struct{}{}
+	p.injectReserved = map[string]int{}
 	p.runIDs = nil
 	p.pollContexts = map[string]context.Context{}
 	p.pollCancels = map[string]context.CancelFunc{}
@@ -1233,7 +1365,10 @@ func runCleanup(cleanup func() error) {
 }
 
 func (p *Provider) pumpClientEvents(client *Client, hub *eventHub) {
-	defer hub.finishPump()
+	abort := true
+	defer func() {
+		hub.finishPump(abort)
+	}()
 
 	var clientEvents <-chan events.Event
 	if client != nil {
@@ -1274,6 +1409,7 @@ func (p *Provider) pumpClientEvents(client *Client, hub *eventHub) {
 		if clientEvents == nil && hub.asyncOpsCount() == 0 {
 			drainOrderedEvents()
 			if hub.asyncOpsCount() == 0 {
+				abort = false
 				return
 			}
 		}
@@ -1431,14 +1567,54 @@ func (p *Provider) dispatchPendingMessages(hub *eventHub, sessionID string) {
 	if len(msgs) == 0 {
 		return
 	}
+	p.mu.Lock()
+	if p.closing {
+		p.mu.Unlock()
+		if done != nil {
+			done()
+		}
+		return
+	}
+	p.ensureMapsLocked()
+	p.injectReserved[sessionID]++
+	p.mu.Unlock()
 	if hub != nil {
 		hub.beginAsyncOp()
 	}
 	go p.injectTakenMessages(hub, sessionID, msgs, done)
 }
 
+func (p *Provider) requeueMessages(sessionID string, msgs []string) {
+	if p.Queue == nil || len(msgs) == 0 {
+		return
+	}
+	p.mu.Lock()
+	closing := p.closing
+	p.mu.Unlock()
+	if closing {
+		return
+	}
+	for _, msg := range msgs {
+		p.Queue.Enqueue(sessionID, msg)
+	}
+}
+
 func (p *Provider) injectTakenMessages(hub *eventHub, sessionID string, msgs []string, done func()) {
+	var myDone chan struct{}
 	defer func() {
+		p.mu.Lock()
+		if myDone != nil && p.activePrompts[sessionID] == myDone {
+			delete(p.activePrompts, sessionID)
+		}
+		if p.injectReserved[sessionID] > 1 {
+			p.injectReserved[sessionID]--
+		} else {
+			delete(p.injectReserved, sessionID)
+		}
+		p.mu.Unlock()
+		if myDone != nil {
+			close(myDone)
+		}
 		if done != nil {
 			done()
 		}
@@ -1447,23 +1623,59 @@ func (p *Provider) injectTakenMessages(hub *eventHub, sessionID string, msgs []s
 		}
 	}()
 
-	p.mu.Lock()
-	session := p.sessions[sessionID]
-	pollCtx := p.pollContexts[sessionID]
-	p.mu.Unlock()
-	if session == nil {
-		return
-	}
-	if pollCtx == nil {
-		pollCtx = context.Background()
+	var hubStop <-chan struct{}
+	if hub != nil {
+		hubStop = hub.stop
 	}
 
-	for _, msg := range msgs {
+	var (
+		session *Session
+		pollCtx context.Context
+	)
+	for {
+		p.mu.Lock()
+		if p.closing {
+			p.mu.Unlock()
+			return
+		}
+		session = p.sessions[sessionID]
+		pollCtx = p.pollContexts[sessionID]
+		if pollCtx == nil {
+			pollCtx = context.Background()
+		}
+		if session == nil {
+			p.mu.Unlock()
+			p.requeueMessages(sessionID, msgs)
+			return
+		}
+		inFlight := p.activePrompts[sessionID]
+		if inFlight == nil {
+			myDone = make(chan struct{})
+			p.activePrompts[sessionID] = myDone
+			p.mu.Unlock()
+			break
+		}
+		p.mu.Unlock()
+
+		select {
+		case <-inFlight:
+		case <-pollCtx.Done():
+			p.requeueMessages(sessionID, msgs)
+			return
+		case <-hubStop:
+			return
+		}
+	}
+
+	for i, msg := range msgs {
 		promptCtx, cancel := context.WithTimeout(pollCtx, 10*time.Second)
 		_, err := session.Prompt(promptCtx, msg)
 		cancel()
 		if err != nil {
-			continue
+			if pollCtx.Err() == nil {
+				p.requeueMessages(sessionID, msgs[i:])
+			}
+			return
 		}
 		p.publishToHub(hub, events.Event{
 			Event:     "agent.message_chunk",

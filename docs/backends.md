@@ -10,7 +10,7 @@ Pass `--backend` to choose which runtime protocol to use. The default is `openco
 avenor --backend opencode-http --server-url http://127.0.0.1:4096 --prompt "say hi"
 avenor --backend opencode-acp --prompt "say hi"
 avenor --backend codex-app-server --prompt "say hi"
-avenor --backend agy --model gemini-2.5-flash --prompt "say hi"
+avenor --backend agy --model gemini-4-argon-high --prompt "say hi"
 avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"

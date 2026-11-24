@@ -1759,13 +1759,23 @@ func TestEventHubFanOutBacklogDeepCloneStalledSubscriberAndLateSubscribe(t *test
 		for i := 0; i < totalChunks; i++ {
 			select {
 			case ev := <-ch:
+				if _, exists := ev.Fields["mutated_by"]; exists {
+					t.Errorf("%s saw pre-mutated field on chunk %d: %+v", tag, i, ev.Fields)
+					return
+				}
+				nested, ok := ev.Fields["content"].(map[string]any)
+				if !ok || nested["text"] != "hello" {
+					t.Errorf("%s saw corrupted nested content on chunk %d: %+v", tag, i, ev.Fields["content"])
+					return
+				}
+				list, ok := ev.Fields["items"].([]any)
+				if !ok || len(list) == 0 || list[0] != "a" {
+					t.Errorf("%s saw corrupted nested slice on chunk %d: %+v", tag, i, ev.Fields["items"])
+					return
+				}
 				ev.Fields["mutated_by"] = tag
-				if nested, ok := ev.Fields["content"].(map[string]any); ok {
-					nested["text"] = tag
-				}
-				if list, ok := ev.Fields["items"].([]any); ok && len(list) > 0 {
-					list[0] = tag
-				}
+				nested["text"] = tag
+				list[0] = tag
 			case <-time.After(5 * time.Second):
 				t.Errorf("%s timed out at chunk %d", tag, i)
 				return
@@ -1813,6 +1823,21 @@ func TestEventHubFanOutBacklogDeepCloneStalledSubscriberAndLateSubscribe(t *test
 	case ev := <-sub1:
 		if ev.Event != "permission.request" {
 			t.Fatalf("sub1 event = %+v, want permission.request", ev)
+		}
+		// Mutate the subscriber's copy of options and verify cached pendingOptions stayed isolated.
+		if opts, ok := ev.Fields["options"].([]any); ok && len(opts) > 0 {
+			if m, ok := opts[0].(map[string]any); ok {
+				m["optionId"] = "mutated_by_sub1"
+			}
+		}
+		p.mu.Lock()
+		cached := p.pendingOptions[ses.SessionID]["req_hub_1"]
+		p.mu.Unlock()
+		if len(cached) != 1 {
+			t.Fatalf("cached pendingOptions[req_hub_1] = %+v, want 1 option", cached)
+		}
+		if m, ok := cached[0].(map[string]any); !ok || m["optionId"] != "allow_once" {
+			t.Fatalf("cached pendingOptions corrupted by subscriber mutation: %+v", cached)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for permission.request on sub1")
@@ -1934,6 +1959,374 @@ func TestOverlappingPromptRejectedAndCancelIdempotent(t *testing.T) {
 	// Follow-up sequential Prompt succeeds after the first completes.
 	if err := p.Prompt(context.Background(), ses.SessionID, "second turn"); err != nil {
 		t.Fatalf("second sequential Prompt: %v", err)
+	}
+}
+
+func TestShutdownWithFloodedClientUpdatesDoesNotHang(t *testing.T) {
+	peer := newFakeInMemoryPeer(t)
+	peer.client.stopEvents = make(chan struct{})
+	p := NewProvider(ProviderConfig{BackendID: "agy"}).(*Provider)
+	p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+		return peer.client, nil
+	}
+
+	if _, err := p.Start(context.Background(), runtime.StartOptions{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Simulate the client readLoop still emitting >128 updates while Close runs.
+	floodDone := make(chan struct{})
+	go func() {
+		defer close(floodDone)
+		for i := 0; i < 300; i++ {
+			peer.client.dispatch(rpcEnvelope{
+				JSONRPC: "2.0",
+				Method:  "session/update",
+				Params:  mustRaw(map[string]any{"sessionId": "ses_1", "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "x"}}}),
+			})
+		}
+		close(peer.client.events)
+		close(peer.client.done)
+	}()
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- p.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Provider.Close hung while client was emitting updates")
+	}
+	select {
+	case <-floodDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client dispatch flood did not unblock on Close")
+	}
+}
+
+func TestSlowSubscriberPreservesAllMessageChunksAndBacklogKeepsPermission(t *testing.T) {
+	peer := newFakeInMemoryPeer(t)
+	p := NewProvider(ProviderConfig{BackendID: "agy"}).(*Provider)
+	p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+		return peer.client, nil
+	}
+
+	ses, err := p.Start(context.Background(), runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Emit > hubBacklogCap chunks BEFORE the first subscriber, then a permission.request.
+	for i := 0; i < hubBacklogCap+32; i++ {
+		peer.client.events <- events.Event{
+			Event:     "agent.message_chunk",
+			SessionID: ses.SessionID,
+			Fields:    map[string]any{"index": i},
+		}
+	}
+	peer.client.events <- events.Event{
+		Event:     "permission.request",
+		SessionID: ses.SessionID,
+		Fields: map[string]any{
+			"request_id": "req_backlog_1",
+			"options":    []any{map[string]any{"optionId": "allow_once", "kind": "allow_once"}},
+		},
+	}
+
+	// Synchronize on pumpClientEvents having processed the permission.request.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.Lock()
+		_, cached := p.pendingOptions[ses.SessionID]["req_backlog_1"]
+		p.mu.Unlock()
+		if cached {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for permission.request in backlog")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	sub, err := p.Events(context.Background(), ses.SessionID)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	// Now flood > subscriberBufferCap chunks WITHOUT reading yet, then close client (EOF)
+	// and verify the slow subscriber receives the preserved permission.request AND every post-subscribe chunk.
+	const burst = subscriberBufferCap + 75
+	for i := 0; i < burst; i++ {
+		peer.client.events <- events.Event{
+			Event:     "agent.message_chunk",
+			SessionID: ses.SessionID,
+			Fields:    map[string]any{"burst": i},
+		}
+	}
+	close(peer.client.events)
+	close(peer.client.done)
+
+	sawPerm := false
+	gotBurst := 0
+	for ev := range sub {
+		if ev.Event == "permission.request" && ev.Fields["request_id"] == "req_backlog_1" {
+			sawPerm = true
+		}
+		if ev.Event == "agent.message_chunk" {
+			if idx, ok := ev.Fields["burst"].(int); ok {
+				if idx != gotBurst {
+					t.Fatalf("out-of-order or dropped burst chunk: got %d, want %d", idx, gotBurst)
+				}
+				gotBurst++
+			}
+		}
+	}
+	if !sawPerm {
+		t.Fatal("pre-subscribe backlog dropped permission.request")
+	}
+	if gotBurst != burst {
+		t.Fatalf("slow subscriber received %d/%d burst message chunks", gotBurst, burst)
+	}
+	_ = p.Close()
+}
+
+func TestColdPlainResumeUsesConstructorBrokerAndOpenOptions(t *testing.T) {
+	peer := newFakeInMemoryPeer(t)
+	b := broker.New("")
+	if err := b.Start(); err != nil {
+		t.Fatalf("broker.Start: %v", err)
+	}
+	defer func() { _ = b.Stop() }()
+
+	var gotOpenRunID, gotOpenToken, gotOpenURL string
+	var gotEnvRunID, gotEnvToken, gotEnvURL string
+	p := NewProvider(ProviderConfig{
+		BackendID: "agy",
+		Opts: runtime.StartOptions{
+			Broker:    b,
+			RuntimeID: "rt_cold_plain",
+			Label:     "plain-resume",
+		},
+		BuildSessionOpenOptions: func(_ runtime.StartOptions, runID, token, url string) (SessionOpenOptions, error) {
+			gotOpenRunID, gotOpenToken, gotOpenURL = runID, token, url
+			return SessionOpenOptions{
+				MCPServers: []MCPServer{{Name: "avenor-channel-tools", Command: "/bin/true"}},
+			}, nil
+		},
+		BuildClientEnv: func(_ runtime.StartOptions, runID, token, url string) (map[string]string, func() error) {
+			gotEnvRunID, gotEnvToken, gotEnvURL = runID, token, url
+			return map[string]string{"TEST_RUN": runID}, nil
+		},
+	}).(*Provider)
+	p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+		return peer.client, nil
+	}
+	defer func() {
+		close(peer.client.events)
+		close(peer.client.done)
+		_ = p.Close()
+	}()
+
+	if _, err := p.Resume(context.Background(), "ses_cold_plain"); err != nil {
+		t.Fatalf("cold plain Resume: %v", err)
+	}
+	if gotOpenRunID != "rt_cold_plain" || gotOpenToken == "" || gotOpenURL != b.URL() {
+		t.Fatalf("BuildSessionOpenOptions got (%q, %q, %q), want runID=rt_cold_plain with token and broker URL", gotOpenRunID, gotOpenToken, gotOpenURL)
+	}
+	if gotEnvRunID != "rt_cold_plain" || gotEnvToken != gotOpenToken || gotEnvURL != b.URL() {
+		t.Fatalf("BuildClientEnv got (%q, %q, %q), want matching broker creds", gotEnvRunID, gotEnvToken, gotEnvURL)
+	}
+	p.mu.Lock()
+	gen := p.pollGen["ses_cold_plain"]
+	p.mu.Unlock()
+	if gen == 0 {
+		t.Fatal("expected broker poller to start on cold plain Resume")
+	}
+}
+
+func TestQueuedMessageInjectionSerializesWithPromptAndRequeuesOnError(t *testing.T) {
+	peer := newFakeInMemoryPeer(t)
+	var inFlight atomic.Int32
+	var overlap atomic.Bool
+	injectEntered := make(chan struct{})
+	releaseInject := make(chan struct{})
+	var callNum atomic.Int32
+
+	peer.onCall = func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+		if msg.Method != "session/prompt" {
+			return nil
+		}
+		n := callNum.Add(1)
+		if inFlight.Add(1) > 1 {
+			overlap.Store(true)
+		}
+		defer inFlight.Add(-1)
+		if n == 2 {
+			close(injectEntered)
+			<-releaseInject
+			return &rpcEnvelope{
+				ID:    msg.ID,
+				Error: &rpcError{Code: -32000, Message: "transient failure"},
+			}
+		}
+		return &rpcEnvelope{
+			ID:     msg.ID,
+			Result: json.RawMessage(`{"stopReason":"end_turn"}`),
+		}
+	}
+
+	p := NewProvider(ProviderConfig{BackendID: "agy"}).(*Provider)
+	p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+		return peer.client, nil
+	}
+	defer func() {
+		close(peer.client.events)
+		close(peer.client.done)
+		_ = p.Close()
+	}()
+
+	ses, err := p.Start(context.Background(), runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Queue a message before ending turn 1 so session.end triggers injection.
+	p.Queue.Enqueue(ses.SessionID, "queued-msg-1")
+	if err := p.Prompt(context.Background(), ses.SessionID, "turn-1"); err != nil {
+		t.Fatalf("turn-1 Prompt: %v", err)
+	}
+
+	<-injectEntered
+	// While injection is running, an external Prompt must be rejected instead of overlapping.
+	if err := p.Prompt(context.Background(), ses.SessionID, "overlapping-external"); err == nil || !strings.Contains(err.Error(), "prompt already in flight") {
+		t.Fatalf("Prompt during injection err = %v, want 'prompt already in flight'", err)
+	}
+	close(releaseInject)
+
+	// Wait for injection to finish and verify the failed message was re-enqueued.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.Lock()
+		reserved := p.injectReserved[ses.SessionID]
+		active := p.activePrompts[ses.SessionID]
+		p.mu.Unlock()
+		if reserved == 0 && active == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for injection cleanup")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if overlap.Load() {
+		t.Fatal("observed overlapping session/prompt calls between Prompt and injection")
+	}
+	requeued, done := p.Queue.Take(ses.SessionID)
+	if done != nil {
+		done()
+	}
+	if !slices.Equal(requeued, []string{"queued-msg-1"}) {
+		t.Fatalf("requeued = %v, want [queued-msg-1]", requeued)
+	}
+}
+
+func TestSubscribeCancelledContextAndCloseRaceFree(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		peer := newFakeInMemoryPeer(t)
+		p := NewProvider(ProviderConfig{BackendID: "agy"}).(*Provider)
+		p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+			return peer.client, nil
+		}
+		ses, err := p.Start(context.Background(), runtime.StartOptions{})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, _ = p.Events(ctx, ses.SessionID)
+		}()
+		go func() {
+			defer wg.Done()
+			close(peer.client.events)
+			close(peer.client.done)
+			_ = p.Close()
+		}()
+		wg.Wait()
+	}
+}
+
+func TestMultiSessionEventHubPreservesPerSessionBacklog(t *testing.T) {
+	peer := newFakeInMemoryPeer(t)
+	var nextSes atomic.Int32
+	peer.onCall = func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+		if msg.Method == "session/new" {
+			n := nextSes.Add(1)
+			return &rpcEnvelope{
+				ID:     msg.ID,
+				Result: mustRaw(map[string]any{"sessionId": "ses_" + strconv.Itoa(int(n))}),
+			}
+		}
+		return nil
+	}
+
+	p := NewProvider(ProviderConfig{
+		BackendID:        "agy",
+		EmitSessionStart: true,
+		Opts:             runtime.StartOptions{Model: "gemini-4-argon-high"},
+	}).(*Provider)
+	p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+		return peer.client, nil
+	}
+	defer func() {
+		close(peer.client.events)
+		close(peer.client.done)
+		_ = p.Close()
+	}()
+
+	ses1, err := p.Start(context.Background(), runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start ses1: %v", err)
+	}
+	sub1, err := p.Events(context.Background(), ses1.SessionID)
+	if err != nil {
+		t.Fatalf("Events ses1: %v", err)
+	}
+	select {
+	case ev := <-sub1:
+		if ev.Event != "session.start" || ev.SessionID != ses1.SessionID {
+			t.Fatalf("sub1 first event = %+v, want session.start for %s", ev, ses1.SessionID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ses1 session.start")
+	}
+
+	// Starting a second session after ses1 has already subscribed must still
+	// buffer ses2's session.start until ses2's first subscriber attaches.
+	ses2, err := p.Start(context.Background(), runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start ses2: %v", err)
+	}
+	sub2, err := p.Events(context.Background(), ses2.SessionID)
+	if err != nil {
+		t.Fatalf("Events ses2: %v", err)
+	}
+	select {
+	case ev := <-sub2:
+		if ev.Event != "session.start" || ev.SessionID != ses2.SessionID {
+			t.Fatalf("sub2 first event = %+v, want session.start for %s", ev, ses2.SessionID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ses2 session.start")
 	}
 }
 

@@ -50,6 +50,7 @@ type Client struct {
 	autoAnswerPermission bool
 	events               chan events.Event
 	stopEvents           chan struct{}
+	stopEventsOnce       sync.Once
 	reqWG                sync.WaitGroup
 	done                 chan struct{}
 	readErr              error
@@ -132,7 +133,16 @@ func (c *Client) Events() <-chan events.Event {
 	return c.events
 }
 
+func (c *Client) closeStopEvents() {
+	if c.stopEvents != nil {
+		c.stopEventsOnce.Do(func() {
+			close(c.stopEvents)
+		})
+	}
+}
+
 func (c *Client) Close() error {
+	c.closeStopEvents()
 	if c.stdin != nil {
 		_ = c.stdin.Close()
 	}
@@ -237,9 +247,7 @@ func (c *Client) write(msg rpcEnvelope) error {
 
 func (c *Client) readLoop() {
 	defer func() {
-		if c.stopEvents != nil {
-			close(c.stopEvents)
-		}
+		c.closeStopEvents()
 		c.reqWG.Wait()
 		close(c.events)
 		close(c.done)
@@ -296,7 +304,10 @@ func (c *Client) dispatch(msg rpcEnvelope) {
 
 	event, err := mapSessionUpdate(msg.Params)
 	if err == nil {
-		c.events <- event
+		select {
+		case c.events <- event:
+		case <-c.stopEvents:
+		}
 	}
 }
 
