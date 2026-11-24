@@ -961,6 +961,7 @@ describe('Avenor Pi extension', () => {
         registeredRenderers.push(type)
       },
       sendUserMessage: mock(() => {}),
+      sendMessage: mock(async () => {}),
       events: mockBus,
     }
 
@@ -1257,6 +1258,9 @@ describe('Avenor Pi extension', () => {
     for (const handler of eventHandlers.get('session_shutdown') ?? []) await handler()
 
     expect(registeredRenderers).toContain('avenor-active-runs')
+    // Inbound peer frames are custom messages: the renderer is what keeps the
+    // provenance notice out of the session log, so the wiring is pinned here.
+    expect(registeredRenderers).toContain('avenor-peer-message')
     expect(eventHandlers.has('session_start')).toBe(true)
     expect(eventHandlers.has('session_shutdown')).toBe(true)
     expect(eventHandlers.has('before_agent_start')).toBe(true)
@@ -3813,7 +3817,7 @@ describe('Avenor Pi extension', () => {
     await waitFor(() => resultTool.mock.calls.length === 1)
 
     deliver()
-    await waitFor(() => h.sendUserMessage.mock.calls.length > 0)
+    await waitFor(() => h.sendMessage.mock.calls.length > 0)
     const interrupted = await settleWithin(
       resultPromise,
       'blocking avenor_result did not return after the awaited run asked a question',
@@ -3850,10 +3854,10 @@ describe('Avenor Pi extension', () => {
     await waitFor(() => resultTool.mock.calls.length === 1)
 
     deliver()
-    await waitFor(() => h.sendUserMessage.mock.calls.length > 0)
-    const [tellBody] = h.sendUserMessage.mock.calls[0] as unknown as [string]
-    expect(tellBody).toContain('fyi, no action needed')
-    expect(tellBody).not.toContain('reply_to')
+    await waitFor(() => h.sendMessage.mock.calls.length > 0)
+    const [tellFrame] = h.sendMessage.mock.calls[0] as unknown as [Record<string, unknown>]
+    expect(String(tellFrame.content)).toContain('fyi, no action needed')
+    expect(String(tellFrame.content)).not.toContain('reply_to')
 
     let outcome: 'returned' | 'rejected' | undefined
     resultPromise.then(() => { outcome = 'returned' }, () => { outcome = 'rejected' })
@@ -3887,7 +3891,7 @@ describe('Avenor Pi extension', () => {
 
     // The ask body never reaches the session, so the agent has nothing to
     // answer and the wait must keep holding instead of reporting the ask.
-    h.sendUserMessage.mockImplementation(() => { throw new Error('session is not accepting messages') })
+    h.sendMessage.mockImplementation(async () => { throw new Error('session is not accepting messages') })
     const receivesBefore = brokerReceiveTool.mock.calls.length
     deliver()
     await waitFor(() => brokerReceiveTool.mock.calls.length >= receivesBefore + 2)
@@ -4338,7 +4342,7 @@ describe('Avenor Pi extension', () => {
     const spawnPromise: Promise<{ content: Array<{ text: string }>; details?: unknown }> = h.registeredTools.avenor_spawn.execute('t1', { agent: 'explore', label: 'worker', supervisor_id: SOCK, wait: true }, undefined, undefined, h.ctx)
 
     deliver()
-    await waitFor(() => h.sendUserMessage.mock.calls.length > 0)
+    await waitFor(() => h.sendMessage.mock.calls.length > 0)
     const spawnResult = await settleWithin(
       spawnPromise,
       'blocking spawn wait did not return after the awaited run asked a question',

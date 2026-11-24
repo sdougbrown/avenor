@@ -121,13 +121,14 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub })
-      const { registeredTools, sendUserMessage } = harness
+      const { registeredTools, sendMessage } = harness
 
-      await waitFor(() => sendUserMessage.mock.calls.length > 0)
-      const [body, options] = sendUserMessage.mock.calls[0] as [string, { deliverAs: string }]
-      expect(body).toContain('Inbound ask')
-      expect(body).toContain('is the build green?')
-      expect(body).toContain('"ask-1"')
+      await waitFor(() => sendMessage.mock.calls.length > 0)
+      const [message, options] = sendMessage.mock.calls[0] as [Record<string, unknown>, Record<string, string>]
+      expect(message.customType).toBe('avenor-peer-message')
+      expect(String(message.content)).toContain('Inbound ask')
+      expect(String(message.content)).toContain('is the build green?')
+      expect(String(message.content)).toContain('"ask-1"')
       expect(options.deliverAs).toBe('steer')
 
       const result = await registeredTools.avenor_message.execute('t1', {
@@ -180,7 +181,7 @@ describe('sub-agent broker mode (integration)', () => {
       fetchStub.setHandler('/poll-control', () => Response.json([
         { type: 'agent_message', payload: { id: 'ask-block', from_run_id: 'supervisor', message: 'still there?', expects_reply: true } },
       ]))
-      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
+      await waitFor(() => harness!.sendMessage.mock.calls.length > 0)
       const interrupted = await settleWithin(
         resultPromise,
         'blocking avenor_result did not return after the sub-agent received an ask',
@@ -205,10 +206,10 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub })
-      const { sendUserMessage } = harness
-      await waitFor(() => sendUserMessage.mock.calls.length > 0)
-      const [body] = sendUserMessage.mock.calls[0]!
-      expect(body).toContain('later ask')
+      const { sendMessage } = harness
+      await waitFor(() => sendMessage.mock.calls.length > 0)
+      const [message] = sendMessage.mock.calls[0]!
+      expect(String(message.content)).toContain('later ask')
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()
@@ -225,14 +226,14 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub })
-      const { sendUserMessage } = harness
+      const { sendMessage } = harness
       // The first tick gets a 503; the loop must reschedule and still surface
       // the ask on a later tick.
-      await waitFor(() => sendUserMessage.mock.calls.length > 0)
+      await waitFor(() => sendMessage.mock.calls.length > 0)
       const polls = fetchStub.calls.filter(call => call.path === '/poll-control').length
       expect(polls).toBeGreaterThanOrEqual(2)
-      const [body] = sendUserMessage.mock.calls[0]!
-      expect(body).toContain('after the error')
+      const [message] = sendMessage.mock.calls[0]!
+      expect(String(message.content)).toContain('after the error')
     } finally {
       await harness?.eventHandlers.session_shutdown({}, {})
       fetchStub.restore()
@@ -255,8 +256,8 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub })
-      const { registeredTools, sendUserMessage } = harness
-      await waitFor(() => sendUserMessage.mock.calls.length > 0)
+      const { registeredTools, sendMessage } = harness
+      await waitFor(() => sendMessage.mock.calls.length > 0)
 
       const [first, second] = await Promise.all([
         registeredTools.avenor_message.execute('t1', { action: 'reply', reply_to: 'ask-c', message: 'A' }),
@@ -278,8 +279,8 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub })
-      const { registeredTools, sendUserMessage } = harness
-      await waitFor(() => sendUserMessage.mock.calls.length > 0)
+      const { registeredTools, sendMessage } = harness
+      await waitFor(() => sendMessage.mock.calls.length > 0)
 
       const failed = await registeredTools.avenor_message.execute('t1', {
         action: 'reply',
@@ -366,7 +367,7 @@ describe('sub-agent broker mode (integration)', () => {
           hostProviderFor: mock(async () => provider),
         },
       })
-      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
+      await waitFor(() => harness!.sendMessage.mock.calls.length > 0)
       const result = await harness.registeredTools.avenor_message.execute('t1', {
         action: 'reply',
         reply_to: 'ask-h',
@@ -419,7 +420,7 @@ describe('sub-agent broker mode (integration)', () => {
         { type: 'agent_message', payload: { id: 'old-child-ask', from_run_id: 'supervisor', message: 'old session question', expects_reply: true } },
       ])))
       await waitFor(() => polls > 1)
-      expect(harness.sendUserMessage).not.toHaveBeenCalled()
+      expect(harness.sendMessage).not.toHaveBeenCalled()
       const reply = await harness.registeredTools.avenor_message.execute('t1', {
         action: 'reply',
         reply_to: 'old-child-ask',
@@ -454,7 +455,7 @@ describe('sub-agent broker mode (integration)', () => {
     let harness: Awaited<ReturnType<typeof startSubAgentExtension>> | undefined
     try {
       harness = await startSubAgentExtension({ fetchStub })
-      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
+      await waitFor(() => harness!.sendMessage.mock.calls.length > 0)
       const reply = harness.registeredTools.avenor_message.execute('t1', {
         action: 'reply',
         reply_to: 'old-child-reply',
@@ -629,15 +630,15 @@ describe('sub-agent broker mode (integration)', () => {
 
       const result = await pending
       expect(result.details.outcome).toBe('timed-out')
-      expect(harness.sendUserMessage).not.toHaveBeenCalled()
+      expect(harness.sendMessage).not.toHaveBeenCalled()
 
       lateArmed = true
-      await waitFor(() => harness!.sendUserMessage.mock.calls.length > 0)
-      const [body, options] = harness.sendUserMessage.mock.calls[0] as [string, { deliverAs: string }]
-      expect(body).toContain('Message from peer')
-      expect(body).toContain('LATE-PONG')
-      expect(body).not.toContain('reply_to')
-      expect(options.deliverAs).toBe('steer')
+      await waitFor(() => harness!.sendMessage.mock.calls.length > 0)
+      const [frame, frameOptions] = harness.sendMessage.mock.calls[0] as [Record<string, unknown>, Record<string, string>]
+      expect(String(frame.content)).toContain('Message from peer')
+      expect(String(frame.content)).toContain('LATE-PONG')
+      expect(String(frame.content)).not.toContain('reply_to')
+      expect(frameOptions.deliverAs).toBe('steer')
     } finally {
       wait.resolve(new Response('[]'))
       await harness?.eventHandlers.session_shutdown({}, {})

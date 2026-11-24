@@ -22,6 +22,7 @@ export async function startExtensionHarness(options: {
   sessionManager?: unknown
   onEmit?: (channel: string, payload: unknown) => void
   sendUserMessage?: (text: string, options: { deliverAs: string }) => void
+  sendMessage?: (message: Record<string, unknown>, options?: Record<string, unknown>) => Promise<void>
 } = {}) {
   const registeredTools: Record<string, any> = {}
   const registeredCommands: Record<string, any> = {}
@@ -32,6 +33,9 @@ export async function startExtensionHarness(options: {
   const sendUserMessage = mock<(text: string, options: { deliverAs: string }) => void>(
     options.sendUserMessage ?? (() => {}),
   )
+  const sendMessage = mock<(message: Record<string, unknown>, options?: Record<string, unknown>) => Promise<void>>(
+    options.sendMessage ?? (async () => {}),
+  )
   const emitted: Array<[string, unknown]> = []
   const mockPi = {
     on: (event: string, handler: any) => { eventHandlers[event] = handler },
@@ -39,6 +43,7 @@ export async function startExtensionHarness(options: {
     registerCommand: (name: string, definition: any) => { registeredCommands[name] = definition },
     registerMessageRenderer: () => {},
     sendUserMessage,
+    sendMessage,
     events: {
       emit: mock((channel: string, payload: unknown) => {
         emitted.push([channel, payload])
@@ -89,7 +94,7 @@ export async function startExtensionHarness(options: {
     isIdle: () => true,
   }
   await eventHandlers.session_start({}, ctx)
-  return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, setStatus, setWidget }
+  return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, sendMessage, setStatus, setWidget }
 }
 
 /** A bound provider fake; host-mode tools pass one to the core handlers. */

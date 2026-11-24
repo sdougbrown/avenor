@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import {
   formatInboundAskBody,
+  inboundAskDisplay,
   parseControlMessage,
   publishHarnessName,
   readSubAgentEnv,
@@ -171,6 +172,33 @@ describe('formatInboundAskBody', () => {
     expect(body).toContain('another session')
     expect(body).toContain('delete the branch')
     expect(body).not.toContain('avenor_message({ action: "reply"')
+  })
+})
+
+describe('inboundAskDisplay', () => {
+  // The session log renders from these fields, so they must carry everything
+  // the human reader needs and nothing that is model-only: the provenance
+  // notice and the reply instruction stay in the message content.
+  it('keeps the header and the sender\'s text, and leaves the model-only framing out', () => {
+    const ask = { from_run_id: 'peer-7', message_id: 'ask-1', message: 'is the build green?', expects_reply: true }
+    const display = inboundAskDisplay(ask, { heading: 'Ask from sub-agent' })
+    expect(display.header).toContain('Ask from sub-agent')
+    expect(display.header).toContain('from `peer-7`')
+    expect(display.body).toBe('is the build green?')
+    expect(display.header).not.toContain('another session')
+    expect(display.body).not.toContain('avenor_message')
+  })
+
+  it('matches the body header a tell renders, id segment included', () => {
+    const tell = { from_run_id: 'peer-1', message_id: 'av1.m.envelope', message: 'fyi', expects_reply: false }
+    const body = formatInboundAskBody(tell, { heading: 'Message from peer' })
+    const display = inboundAskDisplay(tell, { heading: 'Message from peer' })
+    expect(display.header).toContain('message id `av1.m.envelope`')
+    expect(body).toContain('message id `av1.m.envelope`')
+    // An ask names its id only in the reply instruction, so the header keeps
+    // none — the same decision the body's header makes.
+    const ask = { from_run_id: 'peer-2', message_id: 'ask-9', message: 'hi', expects_reply: true }
+    expect(inboundAskDisplay(ask, { heading: 'Inbound ask' }).header).not.toContain('message id')
   })
 })
 

@@ -9,14 +9,17 @@ import {
   createTopLevelPeerEnv,
   registerTopLevelPeer,
   formatInboundAskBody,
+  inboundAskDisplay,
   isInvalidNameRefusal,
   parseControlMessage,
+  PEER_MESSAGE_CUSTOM_TYPE,
   postBroker,
   publishHarnessName,
   publishLastTurn,
   readSubAgentEnv,
   type InboundAsk,
   type InboundAskBodyOptions,
+  type InboundAskDisplay,
   type SubAgentEnv,
 } from './subagent-broker.js'
 import {
@@ -42,6 +45,7 @@ import {
   messageTool,
   normalizeTurnStopReason,
   observeRun,
+  PEER_MESSAGE_NOTICE,
   peersDetails,
   peersTool,
   renderPeerList,
@@ -536,23 +540,43 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * cannot answer. A tell has no reply edge: expects_reply alone decides, so
      * a tell is delivered unregistered, uninterrupting, and without the reply
      * instruction — the same decision the hooks' frames make. */
-    function surfaceInboundAsk(
+    async function surfaceInboundAsk(
       pending: Map<string, { from_run_id: string; message_id: string }>,
       ask: InboundAsk,
       heading: InboundAskBodyOptions['heading'],
-    ): void {
+    ): Promise<void> {
       // No role: the wire carries none the broker stamps, so a payload's claim to
       // one is the sender's to make up.
       if (!ask.expects_reply) {
         // The heading parameter names the ask reader; a tell is always a
         // peer's message, so its heading is fixed here. The reply line is the
         // formatter's own decision, derived from expects_reply.
-        pi.sendUserMessage(formatInboundAskBody(ask, { heading: 'Message from peer' }), { deliverAs: 'steer' as const })
+        await deliverPeerFrame(ask, { heading: 'Message from peer' })
         return
       }
-      pi.sendUserMessage(formatInboundAskBody(ask, { heading }), { deliverAs: 'steer' as const })
+      await deliverPeerFrame(ask, { heading })
       pending.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
       interruptWaitsForAsk(ask)
+    }
+
+    /** Deliver one inbound peer frame as a custom message. The model reads the
+     * full body (notice and reply instruction included); the registered
+     * 'avenor-peer-message' renderer shows the session log only the header and
+     * the sender's text, so provenance framing stays model-only. A steer
+     * reaches a streaming run mid-flight and triggerTurn starts one when idle,
+     * matching sendUserMessage's delivery without pinning the frame to the
+     * user-message transcript shape. Rejections propagate so a failed delivery
+     * stays queued for the next tick instead of being dropped. */
+    async function deliverPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions): Promise<void> {
+      await pi.sendMessage(
+        {
+          customType: PEER_MESSAGE_CUSTOM_TYPE,
+          content: formatInboundAskBody(ask, options),
+          display: true,
+          details: inboundAskDisplay(ask, options),
+        },
+        { triggerTurn: true, deliverAs: 'steer' as const },
+      )
     }
 
     interface InterruptibleWait {
@@ -782,14 +806,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const intervalMs = options.pollIntervalMs ?? 2000
       let consecutiveFailures = 0
       const queuedMessages: Array<Record<string, unknown>> = []
-      function deliverQueuedMessages(): void {
+      async function deliverQueuedMessages(): Promise<void> {
         while (queuedMessages.length > 0) {
           const msg = queuedMessages[0]
           const ask = parseControlMessage(msg)
           if (ask) {
             // The tell branch lives inside surfaceInboundAsk: expects_reply
             // alone decides, in every mode.
-            surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
+            await surfaceInboundAsk(subAgentPendingAsks, ask, 'Inbound ask')
           }
           queuedMessages.shift()
         }
@@ -808,7 +832,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             await registerCentralPeer(abort.signal)
             attemptedRegistration = false
           }
-          deliverQueuedMessages()
+          await deliverQueuedMessages()
           // The broker encodes an empty queue as JSON null.
           const msgs = ((await postBroker(env, '/poll-control', {}, fetch, AbortSignal.any([abort.signal, AbortSignal.timeout(15000)]))) ?? []) as Array<Record<string, unknown>>
           if (generation !== subAgentPollGeneration) return
@@ -819,7 +843,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
           consecutiveFailures = 0
           queuedMessages.push(...msgs)
-          deliverQueuedMessages()
+          await deliverQueuedMessages()
           await publishCentralTurn()
         } catch (error) {
           // Broker unreachable while it is starting up is expected; persistent
@@ -905,7 +929,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           if (generation !== hostPollGeneration) return
           if (received.generation) hostReceiveGeneration = received.generation
           for (const ask of received.asks) {
-            surfaceInboundAsk(hostPendingAsks, ask, 'Ask from sub-agent')
+            await surfaceInboundAsk(hostPendingAsks, ask, 'Ask from sub-agent')
           }
         } catch {
           // No supervisor/broker yet — this is expected until a supervisor starts a broker.
@@ -2386,6 +2410,19 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         if (i < lines.length - 1) text += '\n'
       }
       return new Text(text, 0, 0)
+    })
+
+    // The session log shows an inbound peer frame's header and the sender's
+    // text; the provenance notice and the reply instruction stay model-only in
+    // the message content. A frame written before details existed (a session
+    // resumed from an older build) falls back to its content minus the notice.
+    pi.registerMessageRenderer<InboundAskDisplay>(PEER_MESSAGE_CUSTOM_TYPE, (message, _options, theme: Theme) => {
+      const text = message.details
+        ? `${message.details.header}\n\n${message.details.body}`
+        : (typeof message.content === 'string' ? message.content : '').split(`${PEER_MESSAGE_NOTICE}\n\n`).join('')
+      const lines = text.split('\n')
+      const rendered = lines.map((line, index) => index === 0 ? theme.fg('accent', theme.bold(line)) : line).join('\n')
+      return new Text(rendered, 0, 0)
     })
 
     pi.registerTool({

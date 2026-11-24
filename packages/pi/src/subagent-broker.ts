@@ -123,3 +123,23 @@ export function formatInboundAskBody(ask: InboundAsk, options: InboundAskBodyOpt
   return body + `\n\nTo answer, use avenor_message({ action: "reply", reply_to: ${JSON.stringify(ask.message_id)}, message: "..." }).`
 }
 
+/** The custom message type every inbound peer frame is delivered as. */
+export const PEER_MESSAGE_CUSTOM_TYPE = 'avenor-peer-message'
+
+/** The display half of an inbound peer frame: what the session log shows for a
+ * message whose model-facing content keeps the provenance notice and the reply
+ * instruction. Built beside the body so the two halves cannot drift. */
+export interface InboundAskDisplay {
+  /** The plain-text header line: heading, sender, and (for a tell) its id. */
+  header: string
+  /** The sender's own message, exactly as the model reads it. */
+  body: string
+}
+
+export function inboundAskDisplay(ask: InboundAsk, options: InboundAskBodyOptions): InboundAskDisplay {
+  const from = ask.from_run_id ? ` from \`${ask.from_run_id}\`` : ''
+  const idSegment = !ask.expects_reply && ask.message_id !== ''
+    ? ` (message id \`${sanitize(ask.message_id)}\`)` : ''
+  return { header: `📨 ${options.heading}${from}${idSegment}`, body: ask.message }
+}
+
