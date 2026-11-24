@@ -107,10 +107,10 @@ type ConsumerConfig struct {
 // makes it this inbox's only consumer.
 func Consume(ctx context.Context, cfg ConsumerConfig) error {
 	if cfg.RunID == "" || cfg.Token == "" || cfg.BrokerURL == "" {
-		return fmt.Errorf("feed consumer: run id, token, and broker URL are required")
+		return fmt.Errorf("%w: run id, token, and broker URL are required", ErrInvalidProviderConfig)
 	}
 	if strings.TrimSpace(cfg.LogPrefix) == "" {
-		return fmt.Errorf("feed consumer: log prefix is required")
+		return fmt.Errorf("%w: log prefix is required", ErrInvalidProviderConfig)
 	}
 	if cfg.AsksDir == "" {
 		dir, err := askclaim.DefaultDir(appdir.StateHome(), cfg.BrokerURL, cfg.RunID)

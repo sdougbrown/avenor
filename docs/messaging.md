@@ -189,8 +189,11 @@ Every spawn the server forwards to that supervisor names the bound run as
 `parent_run_id`, so a child's messages reach the inbox the conversation consumes.
 `message` (all actions except `resume`) and `peers` speak as the bound run and
 claim asks from `<StateHome>/feed-asks/<BrokerKey>`, so `message` with
-`action: "reply"` works whichever path (`avenor://inbox` or `avenor feed broker`)
-delivered the ask. A spawn or message aimed at another supervisor uses no bound
+`action: "reply"` works whichever path (`avenor://inbox` or `avenor feed broker`
+using the default asks directory) delivered the ask. `avenor mcp` has no
+`--asks-dir` override; asks recorded by a feed launched with a custom
+`--asks-dir` must be answered through `avenor message --action reply --asks-dir`
+instead. A spawn or message aimed at another supervisor uses no bound
 identity — that supervisor holds no record of the conversation — and is never
 asked to bind it. The supervisor is the one authority on the mapping: a parent
 run it no longer holds live (removed, expired, retired, or minted before a

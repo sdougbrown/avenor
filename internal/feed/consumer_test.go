@@ -408,19 +408,46 @@ func TestConsumeShrinksLimitAfterOversizedBatch(t *testing.T) {
 }
 
 // TestConsumeRequiresLogPrefix proves the shared consumer refuses to fall back
-// to one surface's name when a caller omits LogPrefix.
+// to one surface's name when a caller omits LogPrefix and classifies missing
+// required fields as ErrInvalidProviderConfig.
 func TestConsumeRequiresLogPrefix(t *testing.T) {
-	for _, prefix := range []string{"", "   "} {
-		err := Consume(context.Background(), ConsumerConfig{
-			Surface:   messaging.SurfaceFeed,
-			RunID:     "r",
-			Token:     "t",
-			BrokerURL: "http://127.0.0.1:9",
-			AsksDir:   t.TempDir(),
-			LogPrefix: prefix,
+	cases := []struct {
+		name string
+		cfg  ConsumerConfig
+		want string
+	}{
+		{
+			name: "empty prefix",
+			cfg:  ConsumerConfig{Surface: messaging.SurfaceFeed, RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", AsksDir: t.TempDir(), LogPrefix: ""},
+			want: "log prefix is required",
+		},
+		{
+			name: "whitespace prefix",
+			cfg:  ConsumerConfig{Surface: messaging.SurfaceFeed, RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", AsksDir: t.TempDir(), LogPrefix: "   "},
+			want: "log prefix is required",
+		},
+		{
+			name: "missing run id",
+			cfg:  ConsumerConfig{Surface: messaging.SurfaceFeed, Token: "t", BrokerURL: "http://127.0.0.1:9", AsksDir: t.TempDir(), LogPrefix: "test"},
+			want: "run id, token, and broker URL are required",
+		},
+		{
+			name: "missing token",
+			cfg:  ConsumerConfig{Surface: messaging.SurfaceFeed, RunID: "r", BrokerURL: "http://127.0.0.1:9", AsksDir: t.TempDir(), LogPrefix: "test"},
+			want: "run id, token, and broker URL are required",
+		},
+		{
+			name: "missing broker url",
+			cfg:  ConsumerConfig{Surface: messaging.SurfaceFeed, RunID: "r", Token: "t", AsksDir: t.TempDir(), LogPrefix: "test"},
+			want: "run id, token, and broker URL are required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Consume(context.Background(), tc.cfg)
+			if !errors.Is(err, ErrInvalidProviderConfig) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want ErrInvalidProviderConfig containing %q", err, tc.want)
+			}
 		})
-		if err == nil || !strings.Contains(err.Error(), "log prefix is required") {
-			t.Fatalf("prefix %q: err = %v, want log prefix required error", prefix, err)
-		}
 	}
 }
