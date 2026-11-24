@@ -634,7 +634,7 @@ func TestStartAskClaimPrunerStops(t *testing.T) {
 	b := &Broker{RunID: "r", Token: "t", BrokerURL: "http://127.0.0.1:9", Log: io.Discard}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop := b.startAskClaimPruner(ctx, &pruneReporter{out: io.Discard})
+	stop := startAskClaimPruner(ctx, b.claimPruner(), &pruneReporter{out: io.Discard, prefix: "feed broker"})
 	stopped := make(chan struct{})
 	go func() {
 		stop()
@@ -664,7 +664,7 @@ func TestPruneFailureIsReportedOncePerRoot(t *testing.T) {
 	if err := os.WriteFile(root, []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	reporter := &pruneReporter{out: &log}
+	reporter := &pruneReporter{out: &log, prefix: "feed broker"}
 	b.pruneAskClaims(reporter)
 	first := strings.Count(log.String(), "prune ask claim records")
 	b.pruneAskClaims(reporter)

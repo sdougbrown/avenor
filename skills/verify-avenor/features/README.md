@@ -16,7 +16,7 @@ state named in each file is the acceptance bar for that feature.
 | Child message CLI | [message-cli.md](message-cli.md) | `avenor message --action tell|ask|reply|withdraw` as a broker child |
 | Owner message bind | [message-bind.md](message-bind.md) | owner-only `message_bind` over the stable control socket → credentials + typed refusals |
 | Bound conversation CLI | [bound-cli.md](bound-cli.md) | `feed broker --bind-*` derives the session's supervisor, starts and owns it, binds once → `avenor spawn`/`status`/`result`/`message` read the live binding, no credential in argv or env |
-| MCP conversation launch | [mcp-conversation-binding.md](mcp-conversation-binding.md) | `avenor mcp --bind-host/--bind-session/--bind-output-fd` → identity on an inherited pipe, stdio framing, relaunch reuse |
+| MCP conversation launch & inbox | [mcp-conversation-binding.md](mcp-conversation-binding.md) | `avenor mcp --bind-host/--bind-session` (optional `--bind-output-fd`) → optional pipe handoff, `avenor://inbox` subscriptions (`2025-11-25` & `2026-07-28`), shared feed lock, bound `message` replies |
 | Pi completion notices | [pi-completions.md](pi-completions.md) | real `pi --mode rpc` host + `avenor` supervisor + `pi` children → footer `avenor` status and `avenor-completion` messages |
 | Config validation | [verify-command.md](verify-command.md) | `avenor verify` |
 | Launch identity | [provenance.md](provenance.md) | `avenor run --team-file` → MCP env + phase/team events |

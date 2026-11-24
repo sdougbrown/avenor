@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sdougbrown/avenor/internal/appdir"
+	"github.com/sdougbrown/avenor/internal/askclaim"
 	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/messaging"
 )
@@ -28,14 +30,18 @@ var hostHandoffTimeout = 5 * time.Second
 // hostBind is the native host conversation a trusted launcher declared for this
 // server, plus the identity the launch's one bind resolved to. The declaration
 // arrives with the launch, never as a tool argument, so the conversation a call
-// speaks for cannot be chosen or spoofed by a model.
+// speaks for cannot be chosen or spoofed by a model. The resolved identity —
+// credentials included — is retained in memory only: it is never written to a
+// log, argv, file, MCP tool result or child environment.
 type hostBind struct {
 	host      string
 	sessionID string
-	// handoff is the private pipe the launching host passed in: the one place
-	// the conversation's messaging credentials are written. The server owns it
-	// and closes it once the identity has been handed over, or as soon as the
-	// launch fails, so the host's read never waits on this process.
+	// handoff is the private pipe the launching host passed in, when it asked
+	// for the identity on one: the one place the conversation's messaging
+	// credentials are written. The server owns it and closes it once the
+	// identity has been handed over, or as soon as the launch fails, so the
+	// host's read never waits on this process. A launch without a pipe hands
+	// the identity to nobody and keeps it in memory.
 	handoff   io.WriteCloser
 	closeOnce sync.Once
 	// closeErr is the one result of closing the handoff pipe.
@@ -43,9 +49,17 @@ type hostBind struct {
 
 	// mu guards the identity below, which the launch binds once before the
 	// server serves and every later spawn reads.
-	mu             sync.Mutex
+	mu    sync.Mutex
+	bound boundIdentity
+}
+
+// boundIdentity is one conversation's identity as the launch's bind resolved
+// it: the supervisor that holds the run, the credentials the run was minted
+// with, and the directory its inbox feed claims asks in.
+type boundIdentity struct {
 	supervisorPath string
-	runID          string
+	result         messaging.MessageBindResult
+	asksDir        string
 }
 
 // newHostBind validates a launch declaration. Only a host the policy mints a
@@ -57,8 +71,11 @@ func newHostBind(transport, host, sessionID string, handoff io.WriteCloser) (*ho
 	if host == "" && sessionID == "" && handoff == nil {
 		return nil, nil
 	}
-	if host == "" || sessionID == "" || handoff == nil {
-		return nil, fmt.Errorf("a host conversation declaration needs a host, a session id and a handoff pipe together")
+	if handoff != nil && (host == "" || sessionID == "") {
+		return nil, fmt.Errorf("a handoff pipe requires a host and a session id")
+	}
+	if host == "" || sessionID == "" {
+		return nil, fmt.Errorf("a host conversation declaration needs a host and a session id together")
 	}
 	if transport != "stdio" {
 		return nil, fmt.Errorf("a host conversation is declared only on the stdio transport, which serves one client; a shared transport has no single conversation")
@@ -87,21 +104,31 @@ type hostBinder interface {
 func (b *hostBind) identity() (supervisorPath, runID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.supervisorPath, b.runID
+	return b.bound.supervisorPath, b.bound.result.RunID
 }
 
-func (b *hostBind) setIdentity(supervisorPath, runID string) {
+// boundState reports the identity the launch bound, credentials and inbox
+// directory included. The bool is false until the launch's bind has landed.
+func (b *hostBind) boundState() (boundIdentity, bool) {
 	b.mu.Lock()
-	b.supervisorPath, b.runID = supervisorPath, runID
+	defer b.mu.Unlock()
+	return b.bound, b.bound.result.RunID != ""
+}
+
+// setIdentity stores the launch's one identity snapshot atomically, so a reader
+// never sees a run id beside another bind's credentials or inbox directory.
+func (b *hostBind) setIdentity(supervisorPath string, res messaging.MessageBindResult, asksDir string) {
+	b.mu.Lock()
+	b.bound = boundIdentity{supervisorPath: supervisorPath, result: res, asksDir: asksDir}
 	b.mu.Unlock()
 }
 
 // handOff writes the conversation's messaging identity to the launching host as
 // one JSON line on the inherited pipe, then closes the pipe so the host reads a
-// complete identity followed by EOF. The credentials travel on that pipe and
-// nowhere else: not to a log, not to argv, not to a file, not to an MCP tool
-// result, and not into a child's environment. The write is bounded so a host
-// that stopped reading fails the launch instead of stalling it.
+// complete identity followed by EOF. The credentials leave this process only on
+// that pipe: not to a log, not to argv, not to a file, not to an MCP tool result,
+// and not into a child's environment. The write is bounded so a host that stopped
+// reading fails the launch instead of stalling it.
 func (b *hostBind) handOff(res messaging.MessageBindResult) error {
 	err := b.writeLine(res)
 	// Close whatever the write did: the host reads a complete line and then
@@ -142,8 +169,12 @@ func (b *hostBind) writeLine(res messaging.MessageBindResult) error {
 }
 
 // closeHandoff closes the handoff pipe once, whoever gets there first: the
-// handoff after its write, or the launch's failure path.
+// handoff after its write, or the launch's failure path. A launch that declared
+// no pipe has nothing to close.
 func (b *hostBind) closeHandoff() error {
+	if b.handoff == nil {
+		return nil
+	}
 	b.closeOnce.Do(func() { b.closeErr = b.handoff.Close() })
 	return b.closeErr
 }
@@ -162,10 +193,11 @@ func (s *Server) reportUnboundParent(format string, args ...any) {
 }
 
 // bindHostConversation binds the launch's declared conversation on the
-// supervisor this server owns and hands the identity to the launching host over
-// the inherited pipe. Both happen before the first tool call is served: a
-// conversation whose identity the host never received has no inbox a child could
-// report to, so a launch that cannot bind or hand off fails rather than serve a
+// supervisor this server owns, resolves the inbox directory its feed will
+// serve, and hands the identity to the launching host when the launch asked for
+// it on an inherited pipe. All of it happens before the first tool call is
+// served: a conversation the host cannot reach has no inbox a child could report
+// to, so a launch that cannot bind (or hand off) fails rather than serve a
 // binding nobody holds.
 func (s *Server) bindHostConversation(ctx context.Context) error {
 	if s.hostBind == nil {
@@ -186,10 +218,19 @@ func (s *Server) bindHostConversation(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("conversation bind for host %q session %q: %w", s.hostBind.host, s.hostBind.sessionID, err)
 	}
-	if err := s.hostBind.handOff(res); err != nil {
-		return err
+	// Resolve the inbox directory before anything is handed over or stored: an
+	// invalid broker URL must fail the launch cleanly before it serves, and the
+	// error names only the bind, never the credentials.
+	asksDir, err := askclaim.DefaultDir(appdir.StateHome(), res.BrokerURL, res.RunID)
+	if err != nil {
+		return fmt.Errorf("conversation bind for host %q session %q: resolve the inbox claim directory: %w", s.hostBind.host, s.hostBind.sessionID, err)
 	}
-	s.hostBind.setIdentity(supervisorPath, res.RunID)
+	if s.hostBind.handoff != nil {
+		if err := s.hostBind.handOff(res); err != nil {
+			return err
+		}
+	}
+	s.hostBind.setIdentity(supervisorPath, res, asksDir)
 	return nil
 }
 

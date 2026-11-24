@@ -374,3 +374,44 @@ func TestHooksStripEveryPeerBinding(t *testing.T) {
 		}
 	}
 }
+
+// TestPeerRecordBrokerFailureRedactsRunToken proves the peer-record refusal
+// strips the peer's broker token before returning a broker error as a tool
+// result, matching the bound-conversation refusal path.
+func TestPeerRecordBrokerFailureRedactsRunToken(t *testing.T) {
+	const secret = "tok_codex_secret_value"
+	broker, brokerURL := newFakeBroker(t)
+	broker.fail("/sessions", http.StatusBadRequest, `{"error":"rejected run token `+secret+`"}`)
+
+	file := writeCodexPeerRecord(t, brokerURL, "rt_codex", secret)
+	s := &Server{}
+	res, err := s.handleAvenorMessage(context.Background(), toolRequest(t, map[string]any{
+		"action": "tell", "target": "run_other", "message": "hi", "codex_peer_file": file,
+	}))
+	if err != nil {
+		t.Fatalf("a peer-record broker failure returned a transport error instead of a typed refusal: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("a peer-record broker failure answered the call: %#v", res.StructuredContent)
+	}
+	object := resultObject(t, res)
+	if object["code"] != "refused" {
+		t.Fatalf("broker failure code = %v, want refused", object["code"])
+	}
+	text, _ := object["text"].(string)
+	if !strings.Contains(text, "Codex peer record cannot be used") {
+		t.Fatalf("broker failure text = %q, want peer-record refusal sentence", text)
+	}
+	if !strings.Contains(text, "[redacted]") {
+		t.Fatalf("broker failure text = %q, want redacted placeholder", text)
+	}
+	encoded, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		t.Fatalf("encode structured result: %v", err)
+	}
+	for _, surface := range []string{text, toolText(t, res), string(encoded)} {
+		if strings.Contains(surface, secret) {
+			t.Fatalf("the peer run token reached a surface: %q", surface)
+		}
+	}
+}
