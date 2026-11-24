@@ -209,8 +209,8 @@ func TestSetSessionModeParams(t *testing.T) {
 	}
 }
 
-func TestSetSessionModelParams(t *testing.T) {
-	got := setSessionModelParams("ses_123", "github-copilot/gpt-5")
+func TestSetSessionConfigOptionParams(t *testing.T) {
+	got := setSessionConfigOptionParams("ses_123", "model", "github-copilot/gpt-5")
 
 	if got["sessionId"] != "ses_123" {
 		t.Fatalf("sessionId = %v, want ses_123", got["sessionId"])
@@ -220,5 +220,102 @@ func TestSetSessionModelParams(t *testing.T) {
 	}
 	if got["value"] != "github-copilot/gpt-5" {
 		t.Fatalf("value = %v, want github-copilot/gpt-5", got["value"])
+	}
+}
+
+// recordingClient routes client requests to a recording stdin and returns the
+// result the callback produces, so a test can inspect the exact wire frames a
+// session config setter sends and its error propagation.
+func recordingClient(t *testing.T, methods *[]string, paramsList *[]map[string]any, result func(msg rpcEnvelope) (json.RawMessage, *rpcError)) *Client {
+	t.Helper()
+	var client *Client
+	stdin := &rpcFuncWriteCloser{
+		fn: func(msg rpcEnvelope) {
+			*methods = append(*methods, msg.Method)
+			var p map[string]any
+			if err := json.Unmarshal(msg.Params, &p); err != nil {
+				t.Fatalf("unmarshal params: %v", err)
+			}
+			*paramsList = append(*paramsList, p)
+			client.pendingMu.Lock()
+			ch := client.pending[string(msg.ID)]
+			client.pendingMu.Unlock()
+			if ch == nil {
+				return
+			}
+			resp := rpcEnvelope{ID: msg.ID}
+			if result != nil {
+				resp.Result, resp.Error = result(msg)
+			}
+			ch <- resp
+		},
+	}
+	client = &Client{
+		stdin:   stdin,
+		done:    make(chan struct{}),
+		pending: map[string]chan rpcEnvelope{},
+	}
+	return client
+}
+
+func TestClientSetSessionConfigOptionSendsExpectedRPC(t *testing.T) {
+	var methods []string
+	var paramsList []map[string]any
+	client := recordingClient(t, &methods, &paramsList, nil)
+
+	ctx := context.Background()
+	if err := client.SetSessionConfigOption(ctx, "ses_1", "thought_level", "high"); err != nil {
+		t.Fatalf("SetSessionConfigOption: %v", err)
+	}
+	if err := client.SetSessionModel(ctx, "ses_1", "gemini-3.8-flash-low"); err != nil {
+		t.Fatalf("SetSessionModel: %v", err)
+	}
+
+	wantParams := []map[string]any{
+		{"sessionId": "ses_1", "configId": "thought_level", "value": "high"},
+		{"sessionId": "ses_1", "configId": "model", "value": "gemini-3.8-flash-low"},
+	}
+	if len(methods) != len(wantParams) {
+		t.Fatalf("methods = %v, want %d set_config_option requests", methods, len(wantParams))
+	}
+	for i, want := range wantParams {
+		if methods[i] != "session/set_config_option" {
+			t.Fatalf("methods[%d] = %q, want session/set_config_option", i, methods[i])
+		}
+		for key, wantValue := range want {
+			if paramsList[i][key] != wantValue {
+				t.Errorf("params[%d][%q] = %v, want %v", i, key, paramsList[i][key], wantValue)
+			}
+		}
+	}
+}
+
+func TestClientSetSessionConfigOptionEmptyValueIsNoOp(t *testing.T) {
+	var methods []string
+	var paramsList []map[string]any
+	client := recordingClient(t, &methods, &paramsList, nil)
+
+	ctx := context.Background()
+	if err := client.SetSessionConfigOption(ctx, "ses_1", "thought_level", ""); err != nil {
+		t.Fatalf("SetSessionConfigOption empty: %v", err)
+	}
+	if err := client.SetSessionModel(ctx, "ses_1", ""); err != nil {
+		t.Fatalf("SetSessionModel empty: %v", err)
+	}
+	if len(methods) != 0 {
+		t.Fatalf("methods = %v, want no requests for empty values", methods)
+	}
+}
+
+func TestClientSetSessionConfigOptionSurfacesRPCError(t *testing.T) {
+	var methods []string
+	var paramsList []map[string]any
+	client := recordingClient(t, &methods, &paramsList, func(rpcEnvelope) (json.RawMessage, *rpcError) {
+		return nil, &rpcError{Code: -32602, Message: "Unknown model ID"}
+	})
+
+	err := client.SetSessionModel(context.Background(), "ses_1", "bad-model")
+	if err == nil || !strings.Contains(err.Error(), "json-rpc session/set_config_option failed: Unknown model ID (-32602)") {
+		t.Fatalf("SetSessionModel err = %v, want the peer's rejection", err)
 	}
 }

@@ -2426,3 +2426,64 @@ func TestMultiSessionEventHubPreservesPerSessionBacklog(t *testing.T) {
 	}
 }
 
+// Thinking is scoped: a provider constructed with a default level applies it to
+// a fresh start, an explicit resume overrides it for that call, and a resume
+// that names no level sends none so a constructor default cannot leak into it.
+func TestProviderThinkingScopeStartVsResume(t *testing.T) {
+	peer := newFakeInMemoryPeer(t)
+	var configured []runtime.StartOptions
+	p := NewProvider(ProviderConfig{
+		BackendID: "agy",
+		Opts:      runtime.StartOptions{Thinking: "low"},
+		ConfigureSession: func(_ context.Context, _ *Session, opts runtime.StartOptions) error {
+			configured = append(configured, opts)
+			return nil
+		},
+	}).(*Provider)
+	p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+		return peer.client, nil
+	}
+	defer func() {
+		close(peer.client.events)
+		close(peer.client.done)
+		_ = p.Close()
+	}()
+
+	last := func() runtime.StartOptions {
+		t.Helper()
+		if len(configured) == 0 {
+			t.Fatal("ConfigureSession was never called")
+		}
+		return configured[len(configured)-1]
+	}
+	ctx := context.Background()
+
+	ses, err := p.Start(ctx, runtime.StartOptions{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := last().Thinking; got != "low" {
+		t.Fatalf("fresh Start Thinking = %q, want the constructor default low", got)
+	}
+
+	if _, err := p.ResumeWithOptions(ctx, ses.SessionID, runtime.StartOptions{Thinking: "high"}); err != nil {
+		t.Fatalf("ResumeWithOptions(thinking high): %v", err)
+	}
+	if got := last().Thinking; got != "high" {
+		t.Fatalf("ResumeWithOptions Thinking = %q, want the explicit high", got)
+	}
+
+	if _, err := p.ResumeWithOptions(ctx, ses.SessionID, runtime.StartOptions{}); err != nil {
+		t.Fatalf("ResumeWithOptions(empty): %v", err)
+	}
+	if got := last().Thinking; got != "" {
+		t.Fatalf("ResumeWithOptions without thinking = %q, want empty", got)
+	}
+
+	if _, err := p.Resume(ctx, ses.SessionID); err != nil {
+		t.Fatalf("plain Resume: %v", err)
+	}
+	if got := last().Thinking; got != "" {
+		t.Fatalf("plain Resume Thinking = %q, want empty", got)
+	}
+}
