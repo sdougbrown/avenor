@@ -71,6 +71,20 @@
             },
             "reason": "claude supports low through max only on a new session"
           }
+        ],
+        "agy": [
+          {
+            "type": "fairWhen",
+            "field": "thinking",
+            "when": {
+              "op": "and",
+              "exprs": [
+                { "op": "condIn", "condition": "backend", "values": ["agy"] },
+                { "op": "in", "field": "thinking", "values": ["low", "medium", "high", "xhigh"] }
+              ]
+            },
+            "reason": "agy supports low through xhigh on start and resume via ACP thought_level"
+          }
         ]
       }
     }

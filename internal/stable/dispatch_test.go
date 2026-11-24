@@ -801,7 +801,7 @@ func TestResolveAssignmentSelectionPermissionDecider(t *testing.T) {
 		"worker":  {"backend": "pi", "agent": "worker", "model": "m"},
 		"rm-guard": {"backend": "pi", "agent": "rm-guard", "model": "guard-m", "persist_sessions": true},
 		"thinking-guard": {"backend": "pi", "agent": "guard", "model": "m", "thinking": "high"},
-		"bad-thinking": {"backend": "agy", "agent": "guard", "model": "m", "thinking": "low"}
+		"bad-thinking": {"backend": "gemini-acp", "agent": "guard", "model": "m", "thinking": "low"}
 	}`)
 	sel, err := resolveAssignmentSelection(&workflow.Assignment{
 		RosterFile:       rosterPath,

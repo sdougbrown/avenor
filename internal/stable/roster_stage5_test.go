@@ -291,7 +291,7 @@ func TestStableRosterMigratesInlineTeamIdentity(t *testing.T) {
 func TestStableRosterThinkingValidatesBeforeProviderCreation(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	writeStage5Roster(t, dir, `{"slow":{"backend":"agy","agent":"executor"}}`)
+	writeStage5Roster(t, dir, `{"slow":{"backend":"gemini-acp","agent":"executor"}}`)
 	loopPath := filepath.Join(dir, "loop.json")
 	if err := os.WriteFile(loopPath, []byte(`{"roster_file":"roster.json","pre":[{"name":"work","prompt":"work","roster_entry":"slow"}]}`), 0o600); err != nil {
 		t.Fatal(err)

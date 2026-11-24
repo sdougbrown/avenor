@@ -33,7 +33,7 @@ func TestThinkingBackendPolicy(t *testing.T) {
 		"opencode-http":    {},
 		"gemini-acp":       {},
 		"cursor-acp":       {},
-		"agy":              {},
+		"agy":              {"low": true, "medium": true, "high": true, "xhigh": true},
 		"pony":             {},
 	}
 	for backend, accepted := range policy {
@@ -60,9 +60,14 @@ func TestThinkingErrorsDistinguishUnsupportedValueAndCapability(t *testing.T) {
 		t.Fatalf("value error = %v", valueErr)
 	}
 
-	capabilityErr := ValidateThinkingForBackend("agy", "low")
-	if capabilityErr == nil || capabilityErr.Error() != `backend "agy" does not support parameter "thinking"` {
-		t.Fatalf("Agy capability error = %v", capabilityErr)
+	capabilityErr := ValidateThinkingForBackend("gemini-acp", "low")
+	if capabilityErr == nil || capabilityErr.Error() != `backend "gemini-acp" does not support parameter "thinking"` {
+		t.Fatalf("gemini-acp capability error = %v", capabilityErr)
+	}
+
+	agyValueErr := ValidateThinkingForBackend("agy", "off")
+	if agyValueErr == nil || !strings.Contains(agyValueErr.Error(), `thinking value "off"`) || !strings.Contains(agyValueErr.Error(), "allowed: low, medium, high, xhigh") {
+		t.Fatalf("agy value error = %v", agyValueErr)
 	}
 }
 
@@ -78,10 +83,19 @@ func TestValidateThinkingForBackendResume(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "only when starting a session") {
 		t.Errorf("resume low error = %v", err)
 	}
+	// Agy applies low through xhigh on explicit resume too, and rejects the
+	// canonical values it has no native control for.
+	if err := ValidateThinkingForBackendResume("agy", "xhigh"); err != nil {
+		t.Errorf("agy resume xhigh: %v", err)
+	}
+	err = ValidateThinkingForBackendResume("agy", "off")
+	if err == nil || !strings.Contains(err.Error(), `thinking value "off"`) {
+		t.Errorf("agy resume off error = %v", err)
+	}
 	// Backends without support report an unsupported capability.
-	err = ValidateThinkingForBackendResume("agy", "low")
+	err = ValidateThinkingForBackendResume("gemini-acp", "low")
 	if err == nil || !strings.Contains(err.Error(), `does not support parameter "thinking"`) {
-		t.Errorf("agy resume low error = %v", err)
+		t.Errorf("gemini-acp resume low error = %v", err)
 	}
 	// Non-canonical value is rejected before policy.
 	if err := ValidateThinkingForBackendResume("pi", "HIGH"); err == nil {

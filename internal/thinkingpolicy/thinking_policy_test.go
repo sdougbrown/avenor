@@ -48,9 +48,28 @@ func TestEvaluate(t *testing.T) {
 	}
 
 	// Backends with no support at all.
-	for _, backend := range []string{"opencode-acp", "opencode-http", "gemini-acp", "cursor-acp", "agy", "pony"} {
+	for _, backend := range []string{"opencode-acp", "opencode-http", "gemini-acp", "cursor-acp", "pony"} {
 		if got := Evaluate(backend, "low", false); got != UnsupportedCapability {
 			t.Errorf("%s low = %v, want UnsupportedCapability", backend, got)
+		}
+	}
+
+	// Agy supports low through xhigh on start and resume; off, minimal, and max
+	// are supported values the backend refuses, not an unsupported capability.
+	for _, value := range []string{"low", "medium", "high", "xhigh"} {
+		if got := Evaluate("agy", value, false); got != OK {
+			t.Errorf("agy start %s = %v, want OK", value, got)
+		}
+		if got := Evaluate("agy", value, true); got != OK {
+			t.Errorf("agy resume %s = %v, want OK", value, got)
+		}
+	}
+	for _, value := range []string{"off", "minimal", "max"} {
+		if got := Evaluate("agy", value, false); got != UnsupportedValue {
+			t.Errorf("agy start %s = %v, want UnsupportedValue", value, got)
+		}
+		if got := Evaluate("agy", value, true); got != UnsupportedValue {
+			t.Errorf("agy resume %s = %v, want UnsupportedValue", value, got)
 		}
 	}
 
@@ -83,8 +102,37 @@ func TestStartValues(t *testing.T) {
 	if got := StartValues("claude"); !reflect.DeepEqual(got, []string{"low", "medium", "high", "xhigh", "max"}) {
 		t.Errorf("claude start = %v", got)
 	}
-	if got := StartValues("agy"); len(got) != 0 {
-		t.Errorf("agy start = %v, want empty", got)
+	if got := StartValues("agy"); !reflect.DeepEqual(got, []string{"low", "medium", "high", "xhigh"}) {
+		t.Errorf("agy start = %v", got)
+	}
+	if got := StartValues("gemini-acp"); len(got) != 0 {
+		t.Errorf("gemini-acp start = %v, want empty", got)
+	}
+}
+
+func TestResumeValues(t *testing.T) {
+	if got := ResumeValues("claude"); len(got) != 0 {
+		t.Errorf("claude resume = %v, want empty", got)
+	}
+	if got := ResumeValues("agy"); !reflect.DeepEqual(got, []string{"low", "medium", "high", "xhigh"}) {
+		t.Errorf("agy resume = %v", got)
+	}
+	if got := ResumeValues("gemini-acp"); len(got) != 0 {
+		t.Errorf("gemini-acp resume = %v, want empty", got)
+	}
+}
+
+// TestSupportedBackendsFallbackMatchesSchema compares the literal fallback set
+// used when the schema cannot be read against the backend set the schema itself
+// declares, so adding a backend to one without the other fails here.
+func TestSupportedBackendsFallbackMatchesSchema(t *testing.T) {
+	data, err := readSchemaRules()
+	if err != nil {
+		t.Fatalf("read schema rules: %v", err)
+	}
+	schemaBackends := extractBackendsFromRules(data)
+	if !reflect.DeepEqual(supportedBackendsFallback, schemaBackends) {
+		t.Fatalf("supportedBackendsFallback = %v, schema-derived = %v", supportedBackendsFallback, schemaBackends)
 	}
 }
 

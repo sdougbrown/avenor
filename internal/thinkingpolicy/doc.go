@@ -21,7 +21,10 @@
 //
 // The set of backends with thinking support is derived from the schema's
 // eitherOf branches at init time, so adding a new backend with thinking support
-// requires only a schema change — no hand-written policy table updates.
+// requires only a schema change — no hand-written policy table updates. When the
+// schema cannot be read, supportedBackends in validate.go falls back to a
+// literal set; a test compares that fallback's keys against the backend set
+// derived from the schema so the two cannot drift.
 //
 // ValidateThinkingForBackendResume is exported as part of the portable contract
 // for callers that need to validate resume-time thinking independently.

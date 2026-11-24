@@ -163,23 +163,23 @@ func TestStablePhaseRosterSuppliesThinkingUnlessRunOverridesIt(t *testing.T) {
 // the merged roster value too.
 func TestStableRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) {
 	t.Parallel()
-	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/roster-thinking-agy.sock", MaxRuntimes: 1})
+	sup := newTestSupervisor(t, Config{ControlSocket: "/tmp/roster-thinking-gemini.sock", MaxRuntimes: 1})
 	providerCalled := false
 	sup.newProviderFunc = func(runtime.StartOptions, string) (runtime.Provider, error) {
 		providerCalled = true
-		return scriptedStage5Provider("ses_roster_agy", "end_turn"), nil
+		return scriptedStage5Provider("ses_roster_gemini", "end_turn"), nil
 	}
 
 	rosterPath := writeStage5Roster(t, t.TempDir(),
-		`{"horse":{"backend":"agy","agent":"windsurf-swe","thinking":"low"}}`)
+		`{"horse":{"backend":"gemini-acp","agent":"windsurf-swe","thinking":"low"}}`)
 	_, err := sup.spawn(SpawnParams{
 		Prompt:      "work",
 		Dir:         t.TempDir(),
 		RosterFile:  rosterPath,
 		RosterEntry: "horse",
 	})
-	if err == nil || !strings.Contains(err.Error(), "agy") || !strings.Contains(err.Error(), "thinking") {
-		t.Fatalf("spawn error = %v, want a thinking-rejection naming agy", err)
+	if err == nil || !strings.Contains(err.Error(), "gemini-acp") || !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("spawn error = %v, want a thinking-rejection naming gemini-acp", err)
 	}
 	if providerCalled || len(sup.runtimes) != 0 || sup.nextID != 0 {
 		t.Fatalf("provider=%v runtimes=%d nextID=%d", providerCalled, len(sup.runtimes), sup.nextID)
@@ -300,11 +300,11 @@ func TestStableWorkflowAssignmentRosterSuppliesThinkingUnlessAssignmentOverrides
 func TestStableWorkflowAssignmentRosterThinkingIsCheckedAgainstTheBackend(t *testing.T) {
 	t.Parallel()
 	rosterPath := writeStage5Roster(t, t.TempDir(),
-		`{"horse":{"backend":"agy","agent":"windsurf-swe","thinking":"low"}}`)
+		`{"horse":{"backend":"gemini-acp","agent":"windsurf-swe","thinking":"low"}}`)
 	_, err := resolveAssignmentSelection(&workflow.Assignment{
 		Role: "worker", RosterFile: rosterPath, RosterEntry: "horse",
 	})
-	if err == nil || !strings.Contains(err.Error(), "agy") || !strings.Contains(err.Error(), "thinking") {
-		t.Fatalf("resolveAssignmentSelection error = %v, want a thinking-rejection naming agy", err)
+	if err == nil || !strings.Contains(err.Error(), "gemini-acp") || !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("resolveAssignmentSelection error = %v, want a thinking-rejection naming gemini-acp", err)
 	}
 }

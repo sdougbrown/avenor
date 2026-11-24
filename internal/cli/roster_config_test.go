@@ -225,7 +225,7 @@ func TestRunWorkflowRosterThinkingUsesEffectiveBackend(t *testing.T) {
 
 	dir := t.TempDir()
 	rosterPath := filepath.Join(dir, "roster.json")
-	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"agy","agent":"executor"}}`), 0o600); err != nil {
+	if err := os.WriteFile(rosterPath, []byte(`{"slow":{"backend":"gemini-acp","agent":"executor"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loopPath := filepath.Join(dir, "loop.json")
@@ -237,7 +237,7 @@ func TestRunWorkflowRosterThinkingUsesEffectiveBackend(t *testing.T) {
 	if got := run([]string{"--dir", dir, "--loop-file", loopPath, "--roster-file", rosterPath, "--thinking", "low"}, func(string) string { return "" }, &stderr); got != 1 {
 		t.Fatalf("run() = %d, want 1; stderr=%s", got, stderr.String())
 	}
-	if called || !strings.Contains(stderr.String(), "agy") || !strings.Contains(stderr.String(), "thinking") {
+	if called || !strings.Contains(stderr.String(), "gemini-acp") || !strings.Contains(stderr.String(), "thinking") {
 		t.Fatalf("called=%v stderr=%q, want effective-backend thinking rejection", called, stderr.String())
 	}
 }

@@ -62,7 +62,7 @@ describe('thinking policy helpers', () => {
   })
 
   it('distinguishes unsupported capability, unsupported value, and start-only', () => {
-    expect(() => validateThinkingForBackend('agy', 'low')).toThrow(
+    expect(() => validateThinkingForBackend('gemini-acp', 'low')).toThrow(
       'does not support parameter "thinking"',
     )
     expect(() => validateThinkingForBackend('claude', 'off')).toThrow(
@@ -72,6 +72,20 @@ describe('thinking policy helpers', () => {
     expect(() => validateThinkingForBackendResume('claude', 'low')).toThrow(
       'only when starting a session',
     )
+  })
+
+  it('agy supports low through xhigh and rejects the rest as unsupported values', () => {
+    for (const level of ['low', 'medium', 'high', 'xhigh']) {
+      expect(() => validateThinkingForBackend('agy', level)).not.toThrow()
+      expect(() => validateThinkingForBackendResume('agy', level)).not.toThrow()
+    }
+    for (const level of ['off', 'minimal', 'max']) {
+      expect(evaluateThinkingPolicy('agy', level, false)).toBe('unsupportedValue')
+      expect(evaluateThinkingPolicy('agy', level, true)).toBe('unsupportedValue')
+      expect(() => validateThinkingForBackend('agy', level)).toThrow(
+        'allowed: low, medium, high, xhigh',
+      )
+    }
   })
 
   it('all 9 backends are exercised by the conformance fixture', () => {
