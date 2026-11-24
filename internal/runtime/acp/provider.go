@@ -400,7 +400,11 @@ func (h *eventHub) appendBacklogLocked(ev events.Event) {
 		return
 	}
 	// Preserve non-droppable lifecycle/permission events by evicting the oldest
-	// droppable chunk (preferring thought chunks first) when at capacity.
+	// droppable chunk (preferring thought chunks first) when at capacity. When
+	// every retained event is non-droppable the cap can only hold by giving up
+	// the oldest entry: the backlog is the window a late subscriber replays, and
+	// the event just recorded is the more useful end of that window than the
+	// stalest one, so keep the newest and drop it.
 	evictIdx := -1
 	for i, existing := range h.backlog {
 		if existing.Event == "agent.thought_chunk" {
@@ -411,9 +415,10 @@ func (h *eventHub) appendBacklogLocked(ev events.Event) {
 			evictIdx = i
 		}
 	}
-	if evictIdx >= 0 {
-		h.backlog = slices.Delete(h.backlog, evictIdx, evictIdx+1)
+	if evictIdx < 0 {
+		evictIdx = 0
 	}
+	h.backlog = slices.Delete(h.backlog, evictIdx, evictIdx+1)
 	h.backlog = append(h.backlog, cloned)
 }
 
