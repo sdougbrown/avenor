@@ -29,7 +29,7 @@ avenor control --socket /tmp/avenor.sock spawn \
   --launch-wrapper nice --launch-wrapper -n --launch-wrapper 5
 ```
 
-The wrapper applies to the backend process only. Version probes (`claude --version`, `pi --help`, `agy --version`) and helper processes (tmux, the shell tool, lsof) are never wrapped. Roster entries do not carry wrappers — they select backend/agent/model identity only, so the wrapper is a per-spawn parameter. Inside a loop or team, every phase inherits the parent run's wrapper; phases cannot override it.
+The wrapper applies to the backend process only. Version probes (`claude --version`, `pi --help`) and helper processes (tmux, the shell tool) are never wrapped. Roster entries do not carry wrappers — they select backend/agent/model identity only, so the wrapper is a per-spawn parameter. Inside a loop or team, every phase inherits the parent run's wrapper; phases cannot override it.
 
 The recorded PID for a wrapped backend is the wrapper's PID: the wrapper is the direct child of the launcher and owns the backend process tree.
 
@@ -80,10 +80,6 @@ The `avenor mcp` command accepts `--mcp-launch-wrapper-policy` only to forward t
 
 The CLI (`avenor control spawn`) and ordinary control-socket `spawn` calls are operator-trusted surfaces: they are **not** allowlist-gated, they keep accepting a roster entry's launch fields, and they keep the pre-existing behavior above.
 
-### agy RPC host
-
-The launch wrapper is not supported for the agy RPC transport (PTY RPC host). A spawn that combines a wrapper with the RPC host path fails explicitly with `launch_wrapper: not supported for agy rpc host`.
-
 The wrapper is documented, not enforced. Whatever argv you supply must satisfy these requirements — avenor does not check them:
 
 - **exec semantics** — stdio passes through (Avenor speaks the backend protocol over pipes), the backend's exit code must propagate as the wrapper's exit code, signals sent to the wrapper must reach the backend, and child processes must be torn down when the backend dies.
@@ -99,10 +95,9 @@ A backend that starts a harness process exports Avenor's launch identity in that
 | Backend | Harness child receives identity |
 |---|---|
 | `pi` | ✓ RPC subprocess |
-| `opencode-acp`, `gemini-acp`, `cursor-acp` | ✓ ACP subprocess |
+| `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp` | ✓ ACP subprocess |
 | `codex-app-server` | ✓ app-server subprocess |
 | `poo` | ✓ stdio subprocess |
-| `agy` | ✓ headless print process, and RPC host when the RPC transport is active |
 | `claude` | ✓ PTY or tmux pane |
 | `opencode-http` | ✗ no child process |
 | `pony` | ✗ in-process |
@@ -111,13 +106,13 @@ A backend that starts a harness process exports Avenor's launch identity in that
 - `pony` runs in-process. It has no harness child.
 - With the tmux launcher, Avenor removes inherited identity and exports the launch values inside the pane command, except the values a launch provisions for a broker peer: those go into a mode-0600 file in a mode-0700 directory the launch owns, which the pane command sources (`unset …; . <file>; exec claude`) and which the launcher removes when the session is torn down. A `tmux new-session` command string is argv, readable by any local process through `ps` or `/proc/<pid>/cmdline`, so no provisioned value may appear in it; the file's path may. The tmux server environment keeps its values.
 
-Each spawning backend removes inherited identity before it adds the current launch values, and the same scrub removes the broker peer credentials (`AVENOR_BROKER_URL`, `AVENOR_RUN_ID`, `AVENOR_BROKER_TOKEN`) and the retired `AVENOR_SESSION_NAME`. A backend therefore cannot pass a launcher's peer credential down by forgetting a call: the strip list is `runtime.ScrubbedEnvNames`, applied by `runtime.LaunchEnv`, and the terminal launchers unset the same list in the pane command. Other variables keep their values, including `AVENOR_TREE_BUDGET` and backend selectors such as `AVENOR_CLAUDE_TERMINAL` and `AVENOR_AGY_TRANSPORT`.
+Each spawning backend removes inherited identity before it adds the current launch values, and the same scrub removes the broker peer credentials (`AVENOR_BROKER_URL`, `AVENOR_RUN_ID`, `AVENOR_BROKER_TOKEN`) and the retired `AVENOR_SESSION_NAME`. A backend therefore cannot pass a launcher's peer credential down by forgetting a call: the strip list is `runtime.ScrubbedEnvNames`, applied by `runtime.LaunchEnv`, and the terminal launchers unset the same list in the pane command. Other variables keep their values, including `AVENOR_TREE_BUDGET` and backend selectors such as `AVENOR_CLAUDE_TERMINAL`.
 
 `pi` also removes inherited `PI_AGENT` and `PI_AGENT_PROFILE`. It then adds the agent, the agent profile and the broker credentials of the current launch only. The `pi` agent process receives a broker value only when its own launch supplies all three, so an inherited or half-supplied credential never reaches it. The short `pi --help` capability probe runs with the inherited environment.
 
 A `claude` child gets a one-shot attach credential in `AVENOR_BROKER_TOKEN` instead of the run's own: its plugin mods layer trades it at the broker's `POST /attach` for the run credential at session start, and the broker spends it there, so the run has one inbound consumer. A `pi` child gets the run's credential, because its extension authenticates each request itself. `runtime.ProvisionPeer` is the one place that decides whether a launch provisions a peer at all, and it appends the provisioned values after the shared scrub; no backend keeps an inherited copy.
 
-A prompt to an already-running process cannot change that process's environment. A fresh start or resume that starts a process receives the identity of that request. A backend that reuses a live process keeps the identity of the original launch. The `agy` print continuation inside one attempt keeps that attempt's identity.
+A prompt to an already-running process cannot change that process's environment. A fresh start or resume that starts a process receives the identity of that request. A backend that reuses a live process keeps the identity of the original launch.
 
 A launch wrapper receives the environment and passes it to the backend process. A wrapper that drops, filters or rewrites variables hides the identity from the backend's children. Avenor does not verify wrapper behavior.
 
@@ -134,13 +129,13 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 | Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ⚠ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
 | Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
 | Thinking control | ✗ | ✗ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
 | External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
 | Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
 
-`—` means not verified; `✗` means not supported, `⚠ ` means experimental. `agy` permission relay requires the explicit RPC transport.
+`—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
 Thinking control is native for Codex and Pi. Claude supports five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
 
@@ -390,90 +385,24 @@ avenor \
 
 ## agy
 
-A headless `agy` run works until the agent needs an answer from outside the process. Tool approval, user questions, and mid-turn cancellation all need a control path that stdout JSONL cannot provide.
-
-Avenor gives the dedicated `agy` backend three transport policies. None of them treats `agy` as ACP. The interactive path also does not scrape the terminal or send TUI keystrokes.
-
-### Headless is the default
-
-With `AVENOR_AGY_TRANSPORT` unset or set to `headless`, Avenor runs `agy` in stream-JSON print mode and translates its stdout into canonical events. This is the least surprising choice for unattended text work.
+Avenor spawns `agy acp --stdio --add-dir <dir>` (with `--agent <name>` when an agent persona is requested) and drives it over standard ACP JSON-RPC on stdio.
 
 ```sh
 avenor \
   --backend agy \
-  --model gemini-2.5-flash \
+  --model gemini-4-argon-high \
   --prompt "Review the changes in the current branch" \
   --dir /repo \
-  --sentinel-file /tmp/agy-headless.env
+  --sentinel-file /tmp/agy.env
 ```
 
-Headless prompts use `--print-timeout 24h`, which keeps `agy`'s shorter print timeout from ending a run before Avenor does. The ceiling is still a ceiling: a single headless prompt cannot run longer than 24 hours.
-
-Headless mode cannot relay interactive permission decisions. `agy` denies tools that require confirmation, although its persisted allow rules still apply. Use explicit RPC mode when the run must stop and ask.
-
-### RPC carries the conversation
-
-Set `AVENOR_AGY_TRANSPORT=rpc` in the environment of the Avenor process. For a stable, that means the environment of `avenor stable`, not an individual spawn request.
-
-```sh
-AVENOR_AGY_TRANSPORT=rpc avenor \
-  --backend agy \
-  --model gemini-2.5-flash \
-  --prompt "Reply with a one-line status update" \
-  --dir /repo \
-  --control-socket /tmp/avenor-agy.sock \
-  --sentinel-file /tmp/agy-rpc.env
-```
-
-RPC mode hosts interactive `agy` in a PTY, but the PTY owns process lifetime only. Turns, events, permissions, questions, cancellation, and recovery use the loopback RPC connection. Model selection is exact: `--model` must contain a nonempty slug advertised by `agy`, and Avenor will not substitute another model.
-
-RPC accepts stable semantic versions in major version 1, including newer minor and patch releases. Malformed versions, prereleases, and different major versions are rejected.
-
-Permission choices and questions arrive as `permission.request` events. Questions that require user input do not go through generic auto-approval. An option marked `requiresMessage` needs a nonempty write-in message; see [Control Protocol](control-protocol.md#answer_permission) and [File Permission Handler](permission-handler.md).
-
-A stable can run multiple RPC sessions concurrently. Each session owns its workspace, conversation identity, PTY, and RPC host. A follow-up prompt sent to the same runtime reuses that host; resume starts from the requested conversation identity. After a normal turn, the stable keeps the host while that runtime waits for another prompt. Cancelling or shutting down the runtime cleans it up.
-
-Cancellation does not treat a successful cancel request as proof that the agent stopped. Avenor reuses the host only after the remote session reaches a terminal state. If it does not converge, Avenor interrupts the exact hosted process and escalates to kill and reap when necessary.
-
-For a long-lived stable, start the transport policy with the supervisor:
-
-```sh
-AVENOR_AGY_TRANSPORT=rpc avenor stable \
-  --control-socket /tmp/avenor-agy-stable.sock \
-  --idle-timeout 30m
-```
-
-Then, from another shell, spawn an `agy` runtime normally:
-
-```sh
-avenor control --socket /tmp/avenor-agy-stable.sock spawn \
-  --backend agy \
-  --model gemini-2.5-flash \
-  --prompt "Review the changes in the current branch" \
-  --dir /repo \
-  --label agy-review
-```
-
-### Auto probes before committing
-
-`AVENOR_AGY_TRANSPORT=auto` tries RPC for each new session. It falls back to headless only before the session is registered and only after the failed RPC host has been cleaned up.
-
-```sh
-AVENOR_AGY_TRANSPORT=auto avenor \
-  --backend agy \
-  --model gemini-2.5-flash \
-  --prompt "Summarize the current branch" \
-  --dir /repo \
-  --sentinel-file /tmp/agy-auto.env
-```
-
-Because the selected transport is not known in advance, `auto` does not advertise interactive permission capability conservatively. If permission relay is required, choose `rpc` explicitly rather than hoping the probe wins.
-
-### Security boundaries
-
-RPC discovery accepts only loopback listeners owned by the exact hosted `agy` process. Its HTTP client does not use ambient proxies, prefers TLS, and does not enable plain-HTTP fallback in normal backend configuration. Private endpoints, certificates, and wire identities do not become public session identifiers or diagnostics.
-
-Avenor never passes `--dangerously-skip-permissions` by default. RPC adds a control path; it does not remove `agy`'s permission boundary.
+- **Working directory & wrapper**: Avenor sets the child process working directory to `--dir` and passes `--add-dir <abs-dir>` plus ACP `cwd`. Launch wrappers (`--launch-wrapper`) are supported on both fresh starts and cold resumes.
+- **Model selection**: `--model` is applied per session via ACP `session/set_config_option` (`configId: "model"`). Both base model names and effort-suffixed slugs (for example `gemini-4-argon-high`) are accepted; unknown model IDs fail cleanly with `agy acp`'s `-32602` error without installing a session.
+- **Agent selection**: `--agent` is passed on the `agy acp` command line (ACP session modes select permission modes such as `default`, `accept-edits`, `auto`, and `plan`, not agent personas).
+- **Permissions, tools, and cancellation**: Avenor never passes `--dangerously-skip-permissions`. Tool approval requests arrive via ACP `session/request_permission` and are relayed as canonical `permission.request` events; tool calls stream as `tool.call` and `tool.call_update`; `session/cancel` cancels active turns.
+- **Multi-turn & cross-process resume**: A live `agy acp` child handles follow-up turns in place, and cold resumes reattach across process restarts via ACP `session/resume`. Legacy pre-ACP conversation IDs may not resume across the protocol boundary unless recognized by `agy acp`.
+- **Broker messaging**: When a supervisor broker is active, Avenor injects `avenor channel-tools` through the standard ACP `mcpServers` list on `session/new` and `session/resume`, and polls inbound broker messages for turn-boundary delivery.
+- **`AVENOR_AGY_TRANSPORT` retired**: The legacy `headless`, `rpc`, and `auto` transports have been removed. Setting `AVENOR_AGY_TRANSPORT` to any non-empty value fails launch with a migration error telling you to unset it.
 
 ---
 

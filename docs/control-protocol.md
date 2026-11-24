@@ -260,7 +260,7 @@ The option-only shape remains valid. For a write-in option, include `message`:
 {"jsonrpc":"2.0","id":2,"method":"answer_permission","params":{"request_id":"req_18","option_id":"other","message":"Use the staging project."}}
 ```
 
-`message` is optional unless the selected option has `requiresMessage: true`; those options reject an empty message. Messages must be valid UTF-8 and no larger than 64 KiB. This is how an `agy` question carries an answer that is not one of its listed choices.
+`message` is optional unless the selected option has `requiresMessage: true`; those options reject an empty message. Messages must be valid UTF-8 and no larger than 64 KiB.
 
 Answers the currently pending permission request. Requires ownership. Returns error `-32001` if no permission request is pending or the `request_id` doesn't match the pending one.
 
