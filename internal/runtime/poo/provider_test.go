@@ -264,6 +264,11 @@ func newPooFixture(t *testing.T, endpoint *fakeEndpoint) pooFixture {
 // can configure the permission policy a turn runs under.
 func newPooFixtureWith(t *testing.T, endpoint *fakeEndpoint, extra map[string]any) pooFixture {
 	t.Helper()
+	// The child poo discovers settings beyond the fixture's own: an operator
+	// config directory with default manifests changes what the session loads.
+	// Point the discovery root at an empty directory so the fixture's document
+	// is the only word.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
 	workDir := filepath.Join(dir, "work")
 	sessionDir := filepath.Join(dir, "sessions")
@@ -396,7 +401,7 @@ func TestMessagingAskRealPoo(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint := newFakeEndpoint(t,
-		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_cli", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "tell", "target": "supervisor", "message": "child-tell-marker"}}}}},
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_tool", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "tell", "target": "supervisor", "message": "child-tell-marker"}}}}},
 		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": `if [ "${AVENOR_BROKER_TOKEN+x}" = x ]; then echo credential-present; else echo credential-absent; fi`}}}},
 		scriptedTurn{Text: "done"},
 	)
@@ -418,7 +423,7 @@ func TestMessagingAskRealPoo(t *testing.T) {
 				continue
 			}
 			replies++
-			return scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_cli", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "reply", "reply_to": match[1], "message": "answer"}}}}}, true
+			return scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_tool", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "reply", "reply_to": match[1], "message": "answer"}}}}}, true
 		}
 		return scriptedTurn{}, false
 	}
@@ -559,6 +564,7 @@ func TestMessagingTakeCheck(t *testing.T) {
 	opts := helperStartOptions()
 	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "take", token, true
 	info := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_cli"}}}
+	renamed := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_tool"}}}
 	baseline := time.Now()
 	t.Setenv(helperEnv, "messaging-poll")
 	c, err := startClient(context.Background(), opts, nil)
@@ -578,8 +584,9 @@ func TestMessagingTakeCheck(t *testing.T) {
 		failure bool
 	}{
 		{"old poll", opts, info, "no poll", true},
+		{"old poll, renamed tool", opts, renamed, "no poll", true},
 		{"no poll", func() avruntime.StartOptions { o := opts; o.RuntimeID = "empty"; return o }(), info, "no poll", true},
-		{"no tool", opts, protocol.SessionInfo{}, "call_cli", true},
+		{"no tool", opts, protocol.SessionInfo{}, "call_cli nor call_tool", true},
 		{"missing record", func() avruntime.StartOptions { o := opts; o.RuntimeID = "missing"; return o }(), info, "no run record", false},
 		{"no broker", func() avruntime.StartOptions { o := opts; o.Broker = nil; return o }(), info, "not provisioned", true},
 	} {
@@ -1785,12 +1792,15 @@ func TestStartRefusesAnUnknownProfileAndModel(t *testing.T) {
 		if err == nil {
 			t.Fatal("Start accepted an unknown profile")
 		}
-		for _, want := range []string{"profile", "no-such-profile", "unknown_profile"} {
+		// The refusal surfaces at startup (the flag names the profile) or at
+		// session create; either way it names the field, the value, and the
+		// unknown_profile code the wire carries for a create refusal.
+		for _, want := range []string{"profile", "no-such-profile"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Fatalf("Start error = %q, want %q", err, want)
 			}
 		}
-		// The refused create leaves no process running.
+		// The refused start leaves no process running.
 		awaitNoPooProcesses(t, fixture.settings)
 	})
 
