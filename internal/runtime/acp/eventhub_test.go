@@ -7,6 +7,12 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 )
 
+// TestBacklogCapHoldsWithoutDroppableEvents pins the backlog bound when every
+// retained event is non-droppable. Lifecycle and permission events cannot be
+// skipped the way chunks are, but the cap still has to hold: a provider whose
+// sessions are never subscribed keeps its backlog until Close, and an unbounded
+// one grows for the life of the process.
+
 func TestBacklogCapHoldsWithoutDroppableEvents(t *testing.T) {
 	h := newEventHub()
 	total := hubBacklogCap + 16
