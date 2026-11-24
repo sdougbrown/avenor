@@ -430,6 +430,48 @@ test('a new failure episode raises a fresh notice after the broker recovers', as
   } finally { await h?.eventHandlers.session_shutdown({}, {}); await Bun.sleep(250); b.restore() }
 }, scaleMs(20_000))
 
+test('a brief episode clears the latch too, so the next episode reports', async () => {
+  const b = broker()
+  const delegate = globalThis.fetch
+  let failing = false
+  let failures = 0
+  let cleanPolls = 0
+  const ownRun = () => String(b.calls.find(c => c.path === '/register')?.body.run_id ?? '')
+  globalThis.fetch = Object.assign(async (url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? '{}'))
+    if (new URL(String(url)).pathname === '/poll-control' && body.run_id === ownRun()) {
+      if (failing) {
+        failures++
+        return Response.json({ code: 'internal' }, { status: 500 })
+      }
+      cleanPolls++
+      return Response.json([])
+    }
+    return delegate(url, init)
+  }, { preconnect() {} }) as typeof fetch
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  const pollNotices = () => h!.notify.mock.calls
+    .map((call: unknown[]) => String(call[0]))
+    .filter(text => text.includes('central broker poll failed'))
+  try {
+    h = await startExtensionHarness({
+      deps: { messageTool },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test', pollIntervalMs: 100 },
+    })
+    // Episode 1 never reaches the three-failure recovery gate: two failed
+    // ticks, then the broker is back. The latch must still clear, or the
+    // next episode's notice is suppressed.
+    failing = true
+    await waitFor(() => pollNotices().length === 1)
+    await waitFor(() => failures >= 2, scaleMs(10_000))
+    failing = false
+    await waitFor(() => cleanPolls >= 2, scaleMs(10_000))
+    failing = true
+    await waitFor(() => pollNotices().length === 2, scaleMs(10_000))
+    expect(pollNotices()).toHaveLength(2)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); await Bun.sleep(250); b.restore() }
+}, scaleMs(20_000))
+
 test('a retirement the broker never confirms is a notice, not raw stderr', async () => {
   const b = broker()
   const delegate = globalThis.fetch

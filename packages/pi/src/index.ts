@@ -883,9 +883,11 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           const msgs = ((await postBroker(env, '/poll-control', {}, fetch, AbortSignal.any([abort.signal, AbortSignal.timeout(15000)]))) ?? []) as Array<Record<string, unknown>>
           if (generation !== subAgentPollGeneration) return
           if (consecutiveFailures >= 3) {
-            clearPeerFailure('poll')
             if (topLevelEnv) sessionCtx?.ui.notify('[avenor] central broker poll recovered', 'info')
           }
+          // Any clean poll ends the failure episode — a brief one-tick outage
+          // clears the latch too, so the next episode still reports.
+          if (consecutiveFailures > 0) clearPeerFailure('poll')
           consecutiveFailures = 0
           queuedMessages.push(...msgs)
           await deliverQueuedMessages()
