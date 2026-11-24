@@ -588,6 +588,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return new Promise<void>((resolve, reject) => {
         // A fresh key per attempt: a late confirmation from an earlier attempt
         // that actually landed must not clear a later attempt's pending state.
+        // The key rides in details under confirm_id — message_id stays the
+        // broker's vocabulary (the id a reply correlates against).
         const confirmKey = randomUUID()
         const confirm = () => {
           pendingDeliveries.delete(confirmKey)
@@ -608,7 +610,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
             customType: PEER_MESSAGE_CUSTOM_TYPE,
             content: formatInboundAskBody(ask, options),
             display: true,
-            details: { ...inboundAskDisplay(ask, options), message_id: confirmKey },
+            details: { ...inboundAskDisplay(ask, options), confirm_id: confirmKey },
           },
           { triggerTurn: true, deliverAs: 'steer' as const },
         )
@@ -2493,9 +2495,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // event with the same message object.
     pi.on('message_end', (event) => {
       const message = event.message
+      if (!message) return
       if (message.role !== 'custom' || message.customType !== PEER_MESSAGE_CUSTOM_TYPE) return
-      const details = message.details as { message_id?: string } | undefined
-      if (details?.message_id) pendingDeliveries.get(details.message_id)?.()
+      const details = message.details as { confirm_id?: string } | undefined
+      if (details?.confirm_id) pendingDeliveries.get(details.confirm_id)?.()
     })
 
     pi.registerTool({
