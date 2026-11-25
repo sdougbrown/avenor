@@ -565,17 +565,29 @@ func TestMessagingTakeCheck(t *testing.T) {
 	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "take", token, true
 	info := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_cli"}}}
 	renamed := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_tool"}}}
-	baseline := time.Now()
+	direct := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "avenor_message"}}}
 	t.Setenv(helperEnv, "messaging-poll")
-	c, err := startClient(context.Background(), opts, nil)
-	if err != nil {
-		t.Fatal(err)
+	// Each accepted tool name owns a session that polls the broker once, so
+	// the check's success path is exercised for every name.
+	for _, accepted := range []struct {
+		name string
+		info protocol.SessionInfo
+	}{
+		{"registry call tool", info},
+		{"renamed registry call tool", renamed},
+		{"elevated avenor_message", direct},
+	} {
+		baseline := time.Now()
+		c, err := startClient(context.Background(), opts, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := checkMessaging(context.Background(), opts, accepted.info, baseline); err != nil {
+			t.Fatalf("%s: %v", accepted.name, err)
+		}
+		_ = c.shutdown()
 	}
-	if err := checkMessaging(context.Background(), opts, info, baseline); err != nil {
-		t.Fatal(err)
-	}
-	_ = c.shutdown()
-	baseline = time.Now()
+	baseline := time.Now()
 	for _, tc := range []struct {
 		name    string
 		opts    avruntime.StartOptions
@@ -585,8 +597,9 @@ func TestMessagingTakeCheck(t *testing.T) {
 	}{
 		{"old poll", opts, info, "no poll", true},
 		{"old poll, renamed tool", opts, renamed, "no poll", true},
+		{"old poll, elevated tool", opts, direct, "no poll", true},
 		{"no poll", func() avruntime.StartOptions { o := opts; o.RuntimeID = "empty"; return o }(), info, "no poll", true},
-		{"no tool", opts, protocol.SessionInfo{}, "call_cli nor call_tool", true},
+		{"no tool", opts, protocol.SessionInfo{}, "neither avenor_message, call_cli, nor call_tool", true},
 		{"missing record", func() avruntime.StartOptions { o := opts; o.RuntimeID = "missing"; return o }(), info, "no run record", false},
 		{"no broker", func() avruntime.StartOptions { o := opts; o.Broker = nil; return o }(), info, "not provisioned", true},
 	} {
