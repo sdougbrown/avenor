@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Avenor">
+  <rect width="32" height="32" rx="7" fill="#101418"/>
+  <path d="M8 22 16 8l8 14" fill="none" stroke="#f0b429" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+  <path d="M11.4 18h9.2" fill="none" stroke="#f0b429" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="16" cy="25.5" r="1.6" fill="#f0b429"/>
+</svg>

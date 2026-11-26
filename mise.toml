@@ -29,6 +29,14 @@ sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
 outputs = ["dist/index.js"]
 run = "bun run build"
 
+[tasks.js-dsh-build]
+description = "Build @dougbots/dsh-avenor"
+dir = "packages/dsh"
+depends = ["js-core-build"]
+sources = ["src/**/*.ts", "tsdown.config.ts", "package.json"]
+outputs = ["dist/index.js"]
+run = "bun run build"
+
 [tasks.js-board-build]
 description = "Build @dougbots/avenor-board frontend"
 dir = "packages/board"
@@ -39,7 +47,7 @@ run = "bun run build"
 
 [tasks.js-build]
 description = "Build all JS packages"
-depends = ["js-mcp-build", "js-opencode-build", "js-pi-build", "js-board-build"]
+depends = ["js-mcp-build", "js-opencode-build", "js-pi-build", "js-dsh-build", "js-board-build"]
 
 [tasks.js-test]
 description = "Test all JS packages"
@@ -49,7 +57,7 @@ depends = ["js-build"]
 # under runner load. bunfig [test] timeout is not honored on bun 1.4.2.
 # The plugin's offline suites run under node:test; the glob leaves out
 # preflight.mjs, which needs a live broker.
-run = "for p in core mcp opencode pi escalation-bridge board; do (cd \"packages/$p\" && bun test --timeout 30000) || exit 1; done; node --test marketplace/plugins/avenor/test/*.test.mjs"
+run = "for p in core mcp opencode pi dsh escalation-bridge board; do (cd \"packages/$p\" && bun test --timeout 30000) || exit 1; done; node --test marketplace/plugins/avenor/test/*.test.mjs"
 
 [tasks.js-typecheck]
 description = "Typecheck all JS packages with tsc --noEmit"
@@ -60,6 +68,7 @@ run = [
   "cd packages/mcp && bun run typecheck",
   "cd packages/opencode && bun run typecheck",
   "cd packages/pi && bun run typecheck",
+  "cd packages/dsh && bun run typecheck",
   "cd packages/board && bun run typecheck",
 ]
 
