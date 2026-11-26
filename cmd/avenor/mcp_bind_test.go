@@ -16,6 +16,7 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/sdougbrown/avenor/internal/control"
 	"github.com/sdougbrown/avenor/internal/mcpserver"
 	"golang.org/x/sys/unix"
 )
@@ -247,8 +248,7 @@ func bindDriveEnv(scratch string) []string {
 	}
 }
 
-// startBindDriveSupervisor starts the real supervisor on socket and waits until
-// it accepts connections.
+// startBindDriveSupervisor waits for the supervisor socket and owner record.
 func startBindDriveSupervisor(t *testing.T, bin string, env []string, socket string) {
 	t.Helper()
 	cmd := exec.Command(bin, "stable", "--control-socket", socket)
@@ -267,10 +267,12 @@ func startBindDriveSupervisor(t *testing.T, bin string, env []string, socket str
 		conn, err := net.Dial("unix", socket)
 		if err == nil {
 			_ = conn.Close()
-			return
+			if _, err := control.LoadOwnerRecord(socket); err == nil {
+				return
+			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("supervisor never listened on %s: %s", socket, logs.String())
+			t.Fatalf("supervisor never became ready on %s: %s", socket, logs.String())
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
