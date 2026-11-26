@@ -1103,6 +1103,7 @@ func TestAwaitDerivesSocketFromBindEnv(t *testing.T) {
 // any dial. A socket alone keeps its pre-existing meaning — an explicit
 // supervisor to dial, no conversation involved.
 func TestAwaitRefusesPartialBindCoordinates(t *testing.T) {
+	conversationScratch(t)
 	var stdout, stderr bytes.Buffer
 	args := []string{"--bind-host", "poo", "run_1"}
 	if got := awaitRunDeclared(args, &stdout, &stderr); got != 2 {
