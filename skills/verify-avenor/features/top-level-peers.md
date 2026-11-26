@@ -94,6 +94,14 @@ request bodies.
    Capture the delayed-registration and non-peer-retirement refusals from
    `internal/runtime/broker/peer_lifecycle_test.go`. Keep credentials out of
    captured output.
+10. Send Pi one tell, then queue the same broker row for its inbox a second
+    time — the payload's message id repeated, either as a second `/send` or as
+    a re-queued row. Capture Pi's session transcript: the frame appears once,
+    with one turn started for it, and the second copy starts no turn.
+
+    `packages/pi/src/top-level-mode.test.ts` covers the same contract
+    deterministically (repeated row, and an unconfirmed frame that spends its
+    attempt budget and is reported instead of retried forever).
 
 Use deadline-bounded observations of tool results or registry state. A fixed
 sleep does not prove that a session received or answered a message.
@@ -111,6 +119,8 @@ Retain all of the following in the evidence directory:
 - The local child's sentinel, event log, and terminal status/result.
 - Refusal and ownership results from the duplicate-label, duplicate-ID,
   incomplete-listing, reply, withdrawal, and lifecycle drives.
+- The repeated-row transcript from step 10, showing one frame for the repeated
+  message id.
 
 Unit tests cover deterministic ownership and lifecycle cases. They do not
 replace the independent-session exchange or local-child drive.
@@ -136,4 +146,7 @@ one physical consumer.
 
 Polling dequeues before session injection. Pi retains an injection failure in
 memory for retry, but a process crash or interrupted response can lose delivery.
-Neither the local nor container drive establishes exactly-once delivery.
+The session surfaces one broker row at most once and gives up on a frame that
+never confirms after a fixed attempt budget, so a repeated row cannot spend a
+turn per delivery; that is not exactly-once delivery across processes, which
+neither the local nor container drive establishes.

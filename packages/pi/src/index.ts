@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { hostname as osHostname } from 'node:os'
-import { randomUUID } from 'node:crypto'
 import { combinePeerProviders } from './peer-provider.js'
 import { Box, Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
@@ -129,10 +128,14 @@ function asStatusResult(raw: StatusResult | StatusListResult): StatusResult {
 
 const POLL_INTERVAL_MS = 3_000
 // A peer frame's send is void — Pi swallows rejections into host-private error
-// listeners — so delivery is confirmed by the frame's own message_end. A frame
-// unconfirmed this long is treated as lost and redelivered by the queue that
-// sent it.
+// listeners — so delivery is confirmed by the frame's own message_end. An
+// attempt unconfirmed this long rejects, and the queue holding the frame tries
+// again.
 const PEER_DELIVERY_CONFIRM_TIMEOUT_MS = 30_000
+// How many attempts one inbound frame is worth. A frame that never confirms is
+// held in the queue that sent it, and an unbounded retry spends a visible turn
+// on every attempt, so the frame is given up on and its loss reported instead.
+const MAX_PEER_FRAME_ATTEMPTS = 3
 // Pi's sendUserMessage returns void and swallows async rejections, so an
 // accepted prompt may never come back through message_end. Re-arm delivery
 // after this long instead of leaving the run skipped with its notice unread.
@@ -431,6 +434,9 @@ export interface ExtensionOptions {
   /** How long an unconfirmed idle completion send waits before re-arming;
    * injectable so tests can exercise the timeout without fixed sleeps. */
   idleSendTimeoutMs?: number
+  /** How long an unconfirmed peer frame send waits before the queue retries;
+   * injectable so tests can exercise the timeout without fixed sleeps. */
+  peerDeliveryConfirmTimeoutMs?: number
   /** How long a blocking wait holds the turn before it backgrounds;
    * injectable so tests can exercise the boundary without fixed sleeps. */
   backgroundAfterMs?: number
@@ -447,6 +453,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
   return async function (pi: ExtensionAPI) {
     const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS
     const idleSendTimeoutMs = options.idleSendTimeoutMs ?? IDLE_SEND_TIMEOUT_MS
+    const peerDeliveryConfirmTimeoutMs = options.peerDeliveryConfirmTimeoutMs ?? PEER_DELIVERY_CONFIRM_TIMEOUT_MS
     const backgroundAfterMs = options.backgroundAfterMs ?? BACKGROUND_AFTER_MS
     let telemetryGeneration = 0
     const trackedRuns = new Map<string, TrackedRun>()
@@ -538,6 +545,29 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       interruptPendingWaits({ runId: ask.from_run_id, status: 'asking' })
     }
 
+    // Inbound frames keyed by the broker message id they arrive under. The
+    // frame, not the attempt, is what a landing settles: the same id surfacing
+    // twice would spend a turn repeating a message the session already showed,
+    // and a landing that arrives after its own attempt timed out still settles
+    // the frame, so the queued retry is dropped instead of sent.
+    interface PeerFrame {
+      /** No further send is worth making: the frame landed, or its budget is spent. */
+      settled: boolean
+      /** Attempts spent sending it. */
+      attempts: number
+      /** Attempts awaiting this frame's landing. */
+      waiting: Array<() => void>
+    }
+    const peerFrames = new Map<string, PeerFrame>()
+
+    function peerFrame(id: string): PeerFrame {
+      const known = peerFrames.get(id)
+      if (known) return known
+      const frame: PeerFrame = { settled: false, attempts: 0, waiting: [] }
+      peerFrames.set(id, frame)
+      return frame
+    }
+
     /** Surface one inbound peer message: hand the body to the session, and for
      * an ask remember it so a reply can reach the asker, then let every
      * blocking wait return. Delivery comes first so a throw leaves the waits
@@ -545,10 +575,6 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * cannot answer. A tell has no reply edge: expects_reply alone decides, so
      * a tell is delivered unregistered, uninterrupting, and without the reply
      * instruction — the same decision the hooks' frames make. */
-    // In-flight peer frame sends, keyed by confirmation id. A frame's own
-    // message_end resolves its entry; the timeout path rejects it.
-    const pendingDeliveries = new Map<string, () => void>()
-
     async function surfaceInboundAsk(
       pending: Map<string, { from_run_id: string; message_id: string }>,
       ask: InboundAsk,
@@ -580,41 +606,61 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * listeners, so failure cannot be awaited. Delivery is tracked explicitly:
      * the send is confirmed by the frame's own message_end landing in the
      * transcript (every path that lands it — idle append or steering-queue
-     * drain — emits that event with the same message), and a frame unconfirmed
-     * within the timeout rejects. The rejection is what the queues act on:
-     * the sub-agent path leaves the frame queued and the host path parks it
-     * for redelivery, and the loss reports under the deliver operation. */
+     * drain — emits that event with the same message), and an attempt
+     * unconfirmed within the timeout rejects. The rejection is what the queues
+     * act on: the sub-agent path leaves the frame queued and the host path
+     * parks it for redelivery, and the loss reports under the deliver
+     * operation. A frame the session already surfaced is dropped, and an
+     * attempt budget stops a frame that never confirms from looping. */
     function deliverPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions): Promise<void> {
+      const id = ask.message_id
+      // The broker stamps an id on every row it queues, so a row without one was
+      // hand-queued and cannot be told apart from its own redelivery. It is sent
+      // once and never retried, which is the only shape that cannot loop.
+      if (id === '') {
+        sendPeerFrame(ask, options)
+        return Promise.resolve()
+      }
+      const frame = peerFrame(id)
+      if (frame.settled) return Promise.resolve()
+      if (frame.attempts >= MAX_PEER_FRAME_ATTEMPTS) {
+        frame.settled = true
+        reportPeerFailure('deliver', new Error(`message ${id} was never confirmed after ${frame.attempts} attempts`))
+        return Promise.resolve()
+      }
       return new Promise<void>((resolve, reject) => {
-        // A fresh key per attempt: a late confirmation from an earlier attempt
-        // that actually landed must not clear a later attempt's pending state.
-        // The key rides in details under confirm_id — message_id stays the
-        // broker's vocabulary (the id a reply correlates against).
-        const confirmKey = randomUUID()
-        const confirm = () => {
-          pendingDeliveries.delete(confirmKey)
+        const settle = () => {
           clearTimeout(timer)
+          frame.waiting = frame.waiting.filter(waiting => waiting !== settle)
           // A delivered frame ends the delivery-failure episode, so a failure
           // after healthy delivery reports again instead of staying latched.
           clearPeerFailure('deliver')
           resolve()
         }
         const timer = setTimeout(() => {
-          pendingDeliveries.delete(confirmKey)
+          frame.waiting = frame.waiting.filter(waiting => waiting !== settle)
           reject(new Error('delivery not confirmed'))
-        }, PEER_DELIVERY_CONFIRM_TIMEOUT_MS)
+        }, peerDeliveryConfirmTimeoutMs)
         timer.unref?.()
-        pendingDeliveries.set(confirmKey, confirm)
-        pi.sendMessage(
-          {
-            customType: PEER_MESSAGE_CUSTOM_TYPE,
-            content: formatInboundAskBody(ask, options),
-            display: true,
-            details: { ...inboundAskDisplay(ask, options), confirm_id: confirmKey },
-          },
-          { triggerTurn: true, deliverAs: 'steer' as const },
-        )
+        frame.attempts++
+        frame.waiting.push(settle)
+        sendPeerFrame(ask, options, id)
       })
+    }
+
+    /** Hand one peer frame to the session. `frameId` names the broker row the
+     * frame settles, so a landing confirms the frame rather than the attempt
+     * that sent it. */
+    function sendPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions, frameId?: string): void {
+      pi.sendMessage(
+        {
+          customType: PEER_MESSAGE_CUSTOM_TYPE,
+          content: formatInboundAskBody(ask, options),
+          display: true,
+          details: { ...inboundAskDisplay(ask, options), ...(frameId ? { frame_id: frameId } : {}) },
+        },
+        { triggerTurn: true, deliverAs: 'steer' as const },
+      )
     }
 
     interface InterruptibleWait {
@@ -2271,6 +2317,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       centralPendingTurn = null
       compacting = false
       clearPendingNotices()
+      // Frames belong to the session that surfaced them: a replacement session
+      // has not seen any of them.
+      peerFrames.clear()
       // The replaced session may have stopped polling with terminal runs still
       // tracked; their cleared notices are rebuilt by a poll tick, so restart
       // polling the same way resumeAfterCompaction does.
@@ -2338,6 +2387,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       disposeHostProviders()
       hostPendingAsks.clear()
       subAgentPendingAsks.clear()
+      peerFrames.clear()
       sessionGeneration++
       clearPendingNotices()
       const stoppedPolling = stopPolling()
@@ -2518,16 +2568,23 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       return box
     })
 
-    // A peer frame's delivery is confirmed by the frame's own message_end:
+    // A peer frame's delivery is settled by the frame's own message_end:
     // every path that lands the custom message in the transcript — appended
     // when idle, or processed from the steering queue mid-run — emits that
-    // event with the same message object.
+    // event with the same message object. The id it carries is the broker's
+    // own, so a landing settles the frame however many attempts it took.
     pi.on('message_end', (event) => {
       const message = event.message
       if (!message) return
       if (message.role !== 'custom' || message.customType !== PEER_MESSAGE_CUSTOM_TYPE) return
-      const details = message.details as { confirm_id?: string } | undefined
-      if (details?.confirm_id) pendingDeliveries.get(details.confirm_id)?.()
+      const frameId = (message.details as { frame_id?: string } | undefined)?.frame_id
+      if (!frameId) return
+      const frame = peerFrames.get(frameId)
+      if (!frame) return
+      frame.settled = true
+      const waiting = frame.waiting
+      frame.waiting = []
+      for (const settle of waiting) settle()
     })
 
     pi.registerTool({

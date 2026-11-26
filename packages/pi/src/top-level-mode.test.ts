@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'bun:test'
 import { messageTool } from '@dougbots/avenor-core'
 import { makeMessageProvider, scaleMs, startExtensionHarness, waitFor } from './test-fixtures.js'
+import { CHANNEL_PEER_ERROR } from './events.js'
 
 function broker() {
   const previous = globalThis.fetch
@@ -740,5 +741,50 @@ test('last-turn retries preserve sequence and delayed older commits cannot repla
     await h.eventHandlers.turn_end({ message: { content: 'new session', stopReason: 'stop' } })
     expect(attempts.at(-1)?.sequence).toBe(1)
     expect(attempts.at(-1)?.run_id).not.toBe(attempts[0].run_id)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
+test('a peer frame the session already surfaced is not surfaced again', async () => {
+  // Two copies of one broker row — a redelivery, a re-queued row, or a sender's
+  // retry — must not cost the operator a second turn for a message the session
+  // already showed. The repeat is dropped before it can start one.
+  const b = broker()
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({ deps: { messageTool }, extOptions: { topLevelBrokerUrl: 'https://broker.test' } })
+    const row = { type: 'agent_message', payload: { id: 'tell-repeated', from_run_id: 'claude-peer', message: 'say it once' } }
+    b.inbox.push(row, { ...row }, {
+      type: 'agent_message',
+      payload: { id: 'tell-behind', from_run_id: 'claude-peer', message: 'the frame behind it' },
+    })
+    // The frame behind the repeat is the signal: the queue has passed the
+    // duplicate by the time it lands.
+    await waitFor(() => h!.sendMessage.mock.calls.some(([m]) => String(m.content).includes('the frame behind it')))
+    const bodies = h.sendMessage.mock.calls.map(([m]) => String(m.content))
+    expect(bodies.filter(text => text.includes('say it once'))).toHaveLength(1)
+    expect(bodies).toHaveLength(2)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
+test('an unconfirmed peer frame is retried a bounded number of times, then reported lost', async () => {
+  // The runtime accepts the send but the frame never comes back through
+  // message_end. Every retry is a turn nobody asked for, so the frame spends a
+  // fixed budget and is then given up on with its loss reported, instead of
+  // being redelivered on every poll tick forever.
+  const b = broker()
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { messageTool },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test', peerDeliveryConfirmTimeoutMs: 20 },
+      sendMessage: () => {},
+    })
+    b.inbox.push({ type: 'agent_message', payload: { id: 'tell-silent', from_run_id: 'claude-peer', message: 'never confirmed' } })
+    await waitFor(() => h!.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver'))
+    b.inbox.push({ type: 'agent_message', payload: { id: 'tell-behind', from_run_id: 'claude-peer', message: 'the frame behind it' } })
+    await waitFor(() => h!.sendMessage.mock.calls.some(([m]) => String(m.content).includes('the frame behind it')))
+    const bodies = h.sendMessage.mock.calls.map(([m]) => String(m.content))
+    expect(bodies.filter(text => text.includes('never confirmed'))).toHaveLength(3)
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
