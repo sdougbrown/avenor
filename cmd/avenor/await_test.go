@@ -1165,3 +1165,24 @@ func TestAwaitDerivedSupervisorNotRunningRefuses(t *testing.T) {
 		t.Fatalf("await started the conversation supervisor %d times, want none", launches.count())
 	}
 }
+
+// TestAwaitDialsTheSocketEnvDefault pins the shared flag contract: with no
+// conversation configured, AVENOR_SOCKET names the supervisor to dial, the
+// same default every sibling command applies.
+func TestAwaitDialsTheSocketEnvDefault(t *testing.T) {
+	conversationScratch(t)
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	t.Setenv(envControlSocket, server.socket())
+
+	var stdout, stderr bytes.Buffer
+	if got := awaitRunDeclared([]string{"run_1"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "TURN-DONE rt_1") {
+		t.Fatalf("stdout = %q, want the done transition", stdout.String())
+	}
+	methods, _ := server.calls()
+	if !reflect.DeepEqual(methods, []string{"list", "status"}) {
+		t.Fatalf("calls = %v, want an immediate dial of the named socket", methods)
+	}
+}

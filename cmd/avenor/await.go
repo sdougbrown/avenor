@@ -39,10 +39,12 @@ type awaitOptions struct {
 }
 
 // handleAwait waits for the run to reach the requested state; the exit code
-// encodes the terminal state (failed, timeouts, pending permission). A dial
-// failure the conversation's own coordinates name reaches the caller as a
-// plain error — the adapter maps it to the retryable exit 1 the sibling
-// commands answer with; every other failure keeps await's own exit encoding.
+// encodes the terminal state (failed, timeouts, pending permission). Only a
+// dial failure on the conversation's own derived supervisor reaches the
+// caller as a plain error — the adapter maps it to the retryable exit 1 its
+// sibling commands answer with; every other resolution failure keeps
+// await's own exit encoding, so a missing run stays a dead end at exit 2
+// and a wait that expired stays 124.
 func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	opts, err := awaitOptionsFromInvocation(inv)
 	if err != nil {
@@ -55,7 +57,7 @@ func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writ
 	defer cancel()
 	resolved, err := awaitResolveTarget(ctx, stderr, opts.socket, opts.target, opts.derived)
 	if err != nil {
-		if opts.derived {
+		if errors.Is(err, ErrAttachRefused) {
 			return nil, fmt.Errorf("avenor await: %w", err)
 		}
 		return exitCode(awaitCallError(stderr, err)), nil
@@ -76,10 +78,9 @@ func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error
 	}
 	socket := coords.socket
 	if !requested {
-		// no conversation configured: an explicit --socket still names the
-		// supervisor to dial, and await takes no socket default from the
-		// environment — it scans ~/.avenor/sockets instead.
-		socket = inv.Flags["socket"]
+		// no conversation configured: an explicit --socket (or its
+		// AVENOR_SOCKET default) still names the supervisor to dial;
+		// with neither, the sockets-root scan runs as await always had.
 	}
 	opts := awaitOptions{
 		socket:      socket,
@@ -226,12 +227,17 @@ type awaitResolvedTarget struct {
 	targetRunID string
 }
 
+// ErrAttachRefused reports that the conversation's own supervisor is not
+// running: the one attachment failure a retry answers, because the inbox
+// feed starts the supervisor the next call needs.
+var ErrAttachRefused = errors.New("attach the conversation's supervisor")
+
 func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target string, derived bool) (awaitResolvedTarget, error) {
 	if socket != "" {
 		c, err := client.Dial(socket)
 		if err != nil {
 			if derived {
-				return awaitResolvedTarget{}, fmt.Errorf("attach the conversation's supervisor at %s (its inbox feed starts it): %w", socket, err)
+				return awaitResolvedTarget{}, fmt.Errorf("%w at %s (its inbox feed starts it): %w", ErrAttachRefused, socket, err)
 			}
 			return awaitResolvedTarget{}, err
 		}
