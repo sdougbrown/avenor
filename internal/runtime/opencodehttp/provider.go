@@ -13,19 +13,25 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
 )
 
 const backendID = "opencode-http"
+
+var errProviderClosed = errors.New("opencode-http provider is closed")
 
 // Provider implements runtime.Provider for opencode serve's HTTP API.
 type Provider struct {
 	opts runtime.StartOptions
 
 	mu            sync.Mutex
+	closed        bool
+	launches      launcher.Pending
 	client        *Client
 	started       bool
 	streamCancel  context.CancelFunc
+	streamDone    chan struct{}
 	sessions      map[string]sessionState
 	subscribers   map[chan events.Event]string
 	endedSessions map[string]bool // guards double-emit of session.end
@@ -66,7 +72,9 @@ func NewWithOptions(opts runtime.StartOptions) (runtime.Provider, error) {
 var _ runtime.Provider = (*Provider)(nil)
 
 func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtime.Session, error) {
+	p.mu.Lock()
 	merged := runtime.MergeStartOptions(p.opts, opts)
+	p.mu.Unlock()
 	if merged.ServerURL == "" {
 		return runtime.Session{}, errors.New("server URL is required for opencode-http backend")
 	}
@@ -78,11 +86,6 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	if err != nil {
 		return runtime.Session{}, err
 	}
-	// Persist ServerURL so Resume works after Start-only URL provision.
-	p.mu.Lock()
-	p.opts.ServerURL = merged.ServerURL
-	p.mu.Unlock()
-
 	sessionID, err := c.CreateSession(ctx)
 	if err != nil {
 		return runtime.Session{}, fmt.Errorf("create session: %w", err)
@@ -100,21 +103,28 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		if runID != "" {
+			broker.DeleteRun(runID)
+		}
+		return runtime.Session{}, errProviderClosed
+	}
+	// Persist ServerURL so Resume works after Start-only URL provision.
+	p.opts.ServerURL = merged.ServerURL
 	merged.Dir = sessionDir
 	p.sessions[sessionID] = sessionState{sessionID: sessionID, dir: sessionDir, opts: merged}
 	p.runIDs[sessionID] = runID
-	p.mu.Unlock()
 
 	// Start the broker message polling goroutine.
 	if runID != "" {
 		pollCtx, cancel := context.WithCancel(ctx)
-		p.mu.Lock()
 		p.pollCancels[sessionID] = cancel
-		p.mu.Unlock()
-		go p.broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
+		go broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
 			p.Queue.Enqueue(sessionID, wrapped)
 		})
 	}
+	p.mu.Unlock()
 
 	return runtime.Session{
 		SessionID: sessionID,
@@ -128,12 +138,12 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 		return runtime.Session{}, errors.New("session id is required")
 	}
 	p.mu.Lock()
-	serverURL := p.opts.ServerURL
+	opts := p.opts
 	p.mu.Unlock()
-	if serverURL == "" {
+	if opts.ServerURL == "" {
 		return runtime.Session{}, errors.New("server URL is required for opencode-http backend")
 	}
-	c, err := p.ensureClient(ctx, p.opts)
+	c, err := p.ensureClient(ctx, opts)
 	if err != nil {
 		return runtime.Session{}, err
 	}
@@ -144,9 +154,12 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	dir, _ := info["directory"].(string)
 
 	p.mu.Lock()
-	resumeOpts := p.opts
-	resumeOpts.Dir = dir
-	p.sessions[sessionID] = sessionState{sessionID: sessionID, dir: dir, opts: resumeOpts}
+	if p.closed {
+		p.mu.Unlock()
+		return runtime.Session{}, errProviderClosed
+	}
+	opts.Dir = dir
+	p.sessions[sessionID] = sessionState{sessionID: sessionID, dir: dir, opts: opts}
 	p.mu.Unlock()
 
 	return runtime.Session{
@@ -244,6 +257,11 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 // Close shuts down the event stream and releases resources.
 func (p *Provider) Close() error {
 	p.mu.Lock()
+	p.closed = true
+	p.client = nil
+	p.started = false
+	p.runIDs = nil
+	streamDone := p.streamDone
 	cancels := make([]context.CancelFunc, 0, len(p.pollCancels))
 	for _, cancel := range p.pollCancels {
 		cancels = append(cancels, cancel)
@@ -257,32 +275,32 @@ func (p *Provider) Close() error {
 	for _, cancel := range cancels {
 		cancel()
 	}
-	p.mu.Lock()
-	p.runIDs = nil
-	p.mu.Unlock()
+	p.launches.CancelAndWait()
+	if streamDone != nil {
+		<-streamDone
+	}
 	p.Queue.Reset()
 	return nil
 }
 
 func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) (*Client, error) {
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, errProviderClosed
+	}
 	if p.client != nil {
 		c := p.client
 		p.mu.Unlock()
 		return c, nil
 	}
+	launchCtx, settle := p.launches.Begin(ctx)
 	p.mu.Unlock()
-
-	// Store broker reference if provided.
-	if opts.Broker != nil {
-		p.mu.Lock()
-		p.broker = opts.Broker
-		p.mu.Unlock()
-	}
+	defer settle(false)
 
 	co, safeURL := clientOptionsFromURL(opts.ServerURL)
 	client := NewClient(co)
-	healthCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	healthCtx, cancel := context.WithTimeout(launchCtx, 30*time.Second)
 	defer cancel()
 	if err := client.Health(healthCtx); err != nil {
 		return nil, fmt.Errorf("connect to opencode server at %s: %w", safeURL, err)
@@ -290,16 +308,25 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return nil, errProviderClosed
+	}
 	if p.client != nil {
 		return p.client, nil
 	}
 	p.client = client
+	p.broker = opts.Broker
 	p.started = true
 	streamCtx, streamCancel := context.WithCancel(context.Background())
 	p.streamCancel = streamCancel
+	streamDone := make(chan struct{})
+	p.streamDone = streamDone
 
 	// Start the SSE event stream in the background.
-	go p.streamEvents(streamCtx, client)
+	go func() {
+		defer close(streamDone)
+		p.streamEvents(streamCtx, client)
+	}()
 	return client, nil
 }
 

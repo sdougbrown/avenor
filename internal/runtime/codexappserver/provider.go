@@ -11,20 +11,25 @@ import (
 	"github.com/sdougbrown/avenor/internal/events"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
 )
 
 const backendID = "codex-app-server"
 
+var errProviderClosed = errors.New("codex-app-server provider is closed")
+
 // Provider implements runtime.Provider for Codex's app-server JSON-RPC protocol.
 type Provider struct {
 	opts runtime.StartOptions
 
-	mu      sync.Mutex
-	client  *client
-	threads map[string]string // sessionID (=threadID) → threadID
-	turns   map[string]string // sessionID → current turnID
-	efforts map[string]string // sessionID → explicit turn/start effort override
+	mu       sync.Mutex
+	closed   bool
+	launches launcher.Pending
+	client   *client
+	threads  map[string]string // sessionID (=threadID) → threadID
+	turns    map[string]string // sessionID → current turnID
+	efforts  map[string]string // sessionID → explicit turn/start effort override
 
 	// startClient constructs a new app-server client. Overridable in tests;
 	// defaults to StartClient when nil.
@@ -87,21 +92,26 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 		}
 	}
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		if runID != "" {
+			broker.DeleteRun(runID)
+		}
+		return runtime.Session{}, errProviderClosed
+	}
 	p.threads[threadID] = threadID
 	p.efforts[threadID] = merged.Thinking
 	p.runIDs[threadID] = runID
-	p.mu.Unlock()
 
 	// Start the broker message polling goroutine.
 	if runID != "" {
 		pollCtx, cancel := context.WithCancel(ctx)
-		p.mu.Lock()
 		p.pollCancels[threadID] = cancel
-		p.mu.Unlock()
-		go p.broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
+		go broker.PollAgentMessages(pollCtx, runID, func(wrapped string) {
 			p.Queue.Enqueue(threadID, wrapped)
 		})
 	}
+	p.mu.Unlock()
 
 	return runtime.Session{
 		SessionID: threadID,
@@ -128,6 +138,10 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	}
 
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return runtime.Session{}, errProviderClosed
+	}
 	if _, ok := p.threads[sessionID]; ok {
 		p.efforts[sessionID] = effort
 		p.mu.Unlock()
@@ -153,6 +167,10 @@ func (p *Provider) resume(ctx context.Context, sessionID string, opts runtime.St
 	threadID := tsr.Thread.ID
 
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return runtime.Session{}, errProviderClosed
+	}
 	p.threads[threadID] = threadID
 	p.efforts[threadID] = effort
 	p.mu.Unlock()
@@ -299,20 +317,20 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 
 func (p *Provider) Close() error {
 	p.mu.Lock()
+	p.closed = true
 	c := p.client
 	cancels := make([]context.CancelFunc, 0, len(p.pollCancels))
 	for _, cancel := range p.pollCancels {
 		cancels = append(cancels, cancel)
 	}
 	p.client = nil
+	p.runIDs = nil
 	p.pollCancels = map[string]context.CancelFunc{}
 	p.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
 	}
-	p.mu.Lock()
-	p.runIDs = nil
-	p.mu.Unlock()
+	p.launches.CancelAndWait()
 	p.Queue.Reset()
 	if c == nil {
 		return nil
@@ -322,27 +340,38 @@ func (p *Provider) Close() error {
 
 func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) (*client, error) {
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, errProviderClosed
+	}
 	if p.client != nil {
 		c := p.client
 		p.mu.Unlock()
 		return c, nil
 	}
-	// Release p.mu before starting a client. sync.Mutex is not reentrant, so
-	// keeping it held here would make the re-lock below (for the double-checked
-	// store) deadlock this goroutine against itself. Re-check p.client after
-	// re-acquiring.
+	launchCtx, settle := p.launches.Begin(ctx)
 	p.mu.Unlock()
+	defer func() {
+		if settle != nil {
+			settle(false)
+		}
+	}()
 
 	starter := p.startClient
 	if starter == nil {
 		starter = StartClient
 	}
-	c, err := starter(ctx, opts)
+	c, err := starter(launchCtx, opts)
 	if err != nil {
 		return nil, err
 	}
 
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		_ = c.Close()
+		return nil, errProviderClosed
+	}
 	if p.client != nil {
 		// Lost the race: another goroutine started a client first. Close ours
 		// to avoid orphaning the codex app-server process it spawned.
@@ -356,6 +385,8 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 		p.broker = p.opts.Broker
 	}
 	p.client = c
+	settle(true)
+	settle = nil
 	p.mu.Unlock()
 	return c, nil
 }
