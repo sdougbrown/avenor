@@ -1,7 +1,7 @@
 import { answerPermissionTool } from '@dougbots/avenor-core'
 import { answerToolDefinition, type AnswerDeps } from './answer-tool.js'
 import { messageToolDefinition, peersToolDefinition } from './message-tools.js'
-import { createMessagingRuntime, HOST_RUN_ID, type MessagingRuntime } from './messaging.js'
+import { createMessagingRuntime, type MessagingRuntime } from './messaging.js'
 import {
   createAvenorProvider,
   createCoreSeam,
@@ -24,30 +24,22 @@ export interface HostConfig {
   readonly backend?: string
   readonly rosterFile?: string
   readonly rosterEntry?: string
-  /** Make each delegated child addressable in Avenor's broker. */
+  /**
+   * Bind each session's conversation and make its children messaging children
+   * of it. Defaults on; `false` leaves the spawns one-shot and the tools
+   * send-only.
+   */
   readonly messaging?: boolean
-  /** The run id a messaging-enabled child addresses; defaults to `supervisor`. */
-  readonly parentRunId?: string
 }
 
-export interface SeamRequest {
-  readonly selection: AvenorSelection
-  readonly messaging: boolean
-  readonly parentRunId: string
-}
-
-/** Builds the broker seam for one start; injectable for tests. */
-export type SeamFactory = (request: SeamRequest) => AvenorSeam
+/** Builds the broker seam for one selection; injectable for tests. */
+export type SeamFactory = (selection: AvenorSelection) => AvenorSeam
 
 const defaultAnswer: AnswerDeps = {
   answer: (request) => answerPermissionTool(request),
 }
 
-const defaultSeamFactory: SeamFactory = ({ selection, messaging, parentRunId }) =>
-  createCoreSeam({
-    selection,
-    ...(messaging ? { messaging: true, parentRunId } : {}),
-  })
+const defaultSeamFactory: SeamFactory = (selection) => createCoreSeam({ selection })
 
 function selectionOf(config: HostConfig): AvenorSelection {
   return {
@@ -59,10 +51,6 @@ function selectionOf(config: HostConfig): AvenorSelection {
   }
 }
 
-/**
- * Register the provider and the answer tool. Kept separate from `apply` so
- * tests can supply an answerer and a seam without a running broker.
- */
 export interface RegisterDeps {
   readonly answer?: AnswerDeps
   readonly makeSeam?: SeamFactory
@@ -76,15 +64,11 @@ export function register(
 ): MessagingRuntime {
   const answer = deps.answer ?? defaultAnswer
   const makeSeam = deps.makeSeam ?? defaultSeamFactory
-  const messaging = config.messaging === true
-  const parentRunId = config.parentRunId ?? HOST_RUN_ID
+  const messaging = config.messaging !== false
   const runtime = deps.runtime ?? createMessagingRuntime()
 
   ctx.subagents.registerProvider(
-    createAvenorProvider(
-      makeSeam({ selection: selectionOf(config), messaging, parentRunId }),
-      runtime,
-    ),
+    createAvenorProvider(makeSeam(selectionOf(config)), messaging ? runtime : undefined),
   )
   ctx.tools.register(answerToolDefinition(answer))
   ctx.tools.register(messageToolDefinition(() => runtime.host()))
@@ -92,10 +76,6 @@ export function register(
   return runtime
 }
 
-/**
- * Cordis entry point. `config` is the patch row's `config` object, so a profile
- * chooses the delegated child's route in YAML rather than in code.
- */
 export function apply(ctx: HostContext, config: HostConfig = {}, deps: RegisterDeps = {}): void {
   const runtime = register(ctx, config, deps)
   // Cordis runs the effect callback now and its returned disposer on unload.

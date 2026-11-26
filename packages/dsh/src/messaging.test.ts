@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'bun:test'
-import { createMessagingHost, HOST_RUN_ID, type MessagingClient } from './messaging.js'
+import { createMessagingHost, createMessagingRuntime, deliverFrame, startInboundLoop } from './messaging.js'
+import type { BoundConversation, BrokerFrame, MessagingClient, MessagingHost, MessagingRuntime } from './messaging.js'
+import type { ParentAgent, UserMessageLike } from './types.js'
 
 function fakeClient() {
   const calls: string[] = []
@@ -10,65 +12,28 @@ function fakeClient() {
     },
     async messagePeers() {
       calls.push('peers')
+      return { generation: 'gen-1', peers: [{ run_id: 'run-1', label: 'one' }] }
+    },
+    async messageBind(request: { session_id: string }) {
+      calls.push(`bind:${request.session_id}`)
       return {
+        run_id: 'bound-1',
+        broker_url: 'http://127.0.0.1:1',
+        run_token: 'tok',
         generation: 'gen-1',
-        peers: [{ run_id: 'run-1', label: 'one', status: 'running' }],
+        created: true,
       }
     },
   } as unknown as MessagingClient
   return { client, calls }
 }
 
-describe('messaging host', () => {
-  it('bootstraps the broker generation and answers as the supervisor', async () => {
-    const { client, calls } = fakeClient()
-    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
-
-    expect(host.hostRunId).toBe(HOST_RUN_ID)
-    expect(HOST_RUN_ID).toBe('supervisor')
-    expect(calls).toEqual(['preflight'])
-  })
-
-  it('lists peers through the control client', async () => {
-    const { client } = fakeClient()
-    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
-
-    const result = await host.peers({ action: 'list' })
-    expect(JSON.stringify(result)).toContain('run-1')
-  })
-
-  it('refuses an unknown action through the shared router', async () => {
-    const { client } = fakeClient()
-    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
-
-    await expect(host.message({ action: 'bogus' })).rejects.toThrow()
-  })
-})
-
-import { createMessagingRuntime, deliverInbound, startInboundLoop } from './messaging.js'
-import type { MessagingHost, MessagingRuntime } from './messaging.js'
-import type { ParentAgent, UserMessageLike } from './types.js'
-import type { InboundAsk } from '@dougbots/avenor-core'
-
-function ask(overrides: Partial<InboundAsk> = {}): InboundAsk {
+function frame(): BrokerFrame {
   return {
-    from_run_id: 'run-1',
-    message_id: 'msg-1',
-    message: 'may I delete the build directory?',
-    expects_reply: true,
-    ...overrides,
-  }
-}
-
-function fakeHost(): MessagingHost {
-  return {
-    hostRunId: 'supervisor',
-    async message() {
-      return { outcome: 'sent' }
-    },
-    async peers() {
-      return { outcome: 'listed' }
-    },
+    id: 'msg-1',
+    from_run_id: 'rt_1',
+    sender: 'run-public-1',
+    payload: { id: 'msg-1', message: 'hello', expects_reply: false },
   }
 }
 
@@ -83,29 +48,67 @@ function fakeParent(status: 'idle' | 'running') {
   return { parent, injected, followed }
 }
 
-function deliveryRuntime(parent: ParentAgent | undefined) {
-  const asks: InboundAsk[] = []
-  const runtime: MessagingRuntime = {
+function runtimeWith(parent: ParentAgent | undefined): MessagingRuntime {
+  const runtime = createMessagingRuntime({
     host: async () => fakeHost(),
-    remember() {},
-    forget() {},
-    parentFor: () => parent,
-    registerAsk: (value) => asks.push(value),
-    ensureInbound() {},
-    stop() {},
-  }
-  return { runtime, asks }
+    bind: async (sessionId) => ({ sessionId, runId: 'bound-1', brokerUrl: 'http://127.0.0.1:1', token: 'tok' }),
+    poll: async () => [],
+  })
+  if (parent) runtime.remember('rt_1', parent)
+  return runtime
 }
 
-async function waitFor(condition: () => boolean, timeoutMs = 2000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error('timed out waiting for condition')
-    await new Promise((resolve) => setTimeout(resolve, 5))
+function fakeHost(): MessagingHost {
+  return {
+    hostRunId: 'supervisor',
+    async message() {
+      return { outcome: 'sent' }
+    },
+    async peers() {
+      return { outcome: 'listed' }
+    },
   }
 }
+
+describe('messaging host', () => {
+  it('bootstraps the broker generation', async () => {
+    const { client, calls } = fakeClient()
+    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
+    expect(host.hostRunId).toBe('supervisor')
+    expect(calls).toEqual(['preflight'])
+  })
+
+  it('lists peers through the control client', async () => {
+    const { client } = fakeClient()
+    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
+    expect(JSON.stringify(await host.peers({ action: 'list' }))).toContain('run-1')
+  })
+
+  it('refuses an unknown action through the shared router', async () => {
+    const { client } = fakeClient()
+    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
+    await expect(host.message({ action: 'bogus' })).rejects.toThrow()
+  })
+})
 
 describe('messaging runtime', () => {
+  it('binds one session once and reuses the run id', async () => {
+    let binds = 0
+    const runtime = createMessagingRuntime({
+      host: async () => fakeHost(),
+      bind: async (sessionId) => {
+        binds += 1
+        return { sessionId, runId: 'bound-1', brokerUrl: 'http://127.0.0.1:1', token: 'tok' }
+      },
+      poll: async () => [],
+    })
+    const first = await runtime.bind('sess-1')
+    const again = await runtime.bind('sess-1')
+    expect(binds).toBe(1)
+    expect(first.runId).toBe('bound-1')
+    expect(again.runId).toBe('bound-1')
+  })
+
   it('builds the host once on demand', async () => {
     let builds = 0
     const runtime = createMessagingRuntime({
@@ -114,13 +117,12 @@ describe('messaging runtime', () => {
         return fakeHost()
       },
     })
-    expect(builds).toBe(0)
     await runtime.host()
     await runtime.host()
     expect(builds).toBe(1)
   })
 
-  it('remembers the agent that started a run and forgets it on demand', () => {
+  it('keys deliveries by run id and forgets on demand', () => {
     const runtime = createMessagingRuntime({ host: async () => fakeHost() })
     const { parent } = fakeParent('running')
     runtime.remember('run-1', parent)
@@ -128,98 +130,73 @@ describe('messaging runtime', () => {
     runtime.forget('run-1')
     expect(runtime.parentFor('run-1')).toBeUndefined()
   })
-
-  it('starts the receive loop only once', async () => {
-    let polls = 0
-    const runtime = createMessagingRuntime({
-      host: async () => fakeHost(),
-      pollTimeoutMs: 5,
-      receive: async () => {
-        polls += 1
-        await new Promise((resolve) => setTimeout(resolve, 5))
-        return { asks: [], generation: 'gen-1' }
-      },
-    })
-    runtime.ensureInbound()
-    runtime.ensureInbound()
-    await waitFor(() => polls > 1)
-    runtime.stop()
-  })
 })
 
 describe('inbound delivery', () => {
-  it('injects into a running parent and registers the ask', () => {
+  it('injects into a running parent', () => {
     const { parent, injected, followed } = fakeParent('running')
-    const { runtime, asks } = deliveryRuntime(parent)
-
-    expect(deliverInbound(runtime, ask())).toBe(true)
-
+    expect(deliverFrame(runtimeWith(parent), frame())).toBe(true)
     expect(followed).toHaveLength(0)
     expect(injected).toHaveLength(1)
-    const text = (injected[0].content[0] as { text: string }).text
-    expect(text).toContain('run-1')
-    expect(text).toContain('reply_to "msg-1"')
-    expect(asks).toHaveLength(1)
+    expect((injected[0].content[0] as { text: string }).text).toContain('hello')
   })
 
   it('wakes an idle parent with a follow-up', () => {
     const { parent, injected, followed } = fakeParent('idle')
-    const { runtime } = deliveryRuntime(parent)
-    expect(deliverInbound(runtime, ask())).toBe(true)
+    expect(deliverFrame(runtimeWith(parent), frame())).toBe(true)
     expect(injected).toHaveLength(0)
     expect(followed).toHaveLength(1)
   })
 
   it('drops a frame from a run this harness did not start', () => {
-    const { runtime, asks } = deliveryRuntime(undefined)
-    expect(deliverInbound(runtime, ask())).toBe(false)
-    expect(asks).toHaveLength(0)
+    expect(deliverFrame(runtimeWith(undefined), frame())).toBe(false)
   })
 
-  it('does not register a reply edge for a tell', () => {
+  it('matches a sender registered by its public run id', () => {
     const { parent, injected } = fakeParent('running')
-    const { runtime, asks } = deliveryRuntime(parent)
-
-    expect(deliverInbound(runtime, ask({ expects_reply: false }))).toBe(true)
-    expect(asks).toHaveLength(0)
-    const text = (injected[0].content[0] as { text: string }).text
-    expect(text).toContain('msg-1')
-    expect(text).not.toContain('reply_to')
+    const runtime = runtimeWith(undefined)
+    runtime.remember('run-public-1', parent)
+    expect(deliverFrame(runtime, frame())).toBe(true)
+    expect(injected).toHaveLength(1)
   })
 })
 
 describe('inbound loop', () => {
-  it('delivers each frame and stops when asked', async () => {
-    const seen: InboundAsk[] = []
-    let loop: { stop(): void }
-    loop = startInboundLoop({
-      receive: async () => ({ asks: [ask()], generation: 'gen-1' }),
-      pollTimeoutMs: 5,
-      onAsk: (value) => {
-        seen.push(value)
-        loop.stop()
+  it('polls the bound conversation and stops when asked', async () => {
+    const { parent, injected } = fakeParent('running')
+    const runtime = runtimeWith(parent)
+    let polls = 0
+    const loop = startInboundLoop({
+      sessionId: 'sess-1',
+      runtime,
+      poll: async () => {
+        polls += 1
+        return polls === 1 ? [frame()] : []
       },
+      pollIntervalMs: 5,
     })
-    await waitFor(() => seen.length === 1)
-    expect(seen[0].message_id).toBe('msg-1')
+    const deadline = Date.now() + 2000
+    while (injected.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    loop.stop()
+    expect(injected).toHaveLength(1)
   })
 
-  it('reports a failed poll and keeps polling', async () => {
+  it('reports a failed bind and stops', async () => {
     const errors: unknown[] = []
-    let attempts = 0
-    let loop: { stop(): void }
-    loop = startInboundLoop({
-      receive: async () => {
-        attempts += 1
-        if (attempts < 2) throw new Error('broker unavailable')
-        loop.stop()
-        return { asks: [], generation: 'gen-1' }
+    const runtime = createMessagingRuntime({
+      host: async () => fakeHost(),
+      bind: async () => {
+        throw new Error('bind refused')
       },
-      pollTimeoutMs: 1,
-      onAsk: () => {},
-      onError: (error) => errors.push(error),
+      poll: async () => [],
     })
-    await waitFor(() => attempts >= 2)
+    startInboundLoop({ sessionId: 'sess-1', runtime, poll: async () => [], pollIntervalMs: 1, onError: (e) => errors.push(e) })
+    const deadline = Date.now() + 2000
+    while (errors.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
     expect(errors).toHaveLength(1)
   })
 })

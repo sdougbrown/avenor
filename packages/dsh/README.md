@@ -94,16 +94,23 @@ the six message actions and the peer listing are core's router, not a copy.
     messaging: true
 ```
 
-**Inbound.** The plugin polls the broker's receive endpoint while a delegation
-is live and delivers each tell or ask to the agent that started that run:
-`inject` while the agent is running, `followup` to wake it when idle. An ask is
-registered so `avenor_message action=reply` can reach the sender. A frame from a
-run this harness did not start is dropped rather than delivered to an arbitrary
-agent.
+**Inbound.** Each DSH session binds its own conversation (`message_bind`, host
+`dsh`), which mints a broker run and credentials for that session. Spawned
+children name that run as `parent_run_id`, and the plugin polls the bound feed
+(`/poll-control`) while the session has a delegation live, delivering each tell
+or ask to the agent that started the run: `inject` while it runs, `followup` to
+wake it. An ask is registered so `avenor_message action=reply` can reach the
+sender.
 
-The loop starts with the first delegation, not at activation, and stops when
-the plugin unloads. A settled run is forgotten, so a frame that arrives after
-its child finished has nowhere to go.
+The broker names a sender by runtime id (`rt_N`) in `from_run_id` and by public
+run id in `sender`, so both are registered and either can resolve the parent. A
+frame from a run this harness did not start is dropped rather than delivered to
+an arbitrary agent. A settled run is forgotten, so a frame arriving after its
+child finished has nowhere to go.
+
+`message_bind` must serve the `dsh` host for this to work; a broker that does
+not will refuse the bind, and the plugin reports that as a delivery error rather
+than silently receiving nothing.
 
 ## Install (local bundle)
 

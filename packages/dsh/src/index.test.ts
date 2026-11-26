@@ -2,7 +2,6 @@ import { describe, it, expect } from 'bun:test'
 import { apply, inject, register, type HostConfig } from './index.js'
 import type { AvenorSeam } from './provider.js'
 import type { MessagingHost, MessagingRuntime } from './messaging.js'
-import type { InboundAsk } from '@dougbots/avenor-core'
 import type { HostContext, ParentAgent, SubagentProvider } from './types.js'
 
 function fakeContext() {
@@ -39,8 +38,8 @@ function recordingSeamFactory() {
   }
   return {
     requests,
-    makeSeam(request: unknown) {
-      requests.push(request)
+    makeSeam(selection: unknown) {
+      requests.push(selection)
       return seam
     },
   }
@@ -49,7 +48,6 @@ function recordingSeamFactory() {
 function fakeRuntime() {
   const calls: string[] = []
   const parents = new Map<string, ParentAgent>()
-  const asks: InboundAsk[] = []
   const host: MessagingHost = {
     hostRunId: 'supervisor',
     async message() {
@@ -61,6 +59,10 @@ function fakeRuntime() {
   }
   const runtime: MessagingRuntime = {
     host: async () => host,
+    async bind(sessionId) {
+      calls.push(`bind:${sessionId}`)
+      return { sessionId, runId: 'bound-1', brokerUrl: 'http://127.0.0.1:1', token: 'tok' }
+    },
     remember(runId, parent) {
       calls.push(`remember:${runId}`)
       parents.set(runId, parent)
@@ -70,18 +72,17 @@ function fakeRuntime() {
       parents.delete(runId)
     },
     parentFor: (runId) => parents.get(runId),
-    registerAsk(ask) {
-      calls.push(`ask:${ask.message_id}`)
-      asks.push(ask)
+    registerAsk(messageId) {
+      calls.push(`ask:${messageId}`)
     },
-    ensureInbound() {
-      calls.push('inbound')
+    ensureInbound(sessionId) {
+      calls.push(`inbound:${sessionId}`)
     },
     stop() {
       calls.push('stop')
     },
   }
-  return { runtime, calls, asks }
+  return { runtime, calls }
 }
 
 const toolNames = (tools: unknown[]) =>
@@ -95,7 +96,11 @@ describe('plugin entry', () => {
   it('registers the provider and the three tools', () => {
     const fake = fakeContext()
     const seams = recordingSeamFactory()
-    register(fake.ctx, {}, { answer: { answer: async () => ({ ok: true }) }, makeSeam: seams.makeSeam, runtime: fakeRuntime().runtime })
+    register(fake.ctx, {}, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: seams.makeSeam,
+      runtime: fakeRuntime().runtime,
+    })
 
     expect(fake.providers.map((provider) => provider.name)).toEqual(['avenor'])
     expect(fake.providers[0].inheritsParentContext).toBe(false)
@@ -104,6 +109,31 @@ describe('plugin entry', () => {
       'avenor_message',
       'avenor_peers',
     ])
+  })
+
+  it('passes the row config through to the child selection', () => {
+    const fake = fakeContext()
+    const seams = recordingSeamFactory()
+    const config: HostConfig = { backend: 'dsh', model: 'grace/qwen' }
+
+    register(fake.ctx, config, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: seams.makeSeam,
+      runtime: fakeRuntime().runtime,
+    })
+
+    expect(seams.requests).toEqual([{ backend: 'dsh', model: 'grace/qwen' }])
+  })
+
+  it('omits unset selection fields rather than passing empty strings', () => {
+    const fake = fakeContext()
+    const seams = recordingSeamFactory()
+    register(fake.ctx, { agent: 'planner' }, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: seams.makeSeam,
+      runtime: fakeRuntime().runtime,
+    })
+    expect(seams.requests).toEqual([{ agent: 'planner' }])
   })
 
   it('publishes output schemas the tool registry accepts', () => {
@@ -121,35 +151,6 @@ describe('plugin entry', () => {
     }
   })
 
-  it('passes the row config through to the child selection', () => {
-    const fake = fakeContext()
-    const seams = recordingSeamFactory()
-    const config: HostConfig = { backend: 'dsh', model: 'grace/qwen' }
-
-    register(fake.ctx, config, {
-      answer: { answer: async () => ({ ok: true }) },
-      makeSeam: seams.makeSeam,
-      runtime: fakeRuntime().runtime,
-    })
-
-    expect(seams.requests).toEqual([
-      { selection: { backend: 'dsh', model: 'grace/qwen' }, messaging: false, parentRunId: 'supervisor' },
-    ])
-  })
-
-  it('binds messaging to the supervisor by default when enabled', () => {
-    const fake = fakeContext()
-    const seams = recordingSeamFactory()
-    register(fake.ctx, { messaging: true }, {
-      answer: { answer: async () => ({ ok: true }) },
-      makeSeam: seams.makeSeam,
-      runtime: fakeRuntime().runtime,
-    })
-    expect(seams.requests).toEqual([
-      { selection: {}, messaging: true, parentRunId: 'supervisor' },
-    ])
-  })
-
   it('registers everything from apply and stops the runtime on unload', () => {
     const fake = fakeContext()
     const parts = fakeRuntime()
@@ -157,8 +158,6 @@ describe('plugin entry', () => {
 
     expect(fake.providers).toHaveLength(1)
     expect(fake.tools).toHaveLength(3)
-    // Activation starts no broker work: the receive loop waits for a delegation
-    // or a message call.
     expect(parts.calls).toEqual([])
 
     for (const dispose of fake.effects) dispose()

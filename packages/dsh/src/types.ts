@@ -29,6 +29,8 @@ export interface UserMessageLike {
  */
 export interface ParentAgent {
   readonly status: 'idle' | 'running'
+  /** The DSH session this agent speaks for; a conversation binds by its id. */
+  readonly session?: { readonly id: string }
   inject(message: UserMessageLike): void
   followup(message: UserMessageLike): void
 }

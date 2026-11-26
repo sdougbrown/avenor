@@ -9,7 +9,7 @@ import {
 } from './provider.js'
 import { permissionNotice, type PendingPermission } from './permission.js'
 import { diagnosticFor, stopReasonFor, toSubagentResult, type AvenorTerminal } from './stop-reason.js'
-import type { SubagentProvider, SubagentStartRequest, UserMessageLike } from './types.js'
+import type { ParentAgent, SubagentProvider, SubagentStartRequest, UserMessageLike } from './types.js'
 
 function terminal(overrides: Partial<AvenorTerminal> = {}): AvenorTerminal {
   return { runId: 'run-1', status: 'done', ready: true, output: 'finished', ...overrides }
@@ -72,15 +72,12 @@ function fakeSeam(): FakeSeam {
 function fakeParent(status: 'idle' | 'running' = 'running') {
   const injected: UserMessageLike[] = []
   const followed: UserMessageLike[] = []
-  return {
-    injected,
-    followed,
-    parent: {
-      status,
-      inject: (message: UserMessageLike) => injected.push(message),
-      followup: (message: UserMessageLike) => followed.push(message),
-    },
+  const parent: ParentAgent = {
+    status,
+    inject: (message: UserMessageLike) => injected.push(message),
+    followup: (message: UserMessageLike) => followed.push(message),
   }
+  return { injected, followed, parent }
 }
 
 /** `start` is optional on the seam's provider shape; this provider always has it. */
@@ -292,21 +289,33 @@ describe('avenor subagent provider', () => {
     const remembered: string[] = []
     const forgotten: string[] = []
     let inbound = 0
+    const bound: string[] = []
     const tracker = {
+      async bind(sessionId: string) {
+        bound.push(sessionId)
+        return { runId: 'bound-1' }
+      },
       remember(runId: string) {
         remembered.push(runId)
       },
       forget(runId: string) {
         forgotten.push(runId)
       },
-      ensureInbound() {
+      ensureInbound(_sessionId: string) {
         inbound += 1
       },
     }
 
-    const run = await startRun(createAvenorProvider(fake.seam, tracker), startRequest('work'))
+    const request = {
+      ...startRequest('work'),
+      parent: { ...fakeParent().parent, session: { id: 'sess-1' } },
+    }
+    const run = await startRun(createAvenorProvider(fake.seam, tracker), request)
+    expect(bound).toEqual(['sess-1'])
     expect(remembered).toEqual(['run-1'])
     expect(inbound).toBe(1)
+    expect((fake.requests[0] as { messaging?: boolean; parentRunId?: string }).messaging).toBe(true)
+    expect((fake.requests[0] as { parentRunId?: string }).parentRunId).toBe('bound-1')
 
     fake.settle(terminal())
     await run.result

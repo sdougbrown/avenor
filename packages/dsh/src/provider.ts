@@ -29,6 +29,10 @@ export interface AvenorSeam {
       readonly prompt: string
       readonly cwd?: string
       readonly label?: string
+      /** Bind the child to the calling session's conversation. */
+      readonly messaging?: boolean
+      /** The bound run id a messaging child addresses. */
+      readonly parentRunId?: string
     },
     onPending: (runId: string, permission: PendingPermission) => void,
   ): Promise<AvenorHandle>
@@ -39,13 +43,17 @@ export interface AvenorSeam {
  * frame can reach that agent) and whether the receive loop is running.
  */
 export interface DelegationTracker {
+  /** Bind (or reuse) the calling session's conversation; returns its run id. */
+  bind(sessionId: string): Promise<{ runId: string }>
   remember(runId: string, parent: ParentAgent): void
   forget(runId: string): void
-  ensureInbound(): void
+  ensureInbound(sessionId: string): void
 }
 
 export interface AvenorHandle {
   readonly runId: string
+  /** The broker's runtime id (`rt_N`); inbound frames name the sender this way. */
+  readonly runtimeId?: string
   /** Resolves once the run is terminal — never while it waits for a decision. */
   readonly done: Promise<AvenorTerminal>
   cancel(): Promise<void>
@@ -78,7 +86,7 @@ export interface CoreTools {
     readonly rosterEntry?: string
     readonly messaging?: boolean
     readonly parent_run_id?: string
-  }): Promise<{ readonly run_id: string }>
+  }): Promise<{ readonly run_id: string; readonly runtime_id?: string }>
   result(request: { readonly runId: string; readonly wait: boolean }): Promise<{
     readonly status: string
     readonly ready: boolean
@@ -106,14 +114,6 @@ export interface CoreSeamOptions {
   readonly tools?: CoreTools
   readonly pollIntervalMs?: number
   readonly sleep?: (ms: number) => Promise<void>
-  /** Make the child addressable as `parentRunId` in the broker. */
-  readonly messaging?: boolean
-  /** The run id a messaging-enabled child addresses; the harness is `supervisor`. */
-  readonly parentRunId?: string
-}
-
-function selectionParentRunId(parentRunId: string | undefined): { parent_run_id?: string } {
-  return parentRunId === undefined ? {} : { parent_run_id: parentRunId }
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -163,8 +163,8 @@ export function createCoreSeam(options: CoreSeamOptions = {}): AvenorSeam {
         ...(selection.backend === undefined ? {} : { backend: selection.backend }),
         ...(selection.rosterFile === undefined ? {} : { rosterFile: selection.rosterFile }),
         ...(selection.rosterEntry === undefined ? {} : { rosterEntry: selection.rosterEntry }),
-        ...(options.messaging === true
-          ? { messaging: true, ...(selectionParentRunId(options.parentRunId)) }
+        ...(request.messaging === true
+          ? { messaging: true, ...(request.parentRunId === undefined ? {} : { parent_run_id: request.parentRunId }) }
           : {}),
       })
 
@@ -212,6 +212,7 @@ export function createCoreSeam(options: CoreSeamOptions = {}): AvenorSeam {
       let killed = false
       return {
         runId,
+        ...(spawned.runtime_id === undefined ? {} : { runtimeId: spawned.runtime_id }),
         done,
         async cancel() {
           if (killed || settled) return
@@ -269,17 +270,34 @@ export function createAvenorProvider(
     inheritsParentContext: false,
 
     async start(request: SubagentStartRequest): Promise<SubagentRun> {
+      // A messaging child must name the session's bound run, not the
+      // supervisor, or its messages would ride an inbox no session reads.
+      const sessionId = request.parent.session?.id
+      const binding = tracker !== undefined && sessionId !== undefined
+        ? await tracker.bind(sessionId)
+        : undefined
+
       const handle = await seam.spawn(
         {
           prompt: promptText(request.prompt),
           ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
           ...(request.label === undefined ? {} : { label: request.label }),
+          ...(binding === undefined ? {} : { messaging: true, parentRunId: binding.runId }),
         },
         (runId, permission) => notifyParent(request.parent, runId, permission),
       )
 
-      tracker?.remember(handle.runId, request.parent)
-      tracker?.ensureInbound()
+      if (tracker !== undefined) {
+        // The broker names the sender by runtime id and the public run id in
+        // different fields, so both are registered.
+        tracker.remember(handle.runId, request.parent)
+        if (handle.runtimeId !== undefined) tracker.remember(handle.runtimeId, request.parent)
+        if (sessionId !== undefined) tracker.ensureInbound(sessionId)
+      }
+      const forget = (): void => {
+        tracker?.forget(handle.runId)
+        if (handle.runtimeId !== undefined) tracker?.forget(handle.runtimeId)
+      }
 
       const onAbort = (): void => {
         void handle.cancel()
@@ -291,13 +309,13 @@ export function createAvenorProvider(
         result: handle.done.then((terminal) => {
           // A settled child sends nothing more; forget it before the manager
           // disposes, so a late frame cannot reach an agent that moved on.
-          tracker?.forget(handle.runId)
+          forget()
           return toSubagentResult(terminal)
         }),
         dispose: async () => {
           request.signal.removeEventListener('abort', onAbort)
           await handle.cancel()
-          tracker?.forget(handle.runId)
+          forget()
         },
       }
     },
