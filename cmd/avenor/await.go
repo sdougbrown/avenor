@@ -30,6 +30,7 @@ const (
 
 type awaitOptions struct {
 	socket      string
+	coords      boundCoordinates
 	until       string
 	timeout     time.Duration
 	printOutput bool
@@ -38,20 +39,47 @@ type awaitOptions struct {
 }
 
 // handleAwait waits for the run to reach the requested state; the exit code
-// encodes the terminal state (failed, timeouts, pending permission).
+// encodes the terminal state (failed, timeouts, pending permission). Only a
+// dial failure on the conversation's own derived supervisor reaches the
+// caller as a plain error — the adapter maps it to the retryable exit 1 its
+// sibling commands answer with; every other resolution failure keeps
+// await's own exit encoding, so a missing run stays a dead end at exit 2
+// and a wait that expired stays 124.
 func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	opts, err := awaitOptionsFromInvocation(inv)
 	if err != nil {
 		return nil, err
 	}
-	return exitCode(awaitRun(ctx, opts, os.Stdout, stderr)), nil
+	var cancel context.CancelFunc = func() {}
+	if opts.timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, opts.timeout)
+	}
+	defer cancel()
+	resolved, err := awaitResolveTarget(ctx, stderr, opts.socket, opts.target, opts.coords)
+	if err != nil {
+		if errors.Is(err, ErrAttachRefused) {
+			return nil, fmt.Errorf("avenor await: %w", err)
+		}
+		return exitCode(awaitCallError(stderr, err)), nil
+	}
+	return exitCode(awaitRun(ctx, opts, resolved, os.Stdout, stderr)), nil
 }
 
-// awaitOptionsFromInvocation builds the await options from the declared
-// invocation: the target positional plus the until/timeout/format flags.
+// awaitOptionsFromInvocation builds the await options from the invocation: the
+// target positional plus the until/timeout/format flags, and the attachment
+// coordinates a configured host session names. A conversation with half its
+// coordinates names no session to serve, so the mixed forms are refused before
+// any dial; an unconfigured await dials the configured socket or scans the
+// sockets root.
 func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error) {
+	coords, _, err := boundOptionalCoordinates(inv, "avenor await")
+	if err != nil {
+		return awaitOptions{}, err
+	}
+	socket := coords.socket
 	opts := awaitOptions{
-		socket:      inv.Flags["socket"],
+		socket:      socket,
+		coords:      coords,
 		until:       orDefault(inv.Flags["until"], "attention"),
 		timeout:     inv.Durations["timeout"],
 		printOutput: inv.Bools["print-output"],
@@ -70,19 +98,10 @@ func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error
 	return opts, nil
 }
 
-// awaitRun attaches to the run and waits for the terminal state, writing
-// transitions to stdout.
-func awaitRun(ctx context.Context, opts awaitOptions, stdout io.Writer, stderr io.Writer) int {
-	var cancel context.CancelFunc = func() {}
-	if opts.timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, opts.timeout)
-	}
-	defer cancel()
-
-	resolved, err := awaitResolveTarget(ctx, stderr, opts.socket, opts.target)
-	if err != nil {
-		return awaitCallError(stderr, err)
-	}
+// awaitRun waits the resolved run out to the requested state, writing
+// transitions to stdout. The caller owns the wall-clock context: it bounds
+// resolution and the wait alike.
+func awaitRun(ctx context.Context, opts awaitOptions, resolved awaitResolvedTarget, stdout io.Writer, stderr io.Writer) int {
 	c := resolved.client
 	defer c.Close()
 	runtimeID := resolved.runtimeID
@@ -203,10 +222,18 @@ type awaitResolvedTarget struct {
 	targetRunID string
 }
 
-func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target string) (awaitResolvedTarget, error) {
+// ErrAttachRefused reports that the conversation's own supervisor is not
+// running: the one attachment failure a retry answers, because the inbox
+// feed starts the supervisor the next call needs.
+var ErrAttachRefused = errors.New("attach the conversation's supervisor")
+
+func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target string, coords boundCoordinates) (awaitResolvedTarget, error) {
 	if socket != "" {
 		c, err := client.Dial(socket)
 		if err != nil {
+			if coords.derived {
+				return awaitResolvedTarget{}, fmt.Errorf("%w: attach %s%s: %w", ErrAttachRefused, coords.attachTarget(), coords.attachHint(), err)
+			}
 			return awaitResolvedTarget{}, err
 		}
 		runtimes, err := awaitList(ctx, c)
@@ -320,7 +347,7 @@ func awaitResolveTargetFromSockets(ctx context.Context, stderr io.Writer, target
 
 func resolveAwaitRuntime(target string, runtimes []map[string]any) awaitRuntimeResolution {
 	for _, runtime := range runtimes {
-		if runtimeString(runtime, "run_id") == target {
+		if runtimeString(runtime, "run_id") == target || runtimeString(runtime, "runtime_id") == target {
 			if id := runtimeString(runtime, "runtime_id"); id != "" {
 				return awaitRuntimeResolution{runtimeID: id, runID: runtimeString(runtime, "run_id"), exact: true}
 			}
