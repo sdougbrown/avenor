@@ -8,9 +8,9 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"

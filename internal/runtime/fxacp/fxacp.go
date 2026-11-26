@@ -19,11 +19,25 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		BackendID:           backendID,
 		Opts:                opts,
 		Bin:                 "fx",
-		Args:                []string{"acp"},
 		SubprocessDiscovery: false,
 		ConfigureSession:    noopConfigureSession,
 		PromptFailedPolicy:  PromptFailedPolicy(),
+		BuildClientArgs:     buildClientArgs,
+		ModelInLaunch:       true,
+		ModelSelection:      true,
 	})
+}
+
+// buildClientArgs renders the launch argv per run. fx takes its provider and
+// model at process spawn time — its ACP server implements no session-level
+// config — so --model rides the launch and the model is part of the launch
+// identity (ModelInLaunch), never reused across models by a warm client.
+func buildClientArgs(opts runtime.StartOptions, _ string) ([]string, error) {
+	args := []string{"acp"}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	return args, nil
 }
 
 // noopConfigureSession is a no-op because fx sets its provider and model via

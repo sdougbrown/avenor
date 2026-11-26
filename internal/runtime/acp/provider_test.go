@@ -2659,3 +2659,80 @@ func TestPromptFailedPolicyToleratesInconsistentFinishAfterStreamedContent(t *te
 		}
 	})
 }
+
+// TestModelInLaunchJoinsLaunchIdentity pins the spawn-time model path: a
+// backend that takes its model at launch (fx) puts the named model in the
+// launch identity, so a warm client started for one model is never reused for
+// another, an unnamed reuse still passes, and a backend without ModelInLaunch
+// never gains model compat at all.
+func TestModelInLaunchJoinsLaunchIdentity(t *testing.T) {
+	p := NewProvider(ProviderConfig{
+		BackendID:       "fx",
+		ModelInLaunch:   true,
+		ModelSelection:  true,
+		BuildClientArgs: func(runtime.StartOptions, string) ([]string, error) { return []string{"acp"}, nil },
+	}).(*Provider)
+	installed := clientLaunchSpec{absDir: "/installed", model: "m1", wrapper: []string{}}
+
+	if err := p.checkWarmLaunchCompat(runtime.StartOptions{Model: "m2"}, clientLaunchSpec{absDir: "/installed", model: "m2"}, installed); err == nil || !strings.Contains(err.Error(), `already running with model "m1"`) {
+		t.Fatalf("warm compat with a different named model err = %v, want a model mismatch", err)
+	}
+	if err := p.checkWarmLaunchCompat(runtime.StartOptions{Model: "m1"}, clientLaunchSpec{absDir: "/installed", model: "m1"}, installed); err != nil {
+		t.Fatalf("warm compat with the same model = %v, want nil", err)
+	}
+	// An unnamed launch skips the model comparison: the caller named no model,
+	// so the installed client's model is as good as any.
+	if err := p.checkWarmLaunchCompat(runtime.StartOptions{}, clientLaunchSpec{absDir: "/installed"}, installed); err != nil {
+		t.Fatalf("warm compat with no named model = %v, want nil", err)
+	}
+	// A concurrent launch is strict: even an unnamed candidate differs from an
+	// installed model-pinned client.
+	if err := p.checkConcurrentLaunchCompat(runtime.StartOptions{}, clientLaunchSpec{absDir: "/installed"}, installed); err == nil || !strings.Contains(err.Error(), `already running with model "m1"`) {
+		t.Fatalf("strict compat with an unnamed model err = %v, want a model mismatch", err)
+	}
+
+	// A session-scoped backend (agy) never gains model compat: its spec model
+	// is always empty, so the comparison cannot fire.
+	q := NewProvider(ProviderConfig{BackendID: "agy", SetCmdDir: true, ConfigureSession: func(context.Context, *Session, runtime.StartOptions) error { return nil }}).(*Provider)
+	if q.modelInLaunchSpec(runtime.StartOptions{Model: "m1"}) != "" {
+		t.Fatal("session-scoped backend carried a model into the launch spec")
+	}
+	if err := q.checkWarmLaunchCompat(runtime.StartOptions{Model: "m1"}, clientLaunchSpec{absDir: "/installed", model: ""}, installed); err != nil {
+		t.Fatalf("session-scoped warm compat with a named model = %v, want nil", err)
+	}
+}
+
+// TestCapabilitiesModelSelectionWiring pins that Capabilities.ModelSelection
+// follows the backend's declared support instead of a shared hardcoded true.
+func TestCapabilitiesModelSelectionWiring(t *testing.T) {
+	cases := []struct {
+		backend string
+		config  ProviderConfig
+		want    bool
+	}{
+		{"session-scoped", ProviderConfig{BackendID: "agy", ModelSelection: true}, true},
+		{"launch-scoped", ProviderConfig{BackendID: "fx", ModelInLaunch: true, ModelSelection: true}, true},
+		{"none", ProviderConfig{BackendID: "gemini-acp"}, false},
+	}
+	for _, c := range cases {
+		caps, err := NewProvider(c.config).Capabilities(context.Background())
+		if err != nil {
+			t.Fatalf("%s Capabilities: %v", c.backend, err)
+		}
+		if caps.ModelSelection != c.want {
+			t.Fatalf("%s Capabilities.ModelSelection = %v, want %v", c.backend, caps.ModelSelection, c.want)
+		}
+	}
+}
+
+// TestModelInLaunchAloneEnablesCompat pins that a ModelInLaunch backend
+// without BuildClientArgs still gets the launch-identity comparison: the gate
+// must not silently disable the model check when gemini-style model support
+// lands without per-run argv.
+func TestModelInLaunchAloneEnablesCompat(t *testing.T) {
+	p := NewProvider(ProviderConfig{BackendID: "fx", ModelInLaunch: true}).(*Provider)
+	installed := clientLaunchSpec{absDir: "/installed", model: "m1", wrapper: []string{}}
+	if err := p.checkWarmLaunchCompat(runtime.StartOptions{Model: "m2"}, clientLaunchSpec{absDir: "/installed", model: "m2"}, installed); err == nil || !strings.Contains(err.Error(), `already running with model "m1"`) {
+		t.Fatalf("warm compat err = %v, want a model mismatch", err)
+	}
+}

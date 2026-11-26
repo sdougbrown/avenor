@@ -488,8 +488,8 @@ type childRuntime struct {
 	// on the same path, bounded at capture. It is the provider error excerpt a
 	// workflow attempt records beside its stop reason.
 	lastErrorText string
-	latestSeq      int64
-	usage          map[string]any
+	latestSeq     int64
+	usage         map[string]any
 	// finalOutput is a bounded status preview; fullFinalOutput is returned
 	// only through the explicit result control method.
 	finalOutput          string

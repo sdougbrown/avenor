@@ -48,6 +48,8 @@ const sessionCloseTimeout = 2 * time.Second
 //	ConfigureSession     model                 model, mode           no-op       no-op       no-op
 //	BuildClientEnv       unset                 channel-tools, mode   unset       unset       unset
 //	PromptFailedPolicy    unset                 unset                 unset       unset       finish policy
+//	ModelInLaunch        false                 false                 false       false       true
+//	ModelSelection       true                  true                  false       false       true
 //
 // Leaving a field unset is not neutral, it selects the shared default, and the
 // consequences differ per field. EmitSessionStart publishes session.start, which
@@ -80,6 +82,16 @@ type ProviderConfig struct {
 	// owns the backend knowledge of which failures qualify. Nil means every
 	// prompt error fails the run.
 	PromptFailedPolicy PromptFailedPolicy
+	// ModelInLaunch declares that the backend takes its model at process
+	// launch: the launch argv carries --model and the model is part of the
+	// launch identity, so a warm client started for one model is never reused
+	// for another. Session-scoped backends set the model in ConfigureSession
+	// instead and leave this unset.
+	ModelInLaunch bool
+	// ModelSelection reports whether the backend supports selecting a model at
+	// all — per session through ConfigureSession, or per process through
+	// ModelInLaunch. It feeds Capabilities.ModelSelection.
+	ModelSelection bool
 }
 
 // PromptFailedPolicy decides, for a session/prompt that returned an error,
@@ -99,6 +111,7 @@ type brokerIdentity struct {
 type clientLaunchSpec struct {
 	absDir  string
 	agent   string
+	model   string
 	wrapper []string
 }
 
@@ -147,6 +160,8 @@ type Provider struct {
 	buildClientEnv          func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
 	clientEnvCleanup        func() error
 	promptFailedPolicy      PromptFailedPolicy
+	modelInLaunch           bool
+	modelSelection          bool
 
 	// Broker fields for channel-wrapped prompt injection.
 	broker       *broker.Broker
@@ -185,6 +200,8 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		configureSession:        cfg.ConfigureSession,
 		buildClientEnv:          cfg.BuildClientEnv,
 		promptFailedPolicy:      cfg.PromptFailedPolicy,
+		modelInLaunch:           cfg.ModelInLaunch,
+		modelSelection:          cfg.ModelSelection,
 	}
 }
 
@@ -765,7 +782,7 @@ func (p *Provider) Capabilities(ctx context.Context) (runtime.Capabilities, erro
 		Resume:              true,
 		ExternalServerURL:   false,
 		SubprocessDiscovery: p.subprocessDiscovery,
-		ModelSelection:      true,
+		ModelSelection:      p.modelSelection,
 	}, nil
 }
 
@@ -884,6 +901,16 @@ func (p *Provider) launchContext(ctx context.Context) (launchCtx context.Context
 	return launchCtx, func() { stop() }, func() { stop(); cancel() }
 }
 
+// modelInLaunchSpec returns the model a launch should pin into its identity:
+// the requested model when the backend takes its model at launch, empty
+// otherwise, so session-scoped backends never gain launch-compat on model.
+func (p *Provider) modelInLaunchSpec(opts runtime.StartOptions) string {
+	if !p.modelInLaunch {
+		return ""
+	}
+	return opts.Model
+}
+
 func resolveAbsDir(dir string) (string, error) {
 	if dir == "" {
 		dir = "."
@@ -896,7 +923,7 @@ func resolveAbsDir(dir string) (string, error) {
 // fields this caller set, because a warm launch may reuse a client that was
 // started under defaults the caller never named.
 func (p *Provider) checkLaunchCompat(opts runtime.StartOptions, candidate, installed clientLaunchSpec, strict bool) error {
-	if p.buildClientArgs == nil && !p.setCmdDir {
+	if p.buildClientArgs == nil && !p.setCmdDir && !p.modelInLaunch {
 		return nil
 	}
 	if (strict || opts.Dir != "") && installed.absDir != "" && candidate.absDir != installed.absDir {
@@ -904,6 +931,9 @@ func (p *Provider) checkLaunchCompat(opts runtime.StartOptions, candidate, insta
 	}
 	if (strict || opts.Agent != "") && candidate.agent != installed.agent {
 		return fmt.Errorf("%s: client already running with agent %q, cannot reuse for %q", p.backendID, installed.agent, candidate.agent)
+	}
+	if p.modelInLaunch && (strict || opts.Model != "") && candidate.model != installed.model {
+		return fmt.Errorf("%s: client already running with model %q, cannot reuse for %q", p.backendID, installed.model, candidate.model)
 	}
 	if (strict || len(opts.LaunchWrapper) > 0) && !slices.Equal(candidate.wrapper, installed.wrapper) {
 		return fmt.Errorf("%s: client already running with launch wrapper %v, cannot reuse for %v", p.backendID, installed.wrapper, candidate.wrapper)
@@ -944,6 +974,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	spec := clientLaunchSpec{
 		absDir:  absDir,
 		agent:   opts.Agent,
+		model:   p.modelInLaunchSpec(opts),
 		wrapper: slices.Clone(opts.LaunchWrapper),
 	}
 
