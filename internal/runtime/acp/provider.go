@@ -144,10 +144,10 @@ type Provider struct {
 	tolerateInconsistentFinish bool
 
 	// The fx carve-out's per-session prompt state, written only when
-	// tolerateInconsistentFinish is set. streamedChunks counts this prompt's
-	// agent.message_chunk events so tests can observe progress; firstChunks is
-	// the per-prompt signal the pump closes on the first chunk, so the carve-out
-	// waits on a channel instead of polling.
+	// tolerateInconsistentFinish is set. firstChunks is the per-prompt signal
+	// the pump closes on the first chunk, which Prompt's carve-out waits on;
+	// streamedChunks counts this prompt's agent.message_chunk events and is
+	// read only by the carve-out tests' synchronization polls.
 	streamedChunks map[string]int
 	firstChunks    map[string]chan struct{}
 
@@ -734,14 +734,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 // <message> (<code>)", and fx's message names the condition.
 func isInconsistentFinishReason(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "InconsistentFinishReason")
-}
-
-// hasStreamedChunks reports whether the pump has broadcast an agent.message_chunk
-// for the session since the current prompt began.
-func (p *Provider) hasStreamedChunks(sessionID string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.streamedChunks[sessionID] > 0
 }
 
 // streamedChunkWait bounds how long the fx carve-out waits for the pump to
