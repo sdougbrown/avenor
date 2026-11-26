@@ -125,7 +125,7 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 ## Capability matrix
 
 | Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | dsh | fx | pi | claude | pony | poo |
-|---|---|---|---|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Session resume | ✓ | ✓ | ✓ | ✓ | — | — | — | — | ✓ | ⚠ | ✗ | ✓ |
 | Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -254,15 +254,15 @@ Reports are untrusted: they never approve anything, and report text is display-o
 
 | Capability | Supported |
 |---|---|
-| New sessions | ✓ | ✓ |
-| Session resume | ⚠ (in-memory, while avenor is alive) | — |
-| Prompt execution | ✓ (PTY paste) | ✓ |
-| Cancel | ✓ (Esc-Esc → reported or pane-scrape idle → forced kill) | ✓ |
-| Event streaming | ✓ | ✓ |
-| Permission relay | ⚠ (pane-scrape only, experimental) | ✓ |
-| Model selection | ✓ (via `--model`) | ✓ |
-| External server URL | ✗ | ✗ |
-| Subprocess discovery | ✓ | ✗ |
+| New sessions | ✓ |
+| Session resume | ⚠ (in-memory, while avenor is alive) |
+| Prompt execution | ✓ (PTY paste) |
+| Cancel | ✓ (Esc-Esc → reported or pane-scrape idle → forced kill) |
+| Event streaming | ✓ |
+| Permission relay | ⚠ (pane-scrape only, experimental) |
+| Model selection | ✓ (via `--model`) |
+| External server URL | ✗ |
+| Subprocess discovery | ✓ |
 
 ### Cancel semantics
 
