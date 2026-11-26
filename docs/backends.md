@@ -446,6 +446,12 @@ bare model id is forwarded unchanged and DSH rejects it with an unknown-model
 error rather than guessing a provider. Omitting `--model` keeps the model the
 `acp` profile pins.
 
+The accepted values are the provider's live catalog, which the ACP session
+reports as its `model` config options; that list changes with provider
+releases, so read it rather than assuming an id. Reasoning effort is exposed the
+same way (`reasoning_effort`), but Avenor's thinking policy does not admit
+`dsh-acp` yet, so an explicit thinking value is rejected before launch.
+
 **Requirements and caveats:**
 
 - `dsh` must resolve on `PATH`. A `npx`/`pnpm dlx` install exposes a shim there;
