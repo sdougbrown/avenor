@@ -2,6 +2,7 @@ package fxacp
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
+	"github.com/sdougbrown/avenor/internal/runtime/acp"
 )
 
 // writeArgvRecorder creates a shell script that appends its own argv ($0 plus
@@ -79,5 +81,25 @@ func TestCapabilitiesPinsBackendID(t *testing.T) {
 	}
 	if caps.Backend != "fx" {
 		t.Fatalf("Capabilities.Backend = %q, want fx", caps.Backend)
+	}
+}
+
+// TestPromptFailedPolicyRecognizesOnlyStreamedInconsistentFinish pins the fx
+// carve-out's decision rule: only fx's InconsistentFinishReason error on a
+// turn that streamed reply content qualifies. The streamed-content true path
+// is exercised end to end by the acp package's prompt-failure policy test; a
+// zero-value Session cannot have streamed content, so it never qualifies.
+func TestPromptFailedPolicyRecognizesOnlyStreamedInconsistentFinish(t *testing.T) {
+	policy := PromptFailedPolicy()
+	session := &acp.Session{}
+
+	if policy(session, errors.New("json-rpc session/prompt failed: InconsistentFinishReason (-32603)")) {
+		t.Fatal("policy tolerated an InconsistentFinishReason turn that streamed no content")
+	}
+	if policy(session, errors.New("json-rpc session/prompt failed: ProviderUnreachable (-32000)")) {
+		t.Fatal("policy tolerated an unrelated prompt error")
+	}
+	if policy(session, nil) {
+		t.Fatal("policy tolerated a nil error")
 	}
 }

@@ -2495,25 +2495,30 @@ func TestProviderThinkingResumeIgnoresCallOptsWhenNotOptionAware(t *testing.T) {
 	}
 }
 
-// TestPromptToleratesInconsistentFinishAfterStreamedContent pins the fx
-// carve-out: a session/prompt rejected with InconsistentFinishReason after the
-// model already streamed message chunks ends the turn with a warning and a
-// synthetic session.end, while the same error without streamed content — and
-// any prompt error on a backend without the carve-out — still fails the run.
-func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
+// TestPromptFailedPolicyToleratesInconsistentFinishAfterStreamedContent pins
+// the fx carve-out mechanism: a prompt-failure policy that recognizes fx's
+// InconsistentFinishReason and checks the session's streamed content ends the
+// turn with a warning and a synthetic session.end when the turn streamed, and
+// lets the failure stand otherwise — including on later silent turns and when
+// no policy is configured. Chunks are counted at dispatch (the read loop's
+// serial wire order), so no synchronization with the pump is needed.
+func TestPromptFailedPolicyToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 	finishError := &rpcError{Code: -32603, Message: "InconsistentFinishReason"}
 	chunkUpdate := rpcEnvelope{
 		JSONRPC: "2.0",
 		Method:  "session/update",
 		Params:  mustRaw(map[string]any{"sessionId": "ses_1", "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "reply"}}}),
 	}
+	finishPolicy := func(session *Session, err error) bool {
+		return err != nil && strings.Contains(err.Error(), "InconsistentFinishReason") && session.StreamedContent()
+	}
 
-	newProvider := func(t *testing.T, tolerate bool, onCall func(rpcEnvelope, map[string]any) *rpcEnvelope) (*Provider, <-chan events.Event) {
+	newProvider := func(t *testing.T, policy func(session *Session, err error) bool, onCall func(rpcEnvelope, map[string]any) *rpcEnvelope) (*Provider, <-chan events.Event) {
 		peer := newFakeInMemoryPeer(t)
 		peer.onCall = onCall
 		p := NewProvider(ProviderConfig{
-			BackendID:                  "fx",
-			TolerateInconsistentFinish: tolerate,
+			BackendID:          "fx",
+			PromptFailedPolicy: policy,
 		}).(*Provider)
 		p.startClient = func(context.Context, ClientConfig) (*Client, error) {
 			return peer.client, nil
@@ -2529,28 +2534,6 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 		return p, eventCh
 	}
 
-	// waitStreamed waits, bounded, for the pump to record the prompt's first
-	// streamed chunk, so a regression that stops the recording fails the test
-	// instead of hanging it. Safe to call from the fake peer's writer goroutine:
-	// it reports with t.Errorf, never t.Fatalf.
-	waitStreamed := func(t *testing.T, p *Provider) {
-		t.Helper()
-		deadline := time.Now().Add(2 * time.Second)
-		for {
-			p.mu.Lock()
-			streamed := p.streamedChunks["ses_1"] > 0
-			p.mu.Unlock()
-			if streamed {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Errorf("pump never recorded a streamed chunk for ses_1 within 2s")
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
-
 	t.Run("tolerated after streamed content", func(t *testing.T) {
 		var p *Provider
 		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
@@ -2558,10 +2541,9 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 				return nil
 			}
 			p.client.dispatch(chunkUpdate)
-			waitStreamed(t, p)
 			return &rpcEnvelope{ID: msg.ID, Error: finishError}
 		}
-		p, eventCh := newProvider(t, true, onCall)
+		p, eventCh := newProvider(t, finishPolicy, onCall)
 		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
 
 		done := make(chan error, 1)
@@ -2594,7 +2576,7 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 	})
 
 	t.Run("fails without streamed content", func(t *testing.T) {
-		p, _ := newProvider(t, true, func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+		p, _ := newProvider(t, finishPolicy, func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
 			if msg.Method != "session/prompt" {
 				return nil
 			}
@@ -2607,28 +2589,26 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 		}
 	})
 
-	t.Run("fails when carve-out is off", func(t *testing.T) {
+	t.Run("fails when no policy is configured", func(t *testing.T) {
 		var p *Provider
 		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
 			if msg.Method != "session/prompt" {
 				return nil
 			}
-			// Chunks streamed, but the flag is off: the pump never records
-			// them and the carve-out is never consulted, so the error stands.
 			p.client.dispatch(chunkUpdate)
 			return &rpcEnvelope{ID: msg.ID, Error: finishError}
 		}
-		p, _ = newProvider(t, false, onCall)
+		p, _ = newProvider(t, nil, onCall)
 		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
 
 		if err := p.Prompt(context.Background(), "ses_1", "turn"); err == nil || !strings.Contains(err.Error(), "InconsistentFinishReason") {
-			t.Fatalf("Prompt with carve-out off err = %v, want the finish-reason error", err)
+			t.Fatalf("Prompt with no policy err = %v, want the finish-reason error", err)
 		}
 	})
 
 	// A turn that fails after an earlier turn was tolerated must still fail:
-	// the streamed-chunk counter belongs to the current prompt, so leftover
-	// credit from the tolerated turn cannot mask a later silent failure.
+	// the content baseline is taken when each prompt begins, so the tolerated
+	// turn's streamed chunks cannot mask a later silent failure.
 	t.Run("second silent failure still fails", func(t *testing.T) {
 		var p *Provider
 		firstCall := true
@@ -2639,11 +2619,10 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 			if firstCall {
 				firstCall = false
 				p.client.dispatch(chunkUpdate)
-				waitStreamed(t, p)
 			}
 			return &rpcEnvelope{ID: msg.ID, Error: finishError}
 		}
-		p, _ = newProvider(t, true, onCall)
+		p, _ = newProvider(t, finishPolicy, onCall)
 		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
 
 		if err := p.Prompt(context.Background(), "ses_1", "first turn"); err != nil {

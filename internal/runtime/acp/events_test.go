@@ -153,9 +153,7 @@ func TestMapPromptResponseMissingStopReason(t *testing.T) {
 }
 
 func TestMapSessionUpdateUnknownKind(t *testing.T) {
-	raw := json.RawMessage(`{"sessionId":"s1","update":{"sessionUpdate":"bogus_kind","content":{"type":"text","text":"hi"}}}`)
-
-	_, err := mapSessionUpdate(raw)
+	_, err := mapSessionUpdate("s1", map[string]any{"sessionUpdate": "bogus_kind", "content": map[string]any{"type": "text", "text": "hi"}})
 	if err == nil {
 		t.Fatal("expected error for unknown session update kind")
 	}

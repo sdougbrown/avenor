@@ -28,17 +28,7 @@ var knownProbeEvents = map[string]bool{
 	"session.end":         true,
 }
 
-func mapSessionUpdate(params json.RawMessage) (events.Event, error) {
-	var payload map[string]any
-	if err := json.Unmarshal(params, &payload); err != nil {
-		return events.Event{}, err
-	}
-
-	update, ok := payload["update"].(map[string]any)
-	if !ok {
-		return events.Event{}, errors.New("session/update missing update object")
-	}
-
+func mapSessionUpdate(sessionID string, update map[string]any) (events.Event, error) {
 	kind, ok := update["sessionUpdate"].(string)
 	if !ok {
 		return events.Event{}, errors.New("session/update missing sessionUpdate discriminator")
@@ -49,7 +39,6 @@ func mapSessionUpdate(params json.RawMessage) (events.Event, error) {
 		return events.Event{}, fmt.Errorf("unknown session update kind %q", kind)
 	}
 
-	sessionID, _ := payload["sessionId"].(string)
 	fields := map[string]any{}
 	for k, v := range update {
 		if k != "sessionUpdate" {
@@ -185,7 +174,14 @@ func ParseTranscriptEvent(line []byte) (events.Event, error) {
 
 	switch {
 	case msg.Method == "session/update":
-		return mapSessionUpdate(msg.Params)
+		var payload struct {
+			SessionID string         `json:"sessionId"`
+			Update    map[string]any `json:"update"`
+		}
+		if err := json.Unmarshal(msg.Params, &payload); err != nil {
+			return events.Event{}, err
+		}
+		return mapSessionUpdate(payload.SessionID, payload.Update)
 	case msg.Method == "session/request_permission":
 		return mapPermissionRequest(msg.Params), nil
 	case len(msg.Result) > 0:

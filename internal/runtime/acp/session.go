@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 
 	"github.com/sdougbrown/avenor/internal/events"
 )
@@ -15,6 +16,12 @@ type Session struct {
 	RunID       string
 	BrokerToken string
 	SessionID   string
+
+	// chunks counts the agent_message_chunk updates dispatch has attributed to
+	// this session; chunkBaseline is the count when the current prompt began.
+	// PromptFailedPolicy implementations read the pair through StreamedContent.
+	chunks        atomic.Uint64
+	chunkBaseline atomic.Uint64
 }
 
 type EnvVar struct {
@@ -56,7 +63,22 @@ func (c *Client) NewSessionWithOptions(ctx context.Context, opts SessionOpenOpti
 		return nil, errors.New("session/new response missing sessionId")
 	}
 
-	return &Session{Client: c, SessionID: payload.SessionID}, nil
+	session := &Session{Client: c, SessionID: payload.SessionID}
+	c.registerSession(session)
+	return session, nil
+}
+
+// registerSession records the session in the client's registry so dispatch
+// can attribute session updates to it. Re-registration of a known ID is a
+// no-op: the registry holds the first session for that ID, so a warm client
+// resuming a session never orphans the counter an in-flight prompt reads.
+func (c *Client) registerSession(session *Session) {
+	if session.SessionID == "" {
+		return
+	}
+	if _, ok := c.sessions.Load(session.SessionID); !ok {
+		c.sessions.Store(session.SessionID, session)
+	}
 }
 
 func (c *Client) LoadSession(ctx context.Context, sessionID string) (*Session, error) {
@@ -64,7 +86,9 @@ func (c *Client) LoadSession(ctx context.Context, sessionID string) (*Session, e
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Client: c, SessionID: sessionID}, nil
+	session := &Session{Client: c, SessionID: sessionID}
+	c.registerSession(session)
+	return session, nil
 }
 
 func (c *Client) ResumeSession(ctx context.Context, sessionID string) (*Session, error) {
@@ -76,10 +100,13 @@ func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string,
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Client: c, SessionID: sessionID}, nil
+	session := &Session{Client: c, SessionID: sessionID}
+	c.registerSession(session)
+	return session, nil
 }
 
 func (s *Session) Prompt(ctx context.Context, prompt string) (events.Event, error) {
+	s.chunkBaseline.Store(s.chunks.Load())
 	result, err := s.Client.request(ctx, "session/prompt", map[string]any{
 		"sessionId": s.SessionID,
 		"prompt": []map[string]any{
@@ -99,6 +126,15 @@ func (s *Session) Cancel() error {
 	return s.Client.notify("session/cancel", map[string]any{
 		"sessionId": s.SessionID,
 	})
+}
+
+// StreamedContent reports whether the current prompt has streamed at least one
+// agent message chunk. The count is taken when the client dispatches the
+// update — the read loop's serial wire order — so the answer is complete the
+// moment session/prompt returns: a chunk dispatched before the response is
+// counted before the caller can observe the failure.
+func (s *Session) StreamedContent() bool {
+	return s.chunks.Load() > s.chunkBaseline.Load()
 }
 
 func (s *Session) Close(ctx context.Context) error {

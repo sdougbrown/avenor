@@ -2,6 +2,7 @@ package fxacp
 
 import (
 	"context"
+	"strings"
 
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/acp"
@@ -21,10 +22,7 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		Args:                []string{"acp"},
 		SubprocessDiscovery: false,
 		ConfigureSession:    noopConfigureSession,
-		// fx's ACP server can reject session/prompt with
-		// InconsistentFinishReason after the model already streamed its reply;
-		// tolerate it so basic turns complete (see ProviderConfig).
-		TolerateInconsistentFinish: true,
+		PromptFailedPolicy:  PromptFailedPolicy(),
 	})
 }
 
@@ -33,4 +31,16 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 // config is not supported.
 func noopConfigureSession(ctx context.Context, session *acp.Session, opts runtime.StartOptions) error {
 	return nil
+}
+
+// PromptFailedPolicy is fx's turn-finish carve-out, not a pattern to build on:
+// fx's session/prompt can reject with InconsistentFinishReason after the model
+// already streamed its reply (its own finish-reason bookkeeping disagrees with
+// itself). When the turn streamed reply content, the shared provider treats
+// that error as a completed turn with a warning; without streamed content, and
+// for every other error, the failure stands.
+func PromptFailedPolicy() acp.PromptFailedPolicy {
+	return func(session *acp.Session, err error) bool {
+		return err != nil && strings.Contains(err.Error(), "InconsistentFinishReason") && session.StreamedContent()
+	}
 }

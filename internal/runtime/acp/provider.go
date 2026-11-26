@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -48,7 +47,7 @@ const sessionCloseTimeout = 2 * time.Second
 //	BuildSessionOpenOpts channel-tools         unset                 unset       unset       unset
 //	ConfigureSession     model                 model, mode           no-op       no-op       no-op
 //	BuildClientEnv       unset                 channel-tools, mode   unset       unset       unset
-//	TolerateInconsistentFinish unset          unset                 unset       unset       true
+//	PromptFailedPolicy    unset                 unset                 unset       unset       finish policy
 //
 // Leaving a field unset is not neutral, it selects the shared default, and the
 // consequences differ per field. EmitSessionStart publishes session.start, which
@@ -75,13 +74,19 @@ type ProviderConfig struct {
 	BuildSessionOpenOptions func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (SessionOpenOptions, error)
 	ConfigureSession        func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 	BuildClientEnv          func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
-	// TolerateInconsistentFinish is the fx carve-out, not a pattern to build on:
-	// fx's session/prompt can reject with InconsistentFinishReason after the
-	// model already streamed its reply (its own finish-reason bookkeeping
-	// disagrees with itself). When set and the session has streamed message
-	// content, that error ends the turn as a warning instead of failing the run.
-	TolerateInconsistentFinish bool
+	// PromptFailedPolicy decides, for a session/prompt that returned an error,
+	// whether the turn should be treated as complete anyway. The provider
+	// publishes the decision's warning and synthetic session end; the policy
+	// owns the backend knowledge of which failures qualify. Nil means every
+	// prompt error fails the run.
+	PromptFailedPolicy PromptFailedPolicy
 }
+
+// PromptFailedPolicy decides, for a session/prompt that returned an error,
+// whether the turn should be treated as complete anyway. The provider
+// publishes the decision's warning and synthetic session end; the policy
+// owns the backend knowledge of which failures qualify.
+type PromptFailedPolicy func(session *Session, err error) bool
 
 type brokerIdentity struct {
 	runID  string
@@ -130,26 +135,18 @@ type Provider struct {
 	lifetimeCtx    context.Context
 	lifetimeCancel context.CancelFunc
 
-	setCmdDir                  bool
-	emitSessionStart           bool
-	subprocessDiscovery        bool
-	appendCWDArg               bool
-	authenticateID             string
-	validateStart              func(opts runtime.StartOptions) error
-	buildClientArgs            func(opts runtime.StartOptions, absDir string) ([]string, error)
-	buildSessionOpenOptions    func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (SessionOpenOptions, error)
-	configureSession           func(ctx context.Context, session *Session, opts runtime.StartOptions) error
-	buildClientEnv             func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
-	clientEnvCleanup           func() error
-	tolerateInconsistentFinish bool
-
-	// The fx carve-out's per-session prompt state, written only when
-	// tolerateInconsistentFinish is set. firstChunks is the per-prompt signal
-	// the pump closes on the first chunk, which Prompt's carve-out waits on;
-	// streamedChunks counts this prompt's agent.message_chunk events and is
-	// read only by the carve-out tests' synchronization polls.
-	streamedChunks map[string]int
-	firstChunks    map[string]chan struct{}
+	setCmdDir               bool
+	emitSessionStart        bool
+	subprocessDiscovery     bool
+	appendCWDArg            bool
+	authenticateID          string
+	validateStart           func(opts runtime.StartOptions) error
+	buildClientArgs         func(opts runtime.StartOptions, absDir string) ([]string, error)
+	buildSessionOpenOptions func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (SessionOpenOptions, error)
+	configureSession        func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+	buildClientEnv          func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
+	clientEnvCleanup        func() error
+	promptFailedPolicy      PromptFailedPolicy
 
 	// Broker fields for channel-wrapped prompt injection.
 	broker       *broker.Broker
@@ -165,31 +162,29 @@ type Provider struct {
 
 func NewProvider(cfg ProviderConfig) runtime.Provider {
 	return &Provider{
-		opts:                       cfg.Opts,
-		backendID:                  cfg.BackendID,
-		bin:                        cfg.Bin,
-		args:                       cfg.Args,
-		sessions:                   map[string]*Session{},
-		activePrompts:              map[string]chan struct{}{},
-		injectReserved:             map[string]int{},
-		runIDs:                     map[string]string{},
-		pollContexts:               map[string]context.Context{},
-		pollCancels:                map[string]context.CancelFunc{},
-		pollGen:                    map[string]uint64{},
-		Queue:                      warmqueue.NewQueue(),
-		setCmdDir:                  cfg.SetCmdDir,
-		emitSessionStart:           cfg.EmitSessionStart,
-		subprocessDiscovery:        cfg.SubprocessDiscovery,
-		appendCWDArg:               cfg.AppendCWDArg,
-		authenticateID:             cfg.Authenticate,
-		validateStart:              cfg.ValidateStart,
-		buildClientArgs:            cfg.BuildClientArgs,
-		buildSessionOpenOptions:    cfg.BuildSessionOpenOptions,
-		configureSession:           cfg.ConfigureSession,
-		buildClientEnv:             cfg.BuildClientEnv,
-		tolerateInconsistentFinish: cfg.TolerateInconsistentFinish,
-		streamedChunks:             map[string]int{},
-		firstChunks:                map[string]chan struct{}{},
+		opts:                    cfg.Opts,
+		backendID:               cfg.BackendID,
+		bin:                     cfg.Bin,
+		args:                    cfg.Args,
+		sessions:                map[string]*Session{},
+		activePrompts:           map[string]chan struct{}{},
+		injectReserved:          map[string]int{},
+		runIDs:                  map[string]string{},
+		pollContexts:            map[string]context.Context{},
+		pollCancels:             map[string]context.CancelFunc{},
+		pollGen:                 map[string]uint64{},
+		Queue:                   warmqueue.NewQueue(),
+		setCmdDir:               cfg.SetCmdDir,
+		emitSessionStart:        cfg.EmitSessionStart,
+		subprocessDiscovery:     cfg.SubprocessDiscovery,
+		appendCWDArg:            cfg.AppendCWDArg,
+		authenticateID:          cfg.Authenticate,
+		validateStart:           cfg.ValidateStart,
+		buildClientArgs:         cfg.BuildClientArgs,
+		buildSessionOpenOptions: cfg.BuildSessionOpenOptions,
+		configureSession:        cfg.ConfigureSession,
+		buildClientEnv:          cfg.BuildClientEnv,
+		promptFailedPolicy:      cfg.PromptFailedPolicy,
 	}
 }
 
@@ -204,12 +199,6 @@ func (p *Provider) ensureMapsLocked() {
 	}
 	if p.injectReserved == nil {
 		p.injectReserved = map[string]int{}
-	}
-	if p.streamedChunks == nil {
-		p.streamedChunks = map[string]int{}
-	}
-	if p.firstChunks == nil {
-		p.firstChunks = map[string]chan struct{}{}
 	}
 	if p.runIDs == nil {
 		p.runIDs = map[string]string{}
@@ -666,23 +655,10 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	if p.injectReserved == nil {
 		p.injectReserved = map[string]int{}
 	}
-	if p.streamedChunks == nil {
-		p.streamedChunks = map[string]int{}
-	}
-	if p.firstChunks == nil {
-		p.firstChunks = map[string]chan struct{}{}
-	}
 	if p.activePrompts[sessionID] != nil || p.injectReserved[sessionID] > 0 {
 		p.mu.Unlock()
 		return fmt.Errorf("%s: prompt already in flight for session %q", p.backendID, sessionID)
 	}
-	// The carve-out reads only this prompt's streamed chunks, so the state
-	// starts fresh here and never reflects an earlier turn. The pump closes
-	// firstChunk on the first message chunk; Prompt waits on it in the
-	// carve-out instead of polling.
-	p.streamedChunks[sessionID] = 0
-	p.firstChunks[sessionID] = make(chan struct{})
-	firstChunk := p.firstChunks[sessionID]
 	myDone := make(chan struct{})
 	p.activePrompts[sessionID] = myDone
 	hub := p.hub
@@ -696,7 +672,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		if p.activePrompts[sessionID] == myDone {
 			delete(p.activePrompts, sessionID)
 		}
-		delete(p.firstChunks, sessionID)
 		p.mu.Unlock()
 		close(myDone)
 		if hub != nil {
@@ -706,7 +681,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	event, err := session.Prompt(ctx, prompt)
 	if err != nil {
-		if p.tolerateInconsistentFinish && isInconsistentFinishReason(err) && p.awaitStreamedChunks(sessionID, firstChunk) {
+		if p.promptFailedPolicy != nil && p.promptFailedPolicy(session, err) {
 			p.publishToHub(hub, events.Event{
 				Event:     "avenor.error",
 				SessionID: sessionID,
@@ -726,34 +701,6 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	}
 	p.publishToHub(hub, event)
 	return nil
-}
-
-// isInconsistentFinishReason matches fx's InconsistentFinishReason JSON-RPC
-// error. It is the fx carve-out's recognizer, not a pattern to build on: the
-// shared ACP client renders the error as "json-rpc session/prompt failed:
-// <message> (<code>)", and fx's message names the condition.
-func isInconsistentFinishReason(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "InconsistentFinishReason")
-}
-
-// streamedChunkWait bounds how long the fx carve-out waits for the pump to
-// account the prompt's message chunks before it concedes that the turn
-// produced no content.
-const streamedChunkWait = 2 * time.Second
-
-// awaitStreamedChunks waits for the pump to close firstChunk — the prompt's
-// first message chunk — bounded by streamedChunkWait. The error response and
-// the chunk notifications share one stream without a happens-before edge, so
-// the wait keeps the carve-out from depending on pump timing.
-func (p *Provider) awaitStreamedChunks(sessionID string, firstChunk <-chan struct{}) bool {
-	timer := time.NewTimer(streamedChunkWait)
-	defer timer.Stop()
-	select {
-	case <-firstChunk:
-		return true
-	case <-timer.C:
-		return false
-	}
 }
 
 func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
@@ -842,8 +789,6 @@ func (p *Provider) Close() error {
 	p.sessions = map[string]*Session{}
 	p.activePrompts = map[string]chan struct{}{}
 	p.injectReserved = map[string]int{}
-	p.streamedChunks = map[string]int{}
-	p.firstChunks = map[string]chan struct{}{}
 	p.runIDs = nil
 	p.pollContexts = map[string]context.Context{}
 	p.pollCancels = map[string]context.CancelFunc{}
@@ -1203,16 +1148,6 @@ func (p *Provider) pumpClientEvents(client *Client, hub *eventHub) {
 }
 
 func (p *Provider) processAndBroadcast(hub *eventHub, event events.Event) {
-	if p.tolerateInconsistentFinish && event.Event == "agent.message_chunk" {
-		p.mu.Lock()
-		p.ensureMapsLocked()
-		p.streamedChunks[event.SessionID]++
-		if ch := p.firstChunks[event.SessionID]; ch != nil {
-			delete(p.firstChunks, event.SessionID)
-			close(ch)
-		}
-		p.mu.Unlock()
-	}
 	p.cachePermissionOptionsWithHub(hub, event)
 	if hub != nil {
 		hub.broadcast(event)
