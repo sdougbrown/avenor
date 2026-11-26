@@ -77,8 +77,8 @@ func TestCapabilitiesPinsBackendID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capabilities: %v", err)
 	}
-	if caps.Backend != "dsh-acp" {
-		t.Fatalf("Capabilities.Backend = %q, want dsh-acp", caps.Backend)
+	if caps.Backend != "dsh" {
+		t.Fatalf("Capabilities.Backend = %q, want dsh", caps.Backend)
 	}
 	if !caps.ModelSelection {
 		t.Fatal("Capabilities.ModelSelection = false, want true")

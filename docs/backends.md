@@ -13,7 +13,7 @@ avenor --backend codex-app-server --prompt "say hi"
 avenor --backend agy --model gemini-4-argon-high --prompt "say hi"
 avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
-avenor --backend dsh-acp --model deepseek-official/deepseek-v4-flash --prompt "say hi"
+avenor --backend dsh --model deepseek-official/deepseek-v4-flash --prompt "say hi"
 avenor --backend fx --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
 avenor --backend claude --prompt "say hi"
@@ -124,7 +124,7 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | dsh-acp | fx | pi | claude | pony | poo |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | dsh | fx | pi | claude | pony | poo |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Session resume | ✓ | ✓ | ✓ | ✓ | — | — | — | — | ✓ | ⚠ | ✗ | ✓ |
@@ -425,7 +425,7 @@ avenor \
 
 ---
 
-## dsh-acp
+## dsh
 
 Avenor spawns `dsh --profile acp` and drives DeepSeek Harness over ACP. DSH's
 ACP server advertises session new/list/resume/close, a model config option, and
@@ -434,7 +434,7 @@ both work per session.
 
 ```sh
 avenor \
-  --backend dsh-acp \
+  --backend dsh \
   --dir /repo \
   --model deepseek-official/deepseek-v4-flash \
   --prompt "Review the changes in the current branch"
@@ -450,7 +450,7 @@ The accepted values are the provider's live catalog, which the ACP session
 reports as its `model` config options; that list changes with provider
 releases, so read it rather than assuming an id. Reasoning effort is exposed the
 same way (`reasoning_effort`), but Avenor's thinking policy does not admit
-`dsh-acp` yet, so an explicit thinking value is rejected before launch.
+`dsh` yet, so an explicit thinking value is rejected before launch.
 
 **Custom providers:** the `acp` profile is a normal DSH profile, so a provider
 route added to its patch layer (`~/.dsh/profiles/acp/cordis.patch.yml`) becomes

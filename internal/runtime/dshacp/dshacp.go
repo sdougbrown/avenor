@@ -9,7 +9,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/acp"
 )
 
-const backendID = "dsh-acp"
+const backendID = "dsh"
 
 func New() runtime.Provider {
 	return NewWithOptions(runtime.StartOptions{})
