@@ -59,6 +59,25 @@ numeric recursion budget itself. The tool row must pass
 rules — own that budget. Without it the entry fails to activate with
 `provider "avenor" cannot enforce maxDepth`.
 
+## Choosing the child's runtime
+
+The bundle row's `config` decides how every delegated child runs. All fields are
+optional; omitted, Avenor's own defaults decide.
+
+| Field | Meaning |
+|---|---|
+| `backend` | Avenor backend for the child, such as `dsh`, `pi`, or `claude` |
+| `model` | Model id the backend understands (`dsh` takes `provider/model`) |
+| `agent` | Avenor agent profile |
+| `rosterFile` / `rosterEntry` | A roster map and the entry that supplies backend, agent, and model together |
+
+```yaml
+- id: avenor-delegation
+  name: '@dougbots/dsh-avenor'
+  config:
+    model: grace/qwen
+```
+
 ## Install (local bundle)
 
 From a DSH session:
@@ -77,11 +96,11 @@ request.
 
 ## Open questions this spike does not answer
 
-1. **Child runtime selection.** `avenor` runs its default agent unless the plugin
-   passes `agent`/`model`/`backend`/roster fields. `createCoreSeam(selection)`
-   accepts them; the bundle does not wire them to config yet. A delegated child
-   inheriting nothing from the parent is the honest default, but it is a product
-   decision, not a bug.
+1. **Child runtime selection is per bundle, not per call.** The bundle row's
+   `config` chooses the child's route (`agent`, `model`, `backend`, or a roster
+   entry), and every delegated run in the profile uses it. A tool argument that
+   selects a model per delegation would need a second tool; the provider seam
+   itself carries no per-call selection.
 2. **`toolName` collision.** The spike adds `subagent_avenor` and leaves the
    shipped `subagent` tool on the local provider. Making Avenor the only backend
    means overriding that row (`provider: avenor`, `toolName: subagent`), which

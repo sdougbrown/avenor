@@ -11,7 +11,15 @@
 - insert:
     - id: avenor-delegation
       name: '@dougbots/dsh-avenor'
-      config: {}
+      # Every field is optional. Omitted, the delegated child runs Avenor's
+      # own defaults (roster and environment decide).
+      config:
+        # backend: dsh
+        # model: grace/qwen
+        # agent: planner
+        # rosterFile: /path/to/roster.json
+        # rosterEntry: reviewer
+        {}
 
     - id: avenor-subagent-tool
       name: '@deepseek-ai/dsh-tool-subagent'
