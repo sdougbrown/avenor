@@ -95,11 +95,13 @@ forward their asks to the parent.
 
 ## Poo feed surface
 
-`SurfaceFeed` is the broker surface used by `avenor feed broker` and `avenor message`. For an enabled poo child, Avenor starts the broker feed as `avenor-inbox`; poo presents incoming messages to the model as `<feed name="avenor-inbox" …>` inputs. The feed drains the broker queue at most once and records incoming asks before delivering them. An ask's input names its message ID and instructs the model to answer through `call_cli`:
+`SurfaceFeed` is the broker surface used by `avenor feed broker` and `avenor message`. For an enabled poo child, Avenor starts the broker feed as `avenor-inbox`; poo presents incoming messages to the model as `<feed name="avenor-inbox" …>` inputs. The feed drains the broker queue at most once and records incoming asks before delivering them. An ask's input names its message ID and instructs the model to answer by calling `avenor_message`:
 
 ```json
-{"name":"avenor_message","args":{"action":"reply","reply_to":"MESSAGE_ID","message":"answer"}}
+{"action":"reply","reply_to":"MESSAGE_ID","message":"answer"}
 ```
+
+When the session offers no `avenor_message` tool, the note gives the same arguments through `call_cli` as `{"command":"avenor_message","args":{...}}`.
 
 The `avenor_message` registry entry invokes `avenor message` as the child, with the entry's `message` argument delivered through stdin (`--message-stdin`) so the text stays out of the command's arguments. See [poo messaging](backends.md#messaging) for the switch, launch checks and credential visibility.
 
@@ -123,7 +125,7 @@ conversation's own broker run:
   still read and delivered; only the process's own close releases the inbox,
   so its replacement never starts into the dead consumer's lock. The
   plugin's frame marks the text as another session's words, never operator
-  instructions, and maps the feed's `call_cli` answer instruction onto the
+  instructions, and maps the feed's `avenor_message` answer instruction onto the
   native `avenor_message` tool: when a record's trailing note says to answer,
   the conversation answers with `action: "reply"` and the record's message id.
   The feed's own refusal wording passes through untouched.

@@ -339,9 +339,10 @@ const CHANNEL_RE = /<channel\s+source="([^"]*)"(?:\s+from_run_id="([^"]*)")?(?:\
 /**
  * One inbound message's frame. The text below the header is a peer's words, so
  * it is marked as such and never read as an operator instruction. The feed's
- * trailing note for an ask names poo's call_cli transport; the preface maps
- * that instruction onto this host's own avenor_message tool without parsing
- * the peer's text, and the feed's own refusal wording passes through intact.
+ * trailing note for an ask names avenor_message and the reply arguments; the
+ * preface says to answer here with this host's own avenor_message tool using
+ * those arguments without parsing the peer's text, and the feed's own refusal
+ * wording passes through intact.
  */
 function formatAgentMessage(source: string, fromRunId: string, content: string, messageId: string): string {
   const label = sanitize(source.replace(/^agent-/, '') || source)
@@ -360,7 +361,7 @@ function formatAgentMessage(source: string, fromRunId: string, content: string, 
   if (messageId) {
     lines.push(
       '',
-      `This message arrived through the avenor inbox (message id ${quotedId}). When its trailing note tells you to answer — it names call_cli with an avenor_message call — answer here with the avenor_message tool instead, passing the same arguments (action "reply", reply_to ${quotedId}, message "..."). A trailing note that says the message cannot be answered here means no answer is possible on this conversation.`,
+      `This message arrived through the avenor inbox (message id ${quotedId}). When its trailing note tells you to answer — it names avenor_message and the reply arguments (action "reply", reply_to ${quotedId}, message "...") — answer here with this host's avenor_message tool, passing those same arguments; the note's call_cli fallback does not apply to this conversation. A trailing note that says the message cannot be answered here means no answer is possible on this conversation.`,
     )
   }
   return lines.join('\n') + '\n'
