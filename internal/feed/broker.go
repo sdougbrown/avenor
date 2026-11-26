@@ -131,7 +131,7 @@ func (b Broker) write(m Message) error {
 		quotedSender, _ := json.Marshal(m.From)
 		if m.Answerable {
 			quotedID, _ := json.Marshal(m.ID)
-			text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, use call_cli with {\"name\": \"avenor_message\", \"args\": {\"action\": \"reply\", \"reply_to\": %s, \"message\": \"...\"}}.", quotedSender, quotedID)
+			text += fmt.Sprintf("\n\nThis message is an ask from %s. To answer, call avenor_message with {\"action\": \"reply\", \"reply_to\": %s, \"message\": \"...\"}. If avenor_message is not one of your tools, call call_cli with {\"command\": \"avenor_message\", \"args\": {\"action\": \"reply\", \"reply_to\": %s, \"message\": \"...\"}}.", quotedSender, quotedID, quotedID)
 		} else {
 			text += fmt.Sprintf("\n\nThis message is an ask from %s, but it cannot be answered here.", quotedSender)
 		}

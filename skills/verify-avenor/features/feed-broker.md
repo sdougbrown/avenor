@@ -3,7 +3,7 @@
 ## Sub-features
 
 - Broker-stamped tell and ask messages become one NDJSON line each on stdout.
-- Asks name the message ID and the `call_cli` reply instruction.
+- Asks name the message ID and the `avenor_message` reply instruction.
 - One feed consumes a run's inbox per broker; a competing feed exits without polling.
 - A revoked credential parks the feed after one refusal; shutdown drains an in-flight poll.
 
@@ -38,7 +38,7 @@ recording credentials or message content that should remain private.
 
 **Observable end state (the proof):** the tell and ask each have one JSON line
 whose `from` is the broker-stamped sender. The tell's `text` is the message; the
-ask's `text` includes the ask ID and the `call_cli` instruction for `avenor_message` with `action: "reply"`.
+ask's `text` includes the ask ID and the `avenor_message` instruction with `action: "reply"`.
 The second feed exits 0, and the first exits 0 on SIGTERM. A separately started
 feed with a revoked token logs one refusal and remains alive until stopped.
 

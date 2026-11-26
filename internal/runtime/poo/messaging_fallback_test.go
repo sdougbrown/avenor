@@ -126,7 +126,7 @@ func TestMessagingIgnoredManifestsFallback(t *testing.T) {
 			t.Cleanup(func() { _ = p.Close() })
 			session, err := p.Start(context.Background(), avruntime.StartOptions{})
 			if explicit {
-				if err == nil || !strings.Contains(err.Error(), "v0.2.0") {
+				if err == nil || !strings.Contains(err.Error(), "v0.12.0") {
 					t.Fatalf("explicit request error = %v, want minimum version", err)
 				}
 				if got := fallbackLaunches(t, dir); got != 1 {
@@ -300,7 +300,7 @@ func TestMessagingManifestWriteFailure(t *testing.T) {
 			t.Cleanup(func() { _ = p.Close() })
 			session, err := p.Start(context.Background(), avruntime.StartOptions{})
 			if explicit {
-				if err == nil || !strings.Contains(err.Error(), "v0.2.0") {
+				if err == nil || !strings.Contains(err.Error(), "v0.12.0") {
 					t.Fatalf("explicit request error = %v, want minimum version", err)
 				}
 				if got := fallbackLaunches(t, dir); got != 0 {
