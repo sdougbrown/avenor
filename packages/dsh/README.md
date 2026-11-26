@@ -100,7 +100,9 @@ children name that run as `parent_run_id`, and the plugin polls the bound feed
 (`/poll-control`) while the session has a delegation live, delivering each tell
 or ask to the agent that started the run: `inject` while it runs, `followup` to
 wake it. An ask is registered so `avenor_message action=reply` can reach the
-sender.
+sender. The reply speaks as the session's bound run, not as the supervisor: the
+ask edge lives on the bound run, and a reply from the supervisor's identity is
+refused as `edge-absent`.
 
 The broker names a sender by runtime id (`rt_N`) in `from_run_id` and by public
 run id in `sender`, so both are registered and either can resolve the parent. A

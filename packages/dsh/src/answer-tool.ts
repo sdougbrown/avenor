@@ -21,6 +21,11 @@ export interface AnswerDeps {
  * rows*, not for imports from a plugin's own JS — so this declares the same
  * contract directly, in plain JSON Schema, and validates its own arguments.
  */
+/** The bit of the executor's context a tool needs to know who is calling. */
+export interface ToolExecContext {
+  readonly agent?: { readonly session?: { readonly id?: string } }
+}
+
 export interface ToolDefinitionLike {
   readonly name: string
   readonly description: string
@@ -33,7 +38,7 @@ export interface ToolDefinitionLike {
     readonly schema: unknown
     render(args: unknown, value: unknown): ContentBlock[]
   }
-  execute(args: unknown): Promise<unknown>
+  execute(args: unknown, exec?: ToolExecContext): Promise<unknown>
 }
 
 function parseAnswerRequest(args: unknown): AnswerRequest {

@@ -1,4 +1,6 @@
 import {
+  createBrokerChildBroker,
+  createChildMessageProvider,
   createHostMessageProvider,
   getSupervisorClient,
   installAskClaims,
@@ -6,6 +8,7 @@ import {
   peersTool,
   postBroker,
   SUPERVISOR_RUN_ID,
+  type MessageProvider,
   type PendingAsk,
 } from '@dougbots/avenor-core'
 import { inboundFrameToAsk, inboundMessage } from './inbound.js'
@@ -16,13 +19,13 @@ type HostOptions = Parameters<typeof createHostMessageProvider>[0]
 export type MessagingClient = Awaited<ReturnType<typeof getSupervisorClient>>['client']
 type PendingAskMap = Map<string, PendingAsk>
 
-/** The broker identity a host surface answers as when it is not bound. */
+/** The broker identity a host surface answers as when it has no binding. */
 export const HOST_RUN_ID = SUPERVISOR_RUN_ID
 
-export interface MessagingHost {
-  readonly hostRunId: string
-  message(args: unknown): Promise<unknown>
-  peers(args: unknown): Promise<unknown>
+/** The two calls the message tools make, routed by the calling session. */
+export interface MessagingSurface {
+  message(args: unknown, sessionId?: string): Promise<unknown>
+  peers(args: unknown, sessionId?: string): Promise<unknown>
 }
 
 /**
@@ -50,55 +53,20 @@ export interface BrokerFrame {
   }
 }
 
-export interface MessagingHostOptions {
-  readonly client: MessagingClient
-  readonly supervisorId: string
-  readonly surface?: string
-  readonly pendingAsks?: PendingAskMap
-}
-
-/**
- * Bind Avenor's message router to this harness's supervisor.
- *
- * The router is core's, so the six actions and their failure text exist once.
- * What is harness-specific is the surface: a host provider reads the peer
- * listing and the inbound ask map through the control client.
- */
-export async function createMessagingHost(options: MessagingHostOptions): Promise<MessagingHost> {
-  const { generation } = await options.client.messagePreflight()
-  const pendingAsks = options.pendingAsks ?? (new Map() as PendingAskMap)
-  const claims = new Map<string, { asker: string; generation: number }>()
-  const pollGeneration = 0
-
-  const provider = createHostMessageProvider({
-    surface: (options.surface ?? 'dsh-host') as HostOptions['surface'],
-    supervisorId: options.supervisorId,
-    generation,
-    client: options.client,
-    pendingAsks,
-    pollGeneration: () => pollGeneration,
-  })
-  installAskClaims(provider, claims, pendingAsks, () => pollGeneration)
-
-  return {
-    hostRunId: SUPERVISOR_RUN_ID,
-    message: (args) => messageTool(args, provider),
-    peers: (args) => peersTool(args, provider),
-  }
-}
-
 export interface MessagingRuntimeOptions {
-  readonly host?: () => Promise<MessagingHost>
   /** Binds one session's conversation; defaults to the control client's message_bind. */
   readonly bind?: (sessionId: string) => Promise<BoundConversation>
   /** Reads one bound conversation's feed; defaults to the broker's /poll-control. */
   readonly poll?: (bound: BoundConversation) => Promise<BrokerFrame[]>
-  readonly pollTimeoutMs?: number
+  /** The provider a call with no usable session falls back to. */
+  readonly hostProvider?: () => Promise<MessageProvider>
+  /** Builds the provider a bound session speaks through; injectable for tests. */
+  readonly boundProvider?: (bound: BoundConversation) => MessageProvider
+  readonly pollIntervalMs?: number
   readonly onError?: (error: unknown) => void
 }
 
-export interface MessagingRuntime {
-  host(): Promise<MessagingHost>
+export interface MessagingRuntime extends MessagingSurface {
   /** Bind (or reuse) a session's conversation; the run id is the spawn parent. */
   bind(sessionId: string): Promise<BoundConversation>
   remember(runId: string, parent: ParentAgent): void
@@ -113,21 +81,61 @@ export function createMessagingRuntime(options: MessagingRuntimeOptions = {}): M
   const parents = new Map<string, ParentAgent>()
   const pendingAsks = new Map() as PendingAskMap
   const bindings = new Map<string, Promise<BoundConversation>>()
+  const boundProviders = new Map<string, MessageProvider>()
   const loops = new Map<string, { stop(): void }>()
-  const poll = options.poll ?? ((bound) => pollControl(bound))
-  const pollIntervalMs = options.pollTimeoutMs ?? 1000
-  let hostPromise: Promise<MessagingHost> | undefined
-  let clientPromise: Promise<{ client: MessagingClient; supervisorId: string }> | undefined
+  const poll = options.poll ?? pollControl
+  const pollIntervalMs = options.pollIntervalMs ?? 1000
+  let controlPromise: Promise<{ client: MessagingClient; supervisorId: string }> | undefined
+  let hostProviderPromise: Promise<MessageProvider> | undefined
 
   const control = () => {
-    clientPromise ??= getSupervisorClient(undefined)
-    return clientPromise
+    controlPromise ??= getSupervisorClient(undefined)
+    return controlPromise
+  }
+
+  /**
+   * A call speaks as the caller's own conversation run. A reply's ask edge
+   * lives on that run, so answering from the supervisor's identity is refused
+   * as edge-absent; the child provider talks to the broker with the bound
+   * credentials instead.
+   */
+  async function providerFor(sessionId: string | undefined): Promise<MessageProvider> {
+    if (sessionId === undefined) {
+      hostProviderPromise ??= options.hostProvider
+        ? options.hostProvider()
+        : defaultHostProvider(pendingAsks, control)
+      return hostProviderPromise
+    }
+    const bound = await runtime.bind(sessionId)
+    let provider = boundProviders.get(sessionId)
+    if (provider === undefined) {
+      if (options.boundProvider) {
+        provider = options.boundProvider(bound)
+        boundProviders.set(sessionId, provider)
+        return provider
+      }
+      provider = createChildMessageProvider({
+        surface: 'dsh' as HostOptions['surface'],
+        runId: bound.runId,
+        broker: createBrokerChildBroker({
+          brokerUrl: bound.brokerUrl,
+          runId: bound.runId,
+          token: bound.token,
+        }),
+        pendingAsks,
+        pollGeneration: () => 0,
+      })
+      boundProviders.set(sessionId, provider)
+    }
+    return provider
   }
 
   const runtime: MessagingRuntime = {
-    host() {
-      hostPromise ??= options.host ? options.host() : defaultHost(pendingAsks, control)
-      return hostPromise
+    async message(args, sessionId) {
+      return messageTool(args, await providerFor(sessionId))
+    },
+    async peers(args, sessionId) {
+      return peersTool(args, await providerFor(sessionId))
     },
     bind(sessionId) {
       let pending = bindings.get(sessionId)
@@ -152,16 +160,7 @@ export function createMessagingRuntime(options: MessagingRuntimeOptions = {}): M
     },
     ensureInbound(sessionId) {
       if (loops.has(sessionId)) return
-      loops.set(
-        sessionId,
-        startInboundLoop({
-          sessionId,
-          runtime,
-          poll,
-          pollIntervalMs,
-          onError: options.onError,
-        }),
-      )
+      loops.set(sessionId, startInboundLoop({ sessionId, runtime, poll, pollIntervalMs, onError: options.onError }))
     },
     stop() {
       for (const loop of loops.values()) loop.stop()
@@ -171,12 +170,22 @@ export function createMessagingRuntime(options: MessagingRuntimeOptions = {}): M
   return runtime
 }
 
-async function defaultHost(
+async function defaultHostProvider(
   pendingAsks: PendingAskMap,
   control: () => Promise<{ client: MessagingClient; supervisorId: string }>,
-): Promise<MessagingHost> {
+): Promise<MessageProvider> {
   const { client, supervisorId } = await control()
-  return createMessagingHost({ client, supervisorId, pendingAsks })
+  const { generation } = await client.messagePreflight()
+  const provider = createHostMessageProvider({
+    surface: 'dsh-host' as HostOptions['surface'],
+    supervisorId,
+    generation,
+    client,
+    pendingAsks,
+    pollGeneration: () => 0,
+  })
+  installAskClaims(provider, new Map(), pendingAsks, () => 0)
+  return provider
 }
 
 async function bindSession(
@@ -184,12 +193,7 @@ async function bindSession(
   sessionId: string,
 ): Promise<BoundConversation> {
   const bound = await control.client.messageBind({ host: 'dsh', session_id: sessionId })
-  return {
-    sessionId,
-    runId: bound.run_id,
-    brokerUrl: bound.broker_url,
-    token: bound.run_token,
-  }
+  return { sessionId, runId: bound.run_id, brokerUrl: bound.broker_url, token: bound.run_token }
 }
 
 /** Read one conversation's feed: the queue its bound run consumes. */

@@ -71,8 +71,8 @@ export function register(
     createAvenorProvider(makeSeam(selectionOf(config)), messaging ? runtime : undefined),
   )
   ctx.tools.register(answerToolDefinition(answer))
-  ctx.tools.register(messageToolDefinition(() => runtime.host()))
-  ctx.tools.register(peersToolDefinition(() => runtime.host()))
+  ctx.tools.register(messageToolDefinition(runtime))
+  ctx.tools.register(peersToolDefinition(runtime))
   return runtime
 }
 

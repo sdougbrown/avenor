@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import { apply, inject, register, type HostConfig } from './index.js'
 import type { AvenorSeam } from './provider.js'
-import type { MessagingHost, MessagingRuntime } from './messaging.js'
+import type { MessagingRuntime } from './messaging.js'
 import type { HostContext, ParentAgent, SubagentProvider } from './types.js'
 
 function fakeContext() {
@@ -48,17 +48,13 @@ function recordingSeamFactory() {
 function fakeRuntime() {
   const calls: string[] = []
   const parents = new Map<string, ParentAgent>()
-  const host: MessagingHost = {
-    hostRunId: 'supervisor',
+  const runtime: MessagingRuntime = {
     async message() {
       return { outcome: 'sent' }
     },
     async peers() {
       return { outcome: 'listed' }
     },
-  }
-  const runtime: MessagingRuntime = {
-    host: async () => host,
     async bind(sessionId) {
       calls.push(`bind:${sessionId}`)
       return { sessionId, runId: 'bound-1', brokerUrl: 'http://127.0.0.1:1', token: 'tok' }

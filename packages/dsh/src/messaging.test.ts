@@ -1,32 +1,7 @@
 import { describe, it, expect } from 'bun:test'
-import { createMessagingHost, createMessagingRuntime, deliverFrame, startInboundLoop } from './messaging.js'
-import type { BoundConversation, BrokerFrame, MessagingClient, MessagingHost, MessagingRuntime } from './messaging.js'
+import { createMessagingRuntime, deliverFrame, startInboundLoop, type BrokerFrame, type BoundConversation, type MessagingRuntime } from './messaging.js'
+import type { MessageProvider } from '@dougbots/avenor-core'
 import type { ParentAgent, UserMessageLike } from './types.js'
-
-function fakeClient() {
-  const calls: string[] = []
-  const client = {
-    async messagePreflight() {
-      calls.push('preflight')
-      return { protocol: 1, generation: 'gen-1' }
-    },
-    async messagePeers() {
-      calls.push('peers')
-      return { generation: 'gen-1', peers: [{ run_id: 'run-1', label: 'one' }] }
-    },
-    async messageBind(request: { session_id: string }) {
-      calls.push(`bind:${request.session_id}`)
-      return {
-        run_id: 'bound-1',
-        broker_url: 'http://127.0.0.1:1',
-        run_token: 'tok',
-        generation: 'gen-1',
-        created: true,
-      }
-    },
-  } as unknown as MessagingClient
-  return { client, calls }
-}
 
 function frame(): BrokerFrame {
   return {
@@ -48,57 +23,56 @@ function fakeParent(status: 'idle' | 'running') {
   return { parent, injected, followed }
 }
 
-function runtimeWith(parent: ParentAgent | undefined): MessagingRuntime {
-  const runtime = createMessagingRuntime({
-    host: async () => fakeHost(),
-    bind: async (sessionId) => ({ sessionId, runId: 'bound-1', brokerUrl: 'http://127.0.0.1:1', token: 'tok' }),
-    poll: async () => [],
-  })
-  if (parent) runtime.remember('rt_1', parent)
-  return runtime
-}
-
-function fakeHost(): MessagingHost {
-  return {
-    hostRunId: 'supervisor',
-    async message() {
+/** A provider that records the calls the router makes; only what a test calls. */
+function recordingProvider(calls: string[]): MessageProvider {
+  const provider = {
+    surface: () => 'dsh',
+    role: () => 'agent',
+    caller: () => ({ kind: 'owner', runId: 'bound-1' }),
+    async peers() {
+      calls.push('peers')
+      return { peers: [] }
+    },
+    async resolve(ref: string) {
+      return { runId: ref, label: ref, match: 'unique' }
+    },
+    async tell() {
+      calls.push('tell')
       return { outcome: 'sent' }
     },
-    async peers() {
+    async ask() {
+      calls.push('ask')
+      return { outcome: 'sent' }
+    },
+    async reply() {
+      calls.push('reply')
+      return { outcome: 'replied' }
+    },
+    async withdraw() {
+      calls.push('withdraw')
+      return { outcome: 'withdrawn' }
+    },
+    async rename() {
+      return { outcome: 'renamed' }
+    },
+    async last() {
       return { outcome: 'listed' }
     },
-  }
+  } as unknown as MessageProvider
+  return provider
 }
 
-describe('messaging host', () => {
-  it('bootstraps the broker generation', async () => {
-    const { client, calls } = fakeClient()
-    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
-    expect(host.hostRunId).toBe('supervisor')
-    expect(calls).toEqual(['preflight'])
-  })
-
-  it('lists peers through the control client', async () => {
-    const { client } = fakeClient()
-    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
-    expect(JSON.stringify(await host.peers({ action: 'list' }))).toContain('run-1')
-  })
-
-  it('refuses an unknown action through the shared router', async () => {
-    const { client } = fakeClient()
-    const host = await createMessagingHost({ client, supervisorId: 'in-process' })
-    await expect(host.message({ action: 'bogus' })).rejects.toThrow()
-  })
-})
+function bound(sessionId: string): BoundConversation {
+  return { sessionId, runId: 'bound-1', brokerUrl: 'http://127.0.0.1:1', token: 'tok' }
+}
 
 describe('messaging runtime', () => {
   it('binds one session once and reuses the run id', async () => {
     let binds = 0
     const runtime = createMessagingRuntime({
-      host: async () => fakeHost(),
       bind: async (sessionId) => {
         binds += 1
-        return { sessionId, runId: 'bound-1', brokerUrl: 'http://127.0.0.1:1', token: 'tok' }
+        return bound(sessionId)
       },
       poll: async () => [],
     })
@@ -109,21 +83,30 @@ describe('messaging runtime', () => {
     expect(again.runId).toBe('bound-1')
   })
 
-  it('builds the host once on demand', async () => {
-    let builds = 0
+  it('routes a message call as the calling session run', async () => {
+    const calls: string[] = []
     const runtime = createMessagingRuntime({
-      host: async () => {
-        builds += 1
-        return fakeHost()
-      },
+      bind: async (sessionId) => bound(sessionId),
+      boundProvider: () => recordingProvider(calls),
+      poll: async () => [],
     })
-    await runtime.host()
-    await runtime.host()
-    expect(builds).toBe(1)
+    const result = (await runtime.peers({ action: 'list' }, 'sess-1')) as { peers: unknown[] }
+    expect(calls).toEqual(['peers'])
+    expect(result.peers).toEqual([])
+  })
+
+  it('falls back to the host provider without a session', async () => {
+    const calls: string[] = []
+    const runtime = createMessagingRuntime({
+      hostProvider: async () => recordingProvider(calls),
+      poll: async () => [],
+    })
+    await runtime.peers({ action: 'list' })
+    expect(calls).toEqual(['peers'])
   })
 
   it('keys deliveries by run id and forgets on demand', () => {
-    const runtime = createMessagingRuntime({ host: async () => fakeHost() })
+    const runtime = createMessagingRuntime({ poll: async () => [] })
     const { parent } = fakeParent('running')
     runtime.remember('run-1', parent)
     expect(runtime.parentFor('run-1')).toBe(parent)
@@ -133,9 +116,15 @@ describe('messaging runtime', () => {
 })
 
 describe('inbound delivery', () => {
+  const runtime = (parent?: ParentAgent): MessagingRuntime => {
+    const created = createMessagingRuntime({ poll: async () => [] })
+    if (parent) created.remember('rt_1', parent)
+    return created
+  }
+
   it('injects into a running parent', () => {
     const { parent, injected, followed } = fakeParent('running')
-    expect(deliverFrame(runtimeWith(parent), frame())).toBe(true)
+    expect(deliverFrame(runtime(parent), frame())).toBe(true)
     expect(followed).toHaveLength(0)
     expect(injected).toHaveLength(1)
     expect((injected[0].content[0] as { text: string }).text).toContain('hello')
@@ -143,20 +132,20 @@ describe('inbound delivery', () => {
 
   it('wakes an idle parent with a follow-up', () => {
     const { parent, injected, followed } = fakeParent('idle')
-    expect(deliverFrame(runtimeWith(parent), frame())).toBe(true)
+    expect(deliverFrame(runtime(parent), frame())).toBe(true)
     expect(injected).toHaveLength(0)
     expect(followed).toHaveLength(1)
   })
 
   it('drops a frame from a run this harness did not start', () => {
-    expect(deliverFrame(runtimeWith(undefined), frame())).toBe(false)
+    expect(deliverFrame(runtime(), frame())).toBe(false)
   })
 
   it('matches a sender registered by its public run id', () => {
     const { parent, injected } = fakeParent('running')
-    const runtime = runtimeWith(undefined)
-    runtime.remember('run-public-1', parent)
-    expect(deliverFrame(runtime, frame())).toBe(true)
+    const created = runtime()
+    created.remember('run-public-1', parent)
+    expect(deliverFrame(created, frame())).toBe(true)
     expect(injected).toHaveLength(1)
   })
 })
@@ -164,11 +153,15 @@ describe('inbound delivery', () => {
 describe('inbound loop', () => {
   it('polls the bound conversation and stops when asked', async () => {
     const { parent, injected } = fakeParent('running')
-    const runtime = runtimeWith(parent)
+    const created = createMessagingRuntime({
+      bind: async (sessionId) => bound(sessionId),
+      poll: async () => [],
+    })
+    created.remember('rt_1', parent)
     let polls = 0
     const loop = startInboundLoop({
       sessionId: 'sess-1',
-      runtime,
+      runtime: created,
       poll: async () => {
         polls += 1
         return polls === 1 ? [frame()] : []
@@ -185,14 +178,19 @@ describe('inbound loop', () => {
 
   it('reports a failed bind and stops', async () => {
     const errors: unknown[] = []
-    const runtime = createMessagingRuntime({
-      host: async () => fakeHost(),
+    const created = createMessagingRuntime({
       bind: async () => {
         throw new Error('bind refused')
       },
       poll: async () => [],
     })
-    startInboundLoop({ sessionId: 'sess-1', runtime, poll: async () => [], pollIntervalMs: 1, onError: (e) => errors.push(e) })
+    startInboundLoop({
+      sessionId: 'sess-1',
+      runtime: created,
+      poll: async () => [],
+      pollIntervalMs: 1,
+      onError: (error) => errors.push(error),
+    })
     const deadline = Date.now() + 2000
     while (errors.length === 0 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 5))
