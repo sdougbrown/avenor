@@ -30,6 +30,7 @@ const (
 
 type awaitOptions struct {
 	socket      string
+	coords      boundCoordinates
 	derived     bool
 	until       string
 	timeout     time.Duration
@@ -55,7 +56,7 @@ func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writ
 		ctx, cancel = context.WithTimeout(ctx, opts.timeout)
 	}
 	defer cancel()
-	resolved, err := awaitResolveTarget(ctx, stderr, opts.socket, opts.target, opts.derived)
+	resolved, err := awaitResolveTarget(ctx, stderr, opts.socket, opts.target, opts.coords)
 	if err != nil {
 		if errors.Is(err, ErrAttachRefused) {
 			return nil, fmt.Errorf("avenor await: %w", err)
@@ -84,6 +85,7 @@ func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error
 	}
 	opts := awaitOptions{
 		socket:      socket,
+		coords:      coords,
 		derived:     requested && coords.derived,
 		until:       orDefault(inv.Flags["until"], "attention"),
 		timeout:     inv.Durations["timeout"],
@@ -232,12 +234,12 @@ type awaitResolvedTarget struct {
 // feed starts the supervisor the next call needs.
 var ErrAttachRefused = errors.New("attach the conversation's supervisor")
 
-func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target string, derived bool) (awaitResolvedTarget, error) {
+func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target string, coords boundCoordinates) (awaitResolvedTarget, error) {
 	if socket != "" {
 		c, err := client.Dial(socket)
 		if err != nil {
-			if derived {
-				return awaitResolvedTarget{}, fmt.Errorf("%w at %s (its inbox feed starts it): %w", ErrAttachRefused, socket, err)
+			if coords.derived {
+				return awaitResolvedTarget{}, fmt.Errorf("%w: attach %s%s: %w", ErrAttachRefused, coords.attachTarget(), coords.attachHint(), err)
 			}
 			return awaitResolvedTarget{}, err
 		}
