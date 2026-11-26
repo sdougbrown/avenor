@@ -2632,4 +2632,30 @@ func TestPromptFailedPolicyToleratesInconsistentFinishAfterStreamedContent(t *te
 			t.Fatalf("second Prompt with no streamed content err = %v, want the finish-reason error", err)
 		}
 	})
+
+	// A warm resume reuses the registered session, so the chunk counter the
+	// policy reads is the one dispatch writes after the resume too.
+	t.Run("warm resume keeps the chunk counter alive", func(t *testing.T) {
+		var p *Provider
+		var dispatched bool
+		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			if !dispatched {
+				dispatched = true
+				p.client.dispatch(chunkUpdate)
+			}
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		}
+		p, _ = newProvider(t, finishPolicy, onCall)
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		if _, err := p.Resume(context.Background(), "ses_1"); err != nil {
+			t.Fatalf("warm Resume: %v", err)
+		}
+		if err := p.Prompt(context.Background(), "ses_1", "turn"); err != nil {
+			t.Fatalf("Prompt after warm resume with carve-out: %v, want tolerated", err)
+		}
+	})
 }

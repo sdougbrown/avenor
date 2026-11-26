@@ -68,10 +68,10 @@ func (c *Client) NewSessionWithOptions(ctx context.Context, opts SessionOpenOpti
 	return session, nil
 }
 
-// registerSession records the session in the client's registry so dispatch
-// can attribute session updates to it. Re-registration of a known ID is a
-// no-op: the registry holds the first session for that ID, so a warm client
-// resuming a session never orphans the counter an in-flight prompt reads.
+// registerSession records a newly opened session in the client's registry so
+// dispatch can attribute session updates to it. Re-registration of a known ID
+// is a no-op; load and resume return the registered session instead of a fresh
+// one, so the chunk counter the provider reads stays the one dispatch writes.
 func (c *Client) registerSession(session *Session) {
 	if session.SessionID == "" {
 		return
@@ -86,9 +86,7 @@ func (c *Client) LoadSession(ctx context.Context, sessionID string) (*Session, e
 	if err != nil {
 		return nil, err
 	}
-	session := &Session{Client: c, SessionID: sessionID}
-	c.registerSession(session)
-	return session, nil
+	return c.existingOrNewSession(sessionID), nil
 }
 
 func (c *Client) ResumeSession(ctx context.Context, sessionID string) (*Session, error) {
@@ -100,9 +98,19 @@ func (c *Client) ResumeSessionWithOptions(ctx context.Context, sessionID string,
 	if err != nil {
 		return nil, err
 	}
+	return c.existingOrNewSession(sessionID), nil
+}
+
+// existingOrNewSession returns the session already registered for the ID, so a
+// warm resume keeps counting dispatched chunks on the same object the provider
+// holds; a fresh registered session only for an ID the client has not seen.
+func (c *Client) existingOrNewSession(sessionID string) *Session {
+	if existing, ok := c.sessions.Load(sessionID); ok {
+		return existing.(*Session)
+	}
 	session := &Session{Client: c, SessionID: sessionID}
 	c.registerSession(session)
-	return session, nil
+	return session
 }
 
 func (s *Session) Prompt(ctx context.Context, prompt string) (events.Event, error) {
