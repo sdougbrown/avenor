@@ -646,7 +646,7 @@ avenor control --socket /tmp/avenor.sock shutdown graceful
 
 ## avenor await
 
-Wait on a run until it reaches attention or done. Resolves a run by ID or label over a control socket, or by scanning `~/.avenor/sockets` when `--socket` is omitted.
+Wait on a run until it reaches attention or done. Resolves a run by run ID, runtime ID, or label over a control socket, or by scanning `~/.avenor/sockets` when `--socket` is omitted.
 
 `avenor await` attaches to either a supervisor socket or a one-shot run started
 with `--control-socket`. A one-shot server exposes its single run: `list` reports
@@ -654,7 +654,7 @@ it under the run id, and `status`, `history`, `subscribe`, and `result` accept
 that id, so `--until done` follows it to the terminal snapshot.
 
 ```
-avenor await [flags] <run-id|label>
+avenor await [flags] <run-id|runtime-id|label>
 ```
 
 ### Flags

@@ -336,7 +336,7 @@ func awaitResolveTargetFromSockets(ctx context.Context, stderr io.Writer, target
 
 func resolveAwaitRuntime(target string, runtimes []map[string]any) awaitRuntimeResolution {
 	for _, runtime := range runtimes {
-		if runtimeString(runtime, "run_id") == target {
+		if runtimeString(runtime, "run_id") == target || runtimeString(runtime, "runtime_id") == target {
 			if id := runtimeString(runtime, "runtime_id"); id != "" {
 				return awaitRuntimeResolution{runtimeID: id, runID: runtimeString(runtime, "run_id"), exact: true}
 			}

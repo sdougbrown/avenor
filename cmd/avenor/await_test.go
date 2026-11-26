@@ -1073,3 +1073,17 @@ func TestAwaitRefusesPartialBindCoordinates(t *testing.T) {
 		t.Fatalf("stderr = %q, want the required-together refusal", stderr.String())
 	}
 }
+
+// TestAwaitResolvesRuntimeID pins the delegation chain's target: spawn's
+// result names a runtime_id, so await resolves it exactly instead of falling
+// to the label scan that an unmatched target would go through.
+func TestAwaitResolvesRuntimeID(t *testing.T) {
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	var stdout, stderr bytes.Buffer
+	if got := awaitRunDeclared([]string{"rt_1", "--socket", server.socket(), "--until", "done"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "TURN-DONE rt_1") {
+		t.Fatalf("stdout = %q, want the done transition", stdout.String())
+	}
+}
