@@ -236,7 +236,9 @@ export function findAvenorBinary(): string {
   }
 
   throw new Error(
-    "avenor binary not found. Set AVENOR_BIN=/path/to/avenor or ensure 'avenor' is on PATH.",
+    'avenor binary not found. Install it with ' +
+      '`curl -fsSL https://avenor.douggo.com/install.sh | sh`, set ' +
+      "AVENOR_BIN=/path/to/avenor, or ensure 'avenor' is on PATH.",
   )
 }
 
