@@ -452,6 +452,14 @@ releases, so read it rather than assuming an id. Reasoning effort is exposed the
 same way (`reasoning_effort`), but Avenor's thinking policy does not admit
 `dsh-acp` yet, so an explicit thinking value is rejected before launch.
 
+**Custom providers:** the `acp` profile is a normal DSH profile, so a provider
+route added to its patch layer (`~/.dsh/profiles/acp/cordis.patch.yml`) becomes
+a model choice like any other and is selected as `provider/model`. An
+OpenAI-compatible gateway needs `api`, `baseURL`, and a `models` list; when the
+route declares `apiKeyEnv`, that variable must be in the environment of the
+`dsh` process Avenor launches, because the harness resolves the credential per
+request.
+
 **Requirements and caveats:**
 
 - `dsh` must resolve on `PATH`. A `npx`/`pnpm dlx` install exposes a shim there;
