@@ -363,19 +363,19 @@ func TestFeedInstructionMatchesManifest(t *testing.T) {
 	if err = json.Unmarshal(line, &msg); err != nil {
 		t.Fatal(err)
 	}
-	start := strings.Index(msg.Text, `{"name":`)
+	start := strings.Index(msg.Text, `{"command":`)
 	end := strings.LastIndex(msg.Text, "}.")
 	if start < 0 || end < start {
 		t.Fatalf("instruction %q", msg.Text)
 	}
 	var call struct {
-		Name string         `json:"name"`
-		Args map[string]any `json:"args"`
+		Command string         `json:"command"`
+		Args    map[string]any `json:"args"`
 	}
 	if err = json.Unmarshal([]byte(msg.Text[start:end+1]), &call); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := catalog.Plan(call.Name, call.Args)
+	plan, err := catalog.Plan(call.Command, call.Args)
 	if err != nil {
 		t.Fatal(err)
 	}
