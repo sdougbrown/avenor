@@ -51,7 +51,8 @@ func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writ
 // target positional plus the until/timeout/format flags, and the attachment
 // coordinates a configured host session names. A conversation with half its
 // coordinates names no session to serve, so the mixed forms are refused before
-// any dial; an unconfigured await keeps its socket or scan path.
+// any dial; an unconfigured await dials an explicit --socket or scans the
+// sockets root, with no socket default from the environment.
 func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error) {
 	coords, requested, err := boundOptionalCoordinates(inv, "avenor await")
 	if err != nil {
