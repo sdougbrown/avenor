@@ -31,7 +31,6 @@ const (
 type awaitOptions struct {
 	socket      string
 	coords      boundCoordinates
-	derived     bool
 	until       string
 	timeout     time.Duration
 	printOutput bool
@@ -70,23 +69,17 @@ func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writ
 // target positional plus the until/timeout/format flags, and the attachment
 // coordinates a configured host session names. A conversation with half its
 // coordinates names no session to serve, so the mixed forms are refused before
-// any dial; an unconfigured await dials an explicit --socket or scans the
-// sockets root, with no socket default from the environment.
+// any dial; an unconfigured await dials the configured socket or scans the
+// sockets root.
 func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error) {
-	coords, requested, err := boundOptionalCoordinates(inv, "avenor await")
+	coords, _, err := boundOptionalCoordinates(inv, "avenor await")
 	if err != nil {
 		return awaitOptions{}, err
 	}
 	socket := coords.socket
-	if !requested {
-		// no conversation configured: an explicit --socket (or its
-		// AVENOR_SOCKET default) still names the supervisor to dial;
-		// with neither, the sockets-root scan runs as await always had.
-	}
 	opts := awaitOptions{
 		socket:      socket,
 		coords:      coords,
-		derived:     requested && coords.derived,
 		until:       orDefault(inv.Flags["until"], "attention"),
 		timeout:     inv.Durations["timeout"],
 		printOutput: inv.Bools["print-output"],
