@@ -26,7 +26,7 @@ function replyingProvider(replySpy: (args: Record<string, unknown>) => Promise<u
 async function startHostExtension(
   brokerReceiveTool: any,
   replySpy: (args: Record<string, unknown>) => Promise<unknown> = mock(async (_args: Record<string, unknown>) => {}),
-  extOptions: { pollIntervalMs?: number } = {},
+  extOptions: { pollIntervalMs?: number; peerDeliveryConfirmTimeoutMs?: number } = {},
   provider = replyingProvider(replySpy),
 ) {
   return startExtensionHarness({
@@ -102,6 +102,45 @@ describe('host inbound ask delivery', () => {
     } finally {
       await harness.eventHandlers.session_shutdown({}, {})
     }
+  })
+
+  it('holds no reply edge for an ask whose frame never landed', async () => {
+    // The frame spent its attempt budget without landing, so the session never
+    // read the ask: no edge is registered to answer it, and no blocking wait is
+    // woken for a question the agent cannot see. The ask behind it, which does
+    // land, holds its edge as usual.
+    const brokerReceiveTool = drainOnce([
+      { message_id: 'ask-silent', from_run_id: 'rt_child', message: 'never landed', role: 'agent', expects_reply: true },
+      { message_id: 'ask-landed', from_run_id: 'rt_child', message: 'lands first try', role: 'agent', expects_reply: true },
+    ])
+    const harness = await startHostExtension(brokerReceiveTool, async () => {}, {
+      pollIntervalMs: 10,
+      peerDeliveryConfirmTimeoutMs: 20,
+    })
+    try {
+      // Pi accepts the send but the frame never comes back through message_end.
+      harness.sendMessage.mockImplementation((message: Record<string, unknown>) => {
+        if (String(message.content).includes('never landed')) return
+        harness.eventHandlers['message_end']?.({ message: { role: 'custom', customType: 'avenor-peer-message', details: message.details } })
+      })
+      await waitFor(() => harness.sendMessage.mock.calls.some(([m]) => String((m as Record<string, unknown>).content).includes('lands first try')))
+      const silent = await harness.registeredTools.avenor_message.execute('r1', {
+        action: 'reply',
+        reply_to: 'ask-silent',
+        message: 'answer',
+      })
+      expect(silent.details.outcome).toBe('edge-absent')
+      const landed = await harness.registeredTools.avenor_message.execute('r2', {
+        action: 'reply',
+        reply_to: 'ask-landed',
+        message: 'answer',
+      })
+      expect(landed.details.outcome).toBe('replied')
+      const attempts = harness.sendMessage.mock.calls
+        .map(([m]) => String((m as Record<string, unknown>).content))
+        .filter(text => text.includes('never landed'))
+      expect(attempts).toHaveLength(3)
+    } finally { await harness.eventHandlers.session_shutdown({}, {}) }
   })
 
   it('delivers a tell without the reply line and without registering it', async () => {

@@ -589,7 +589,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         await deliverPeerFrame(ask, { heading: 'Message from peer' })
         return
       }
-      await deliverPeerFrame(ask, { heading })
+      // A frame that never landed opened no edge: nothing was read, so nothing
+      // is registered to answer and no wait is woken for an unreadable question.
+      if (!await deliverPeerFrame(ask, { heading })) return
       pending.set(ask.message_id, { from_run_id: ask.from_run_id, message_id: ask.message_id })
       interruptWaitsForAsk(ask)
     }
@@ -611,37 +613,50 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * act on: the sub-agent path leaves the frame queued and the host path
      * parks it for redelivery, and the loss reports under the deliver
      * operation. A frame the session already surfaced is dropped, and an
-     * attempt budget stops a frame that never confirms from looping. */
-    function deliverPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions): Promise<void> {
+     * attempt budget stops a frame that never confirms from looping.
+     *
+     * Resolves true when the frame landed in this attempt, false when it was
+     * dropped without a send. */
+    function deliverPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions): Promise<boolean> {
       const id = ask.message_id
       // The broker stamps an id on every row it queues, so a row without one was
       // hand-queued and cannot be told apart from its own redelivery. It is sent
       // once and never retried, which is the only shape that cannot loop.
       if (id === '') {
         sendPeerFrame(ask, options)
-        return Promise.resolve()
+        return Promise.resolve(true)
       }
       const frame = peerFrame(id)
-      if (frame.settled) return Promise.resolve()
+      if (frame.settled) return Promise.resolve(false)
       if (frame.attempts >= MAX_PEER_FRAME_ATTEMPTS) {
         frame.settled = true
         reportPeerFailure('deliver', new Error(`message ${id} was never confirmed after ${frame.attempts} attempts`))
-        return Promise.resolve()
+        return Promise.resolve(false)
       }
-      return new Promise<void>((resolve, reject) => {
+      return new Promise<boolean>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined
         const settle = () => {
           clearTimeout(timer)
           frame.waiting = frame.waiting.filter(waiting => waiting !== settle)
           // A delivered frame ends the delivery-failure episode, so a failure
           // after healthy delivery reports again instead of staying latched.
           clearPeerFailure('deliver')
-          resolve()
+          resolve(true)
         }
-        const timer = setTimeout(() => {
+        const expire = () => {
+          // A steered frame lands when the turn in flight reaches its next
+          // boundary, so a session with a run in flight cannot confirm inside
+          // any window this extension chooses. Waiting again spends no attempt:
+          // only an idle session that lands nothing is a lost frame.
+          if (sessionCtx?.isIdle() === false) return arm()
           frame.waiting = frame.waiting.filter(waiting => waiting !== settle)
           reject(new Error('delivery not confirmed'))
-        }, peerDeliveryConfirmTimeoutMs)
-        timer.unref?.()
+        }
+        const arm = () => {
+          timer = setTimeout(expire, peerDeliveryConfirmTimeoutMs)
+          timer.unref?.()
+        }
+        arm()
         frame.attempts++
         frame.waiting.push(settle)
         sendPeerFrame(ask, options, id)
