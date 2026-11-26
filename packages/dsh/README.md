@@ -70,6 +70,8 @@ optional; omitted, Avenor's own defaults decide.
 | `model` | Model id the backend understands (`dsh` takes `provider/model`) |
 | `agent` | Avenor agent profile |
 | `rosterFile` / `rosterEntry` | A roster map and the entry that supplies backend, agent, and model together |
+| `messaging` | Spawn each child as a messaging child of the harness (default off) |
+| `parentRunId` | The run id a messaging child addresses (default `supervisor`) |
 
 ```yaml
 - id: avenor-delegation
@@ -77,6 +79,27 @@ optional; omitted, Avenor's own defaults decide.
   config:
     model: grace/qwen
 ```
+
+## Messaging
+
+With `messaging: true`, every delegated child is spawned as a messaging child of
+the `supervisor` run, so it can address this harness back. The plugin registers
+`avenor_message` and `avenor_peers`, bound to the supervisor's control client:
+the six message actions and the peer listing are core's router, not a copy.
+
+```yaml
+- id: avenor-delegation
+  name: '@dougbots/dsh-avenor'
+  config:
+    messaging: true
+```
+
+**What is not wired: the inbound receive loop.** A child's tell or ask is
+recorded by the broker, but the plugin does not poll `message_receive` yet, so
+nothing delivers it into the agent and an ask sits unanswered. Everything the
+harness *sends* works; everything it must *receive* does not. Wiring it needs
+the receive loop plus ask-claim bookkeeping, and it needs a live broker to
+verify — guessing at that path would ship a silent message sink.
 
 ## Install (local bundle)
 
