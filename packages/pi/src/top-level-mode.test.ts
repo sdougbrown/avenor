@@ -788,3 +788,45 @@ test('an unconfirmed peer frame is retried a bounded number of times, then repor
     expect(bodies.filter(text => text.includes('never confirmed'))).toHaveLength(3)
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })
+
+test('a frame that names no message id reports its loss instead of vanishing', async () => {
+  // The broker stamps an id on every row it queues, so this shape is
+  // hand-queued: nothing links a redelivery to the send, so it is sent once. A
+  // send that never lands must still be visible as a loss.
+  const b = broker()
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { messageTool },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test', peerDeliveryConfirmTimeoutMs: 20 },
+      sendMessage: () => {},
+    })
+    b.inbox.push({ type: 'agent_message', payload: { from_run_id: 'claude-peer', message: 'no id at all' } })
+    await waitFor(() => h!.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver'))
+    expect(h.sendMessage.mock.calls).toHaveLength(1)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
+
+test('a run that never reaches a turn boundary does not hold the poll loop open', async () => {
+  // The confirmation window waits again while a run is in flight, but only so
+  // many times: a session that never goes idle must not block every later
+  // message behind one frame. Past the ceiling the attempt gives up and the
+  // queue's own budget takes over.
+  const b = broker()
+  let h: Awaited<ReturnType<typeof startExtensionHarness>> | undefined
+  try {
+    h = await startExtensionHarness({
+      deps: { messageTool },
+      extOptions: { topLevelBrokerUrl: 'https://broker.test', peerDeliveryConfirmTimeoutMs: 20 },
+      isIdle: () => false,
+      sendMessage: () => {},
+    })
+    b.inbox.push({ type: 'agent_message', payload: { id: 'tell-busy', from_run_id: 'claude-peer', message: 'held by a stuck run' } })
+    // Without the ceiling this frame is still waiting on its first attempt: the
+    // session never goes idle, so no boundary ever lands it.
+    await waitFor(() => h!.sendMessage.mock.calls.length === 3, scaleMs(8000))
+    expect(h.emitted.some(([channel, payload]) =>
+      channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver')).toBe(true)
+  } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
+})
