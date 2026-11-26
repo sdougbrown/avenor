@@ -15,12 +15,32 @@ export type ContentBlock =
 
 export type SubagentStopReason = 'completed' | 'aborted' | 'error' | 'max-tokens' | 'refusal'
 
+/** A user-role message a plugin can inject into an agent's inbox. */
+export interface UserMessageLike {
+  readonly id: string
+  readonly role: 'user'
+  readonly content: readonly ContentBlock[]
+  readonly source: { readonly kind: 'user' }
+}
+
+/**
+ * The agent that started the delegation. It owns the permission decision:
+ * `inject` reaches it mid-turn, `followup` starts a turn when it is idle.
+ */
+export interface ParentAgent {
+  readonly status: 'idle' | 'running'
+  inject(message: UserMessageLike): void
+  followup(message: UserMessageLike): void
+}
+
 export interface SubagentStartRequest {
   readonly prompt: readonly ContentBlock[]
   readonly cwd?: string
   readonly label?: string
   /** Cancellation signal from the spawning tool call. */
   readonly signal: AbortSignal
+  /** The spawning agent; the child's permission decisions go to it. */
+  readonly parent: ParentAgent
 }
 
 export interface SubagentResult {
@@ -61,5 +81,8 @@ export const NO_START_CAPABILITIES: SubagentCapabilities = Object.freeze({
 export interface HostContext {
   subagents: {
     registerProvider(provider: SubagentProvider): () => void
+  }
+  tools: {
+    register(definition: unknown): () => void
   }
 }

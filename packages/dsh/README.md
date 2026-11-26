@@ -30,6 +30,27 @@ requires. Disposal after settlement is a no-op: killing a finished run makes
 Avenor append a second `session.end` (`cancelled`, exit 130) after the real
 `end_turn`, so a successful run looks stopped in the event log.
 
+### Permissions go to the orchestrator
+
+A blocked run is its own outcome, not a failure: core's `result` returns early
+while the run is `waiting`, so the seam reports a pending request through
+`onPending`, polls until the decision clears it, and keeps waiting. The provider
+then hands the request to the agent that spawned the child:
+
+- parent `running` → `parent.inject(...)`, so the decision lands in the current
+  turn;
+- parent `idle` → `parent.followup(...)`, which wakes it with a new turn. An
+  unanswered request would otherwise stall the run until Avenor's timeout.
+
+The notice carries the run id, Avenor's question, and the option ids, and the
+plugin registers `avenor_answer_permission` (core's `answerPermissionTool`) so
+the orchestrator can decide. Nothing here asks the person looking at the
+harness: `registerPendingInteraction` and a composer card would be the wrong
+mechanism for a delegation decision.
+
+At most one notice is sent per request id. If the run replaces its pending
+request, the replacement gets its own notice.
+
 The provider declares no `depthLimit` capability, so DSH refuses to enforce a
 numeric recursion budget itself. The tool row must pass
 `maxDepth: provider-managed`, which makes the provider — Avenor's own nesting
@@ -66,22 +87,20 @@ request.
 3. **No streaming.** `SubagentProvider.start()` returns a terminal promise only,
    so the run panel cannot show live progress from here. Live output needs a
    `ctx.jobs`-backed tool path, which is the next piece, not this one.
-4. **Permissions belong to the orchestrator, not the human.** Avenor's design is
-   that the parent agent answers a child's permission request, the way
-   `packages/pi/src/index.ts` does: the pending request is surfaced into the
-   parent's context and the parent calls `avenor_answer_permission`. DSH has no
-   seam that carries an external child's request into that child's own session,
-   but the provider does get `request.parent: Agent`, so the plugin can
-   `parent.inject()` the pending request (and `followup()` when the parent's turn
-   has already ended) and register the answer tool. That is a Host-side
-   capability, not a client card — `registerPendingInteraction` would be the
-   wrong mechanism, since it asks the person looking at the harness.
-   Unanswered requests still stall the run, so the plugin also needs a default
-   policy for the unattended case.
-5. **Types are mirrored.** `src/types.ts` restates the subagent contract instead
-   of importing `@deepseek-ai/dsh-subagent`, because a bundle must not depend on
-   packages the installed Harness provides. Promoting this means switching to the
-   real types and deleting the mirror.
+4. **What if the orchestrator never answers?** Permissions now reach the parent
+   (see above), but a wake-up turn is not a guarantee: the parent may be gone,
+   may decline to answer, or may itself be waiting on something. Avenor's
+   `--permission-handler` is the unattended answer; the plugin has no config for
+   it yet, so today a still-unanswered request stalls the run until Avenor's
+   timeout. A deny-by-default deadline is the missing piece.
+5. **Contracts are mirrored.** `src/types.ts` restates the subagent contract
+   instead of importing `@deepseek-ai/dsh-subagent`, and
+   `src/answer-tool.ts` hand-builds the tool definition that `defineTool` would
+   normally compile. Both mirror the running Harness because a bundle cannot
+   import DSH's own packages: the loader resolves shipped packages for *rows*,
+   not for a plugin's imports. A live run has not yet exercised the hand-built
+   definition, so treat `avenor_answer_permission` appearing in a session's tool
+   list as the check that it is accepted.
 
 ## Layout
 

@@ -7,30 +7,45 @@ import {
   type AvenorSeam,
   type CoreTools,
 } from './provider.js'
-import type { SubagentProvider, SubagentStartRequest } from './types.js'
+import { permissionNotice, type PendingPermission } from './permission.js'
 import { diagnosticFor, stopReasonFor, toSubagentResult, type AvenorTerminal } from './stop-reason.js'
+import type { SubagentProvider, SubagentStartRequest, UserMessageLike } from './types.js'
 
 function terminal(overrides: Partial<AvenorTerminal> = {}): AvenorTerminal {
   return { runId: 'run-1', status: 'done', ready: true, output: 'finished', ...overrides }
+}
+
+function pending(overrides: Partial<PendingPermission> = {}): PendingPermission {
+  return {
+    requestId: 'req-1',
+    description: 'run `rm -rf build`',
+    options: [
+      { optionId: 'allow_once', label: 'Allow once', kind: 'allow' },
+      { optionId: 'deny', label: 'Deny', kind: 'deny' },
+    ],
+    ...overrides,
+  }
 }
 
 interface FakeSeam {
   readonly seam: AvenorSeam
   readonly calls: { spawn: number; cancel: number }
   readonly requests: Array<{ prompt: string; cwd?: string; label?: string }>
-  settle(value: AvenorTerminal): void
+  readonly notify: (runId: string, permission: PendingPermission) => void
+  readonly settle: (value: AvenorTerminal) => void
 }
 
-/** A seam whose run settles only when the test says so. */
 function fakeSeam(): FakeSeam {
   const calls = { spawn: 0, cancel: 0 }
   const requests: Array<{ prompt: string; cwd?: string; label?: string }> = []
-  let settle = (_value: AvenorTerminal): void => {}
+  let notify: (runId: string, permission: PendingPermission) => void = () => {}
+  let settle: (value: AvenorTerminal) => void = () => {}
 
   const seam: AvenorSeam = {
-    async spawn(request) {
+    async spawn(request, onPending) {
       calls.spawn += 1
       requests.push(request)
+      notify = onPending
       const done = new Promise<AvenorTerminal>((resolve) => {
         settle = resolve
       })
@@ -45,7 +60,27 @@ function fakeSeam(): FakeSeam {
     },
   }
 
-  return { seam, calls, requests, settle: (value) => settle(value) }
+  return {
+    seam,
+    calls,
+    requests,
+    notify: (runId, permission) => notify(runId, permission),
+    settle: (value) => settle(value),
+  }
+}
+
+function fakeParent(status: 'idle' | 'running' = 'running') {
+  const injected: UserMessageLike[] = []
+  const followed: UserMessageLike[] = []
+  return {
+    injected,
+    followed,
+    parent: {
+      status,
+      inject: (message: UserMessageLike) => injected.push(message),
+      followup: (message: UserMessageLike) => followed.push(message),
+    },
+  }
 }
 
 /** `start` is optional on the seam's provider shape; this provider always has it. */
@@ -58,8 +93,61 @@ function startRequest(prompt: string, extra: { cwd?: string; label?: string } = 
   return {
     prompt: [{ type: 'text' as const, text: prompt }],
     signal: new AbortController().signal,
+    parent: fakeParent().parent,
     ...extra,
   }
+}
+
+interface ScriptedResult {
+  status: string
+  ready: boolean
+  output?: string
+  stop_reason?: string
+  timed_out?: boolean
+  pending_permission?: {
+    request_id?: string
+    description?: string
+    options?: Array<{ option_id?: string; label?: string; kind?: string }>
+  }
+}
+
+function scriptedTools(script: ScriptedResult[]) {
+  const calls = { spawn: 0, kill: 0 }
+  const seen: Array<{ runId: string; wait: boolean }> = []
+  let index = 0
+  const tools: CoreTools = {
+    async spawn() {
+      calls.spawn += 1
+      return { run_id: 'run-9' }
+    },
+    async result(request) {
+      seen.push(request)
+      const value = script[Math.min(index, script.length - 1)]
+      index += 1
+      return value
+    },
+    async kill() {
+      calls.kill += 1
+      return { killed: true }
+    },
+  }
+  return { tools, calls, seen }
+}
+
+function hangingTools() {
+  const calls = { spawn: 0, kill: 0 }
+  const tools: CoreTools = {
+    async spawn() {
+      calls.spawn += 1
+      return { run_id: 'run-9' }
+    },
+    result: () => new Promise<never>(() => {}),
+    async kill() {
+      calls.kill += 1
+      return { killed: true }
+    },
+  }
+  return { tools, calls }
 }
 
 describe('promptText', () => {
@@ -111,6 +199,17 @@ describe('stop reason mapping', () => {
   })
 })
 
+describe('permission notice', () => {
+  it('names the run, the question, and every option id', () => {
+    const text = permissionNotice('run-1', pending())
+    expect(text).toContain('run-1')
+    expect(text).toContain('rm -rf build')
+    expect(text).toContain('allow_once')
+    expect(text).toContain('deny')
+    expect(text).toContain('avenor_answer_permission')
+  })
+})
+
 describe('avenor subagent provider', () => {
   it('describes itself as an external, non-inheriting backend', () => {
     const provider = createAvenorProvider(fakeSeam().seam)
@@ -126,8 +225,7 @@ describe('avenor subagent provider', () => {
 
   it('starts one run and forwards prompt, cwd, and label', async () => {
     const fake = fakeSeam()
-    const run = await startRun(
-      createAvenorProvider(fake.seam),
+    const run = await startRun(createAvenorProvider(fake.seam), 
       startRequest('do the thing', { cwd: '/tmp/work', label: 'thing' }),
     )
     expect(run.id).toBe('run-1')
@@ -143,6 +241,35 @@ describe('avenor subagent provider', () => {
     expect(result.output).toEqual([{ type: 'text', text: 'answer' }])
   })
 
+  it('injects a pending permission into a running parent', async () => {
+    const fake = fakeSeam()
+    const parent = fakeParent('running')
+    const provider = createAvenorProvider(fake.seam)
+    await startRun(provider, { ...startRequest('work'), parent: parent.parent })
+
+    fake.notify('run-1', pending())
+
+    expect(parent.followed).toHaveLength(0)
+    expect(parent.injected).toHaveLength(1)
+    const text = parent.injected[0].content[0]
+    expect(text.type).toBe('text')
+    expect((text as { text: string }).text).toContain('run-1')
+    expect((text as { text: string }).text).toContain('allow_once')
+  })
+
+  it('wakes an idle parent with a follow-up turn', async () => {
+    const fake = fakeSeam()
+    const parent = fakeParent('idle')
+    const provider = createAvenorProvider(fake.seam)
+    await startRun(provider, { ...startRequest('work'), parent: parent.parent })
+
+    fake.notify('run-1', pending())
+
+    expect(parent.injected).toHaveLength(0)
+    expect(parent.followed).toHaveLength(1)
+    expect((parent.followed[0].content[0] as { text: string }).text).toContain('run-1')
+  })
+
   it('cancels the run on abort and again on dispose', async () => {
     const fake = fakeSeam()
     const provider = createAvenorProvider(fake.seam)
@@ -150,6 +277,7 @@ describe('avenor subagent provider', () => {
     const run = await startRun(provider, {
       prompt: [{ type: 'text', text: 'work' }],
       signal: controller.signal,
+      parent: fakeParent().parent,
     })
 
     controller.abort()
@@ -165,68 +293,41 @@ describe('avenor subagent provider', () => {
         throw new Error('avenor binary not found')
       },
     }
-    await expect(startRun(createAvenorProvider(seam), startRequest('work'))).rejects.toThrow(
-      'avenor binary not found',
-    )
+    const provider = createAvenorProvider(seam)
+    if (!provider.start) throw new Error('provider has no start()')
+    await expect(provider.start(startRequest('work'))).rejects.toThrow('avenor binary not found')
   })
 })
 
 describe('core seam', () => {
-  interface FakeTools {
-    readonly tools: CoreTools
-    readonly calls: { spawn: number; kill: number }
-    settle(value: {
-      status: string
-      ready: boolean
-      stop_reason?: string
-      output?: string
-      timed_out?: boolean
-    }): void
-  }
-
-  function fakeTools(overrides: Partial<CoreTools> = {}): FakeTools {
-    const calls = { spawn: 0, kill: 0 }
-    let settle: FakeTools['settle'] = () => {}
-    const tools: CoreTools = {
-      async spawn() {
-        calls.spawn += 1
-        return { run_id: 'run-9' }
-      },
-      result() {
-        return new Promise((resolve) => {
-          settle = resolve
-        })
-      },
-      async kill() {
-        calls.kill += 1
-        return { killed: true }
-      },
-      ...overrides,
-    }
-    return { tools, calls, settle: (value) => settle(value) }
-  }
-
   it('does not kill a run that already settled', async () => {
-    const fake = fakeTools()
-    const handle = await createCoreSeam({}, fake.tools).spawn({ prompt: 'work' })
-    fake.settle({ status: 'done', ready: true, output: 'ok' })
+    const fake = scriptedTools([{ status: 'done', ready: true, output: 'ok' }])
+    const handle = await createCoreSeam({ tools: fake.tools, sleep: async () => {} }).spawn(
+      { prompt: 'work' },
+      () => {},
+    )
     await handle.done
     await handle.cancel()
     expect(fake.calls.kill).toBe(0)
   })
 
   it('kills an unsettled run once even when asked twice', async () => {
-    const fake = fakeTools()
-    const handle = await createCoreSeam({}, fake.tools).spawn({ prompt: 'work' })
+    const fake = hangingTools()
+    const handle = await createCoreSeam({ tools: fake.tools, sleep: async () => {} }).spawn(
+      { prompt: 'work' },
+      () => {},
+    )
     await handle.cancel()
     await handle.cancel()
     expect(fake.calls.kill).toBe(1)
   })
 
   it('maps the broker result onto the terminal contract', async () => {
-    const fake = fakeTools()
-    const handle = await createCoreSeam({}, fake.tools).spawn({ prompt: 'work' })
-    fake.settle({ status: 'killed', ready: true, stop_reason: 'user' })
+    const fake = scriptedTools([{ status: 'killed', ready: true, stop_reason: 'user' }])
+    const handle = await createCoreSeam({ tools: fake.tools, sleep: async () => {} }).spawn(
+      { prompt: 'work' },
+      () => {},
+    )
     expect(await handle.done).toEqual({
       runId: 'run-9',
       status: 'killed',
@@ -237,19 +338,81 @@ describe('core seam', () => {
 
   it('forwards the configured selection into the spawn request', async () => {
     const seen: unknown[] = []
-    const fake = fakeTools({
-      async spawn(request) {
-        seen.push(request)
-        return { run_id: 'run-9' }
+    const fake = scriptedTools([{ status: 'done', ready: true }])
+    fake.tools.spawn = async (request) => {
+      seen.push(request)
+      return { run_id: 'run-9' }
+    }
+    await createCoreSeam({
+      selection: { agent: 'codex', model: 'm' },
+      tools: fake.tools,
+      sleep: async () => {},
+    }).spawn({ prompt: 'p', cwd: '/w', label: 'L' }, () => {})
+    expect(seen).toEqual([{ prompt: 'p', dir: '/w', label: 'L', agent: 'codex', model: 'm' }])
+  })
+
+  it('notifies a blocked run once and waits for the decision instead of failing', async () => {
+    const fake = scriptedTools([
+      {
+        status: 'waiting',
+        ready: false,
+        pending_permission: {
+          request_id: 'req-1',
+          description: 'run a command',
+          options: [{ option_id: 'allow_once', label: 'Allow once', kind: 'allow' }],
+        },
+      },
+      {
+        status: 'waiting',
+        ready: false,
+        pending_permission: {
+          request_id: 'req-1',
+          description: 'run a command',
+          options: [{ option_id: 'allow_once', label: 'Allow once', kind: 'allow' }],
+        },
+      },
+      { status: 'running', ready: false },
+      { status: 'done', ready: true, output: 'ok' },
+    ])
+
+    const notices: Array<{ runId: string; permission: PendingPermission }> = []
+    const handle = await createCoreSeam({ tools: fake.tools, sleep: async () => {} }).spawn(
+      { prompt: 'work' },
+      (runId, permission) => notices.push({ runId, permission }),
+    )
+
+    expect(await handle.done).toEqual({ runId: 'run-9', status: 'done', ready: true, output: 'ok' })
+    expect(notices).toHaveLength(1)
+    expect(notices[0].runId).toBe('run-9')
+    expect(notices[0].permission.requestId).toBe('req-1')
+    expect(notices[0].permission.options.map((option) => option.optionId)).toEqual(['allow_once'])
+  })
+
+  it('notifies again when the run replaces its pending request', async () => {
+    const withRequest = (id: string): ScriptedResult => ({
+      status: 'waiting',
+      ready: false,
+      pending_permission: {
+        request_id: id,
+        description: `ask ${id}`,
+        options: [{ option_id: 'deny', label: 'Deny', kind: 'deny' }],
       },
     })
-    await createCoreSeam({ agent: 'codex', model: 'm' }, fake.tools).spawn({
-      prompt: 'p',
-      cwd: '/w',
-      label: 'L',
-    })
-    expect(seen).toEqual([
-      { prompt: 'p', dir: '/w', label: 'L', agent: 'codex', model: 'm' },
+    const fake = scriptedTools([
+      withRequest('req-1'),
+      withRequest('req-1'),
+      withRequest('req-2'),
+      withRequest('req-2'),
+      { status: 'running', ready: false },
+      { status: 'done', ready: true, output: 'ok' },
     ])
+
+    const seen: string[] = []
+    const handle = await createCoreSeam({ tools: fake.tools, sleep: async () => {} }).spawn(
+      { prompt: 'work' },
+      (_runId, permission) => seen.push(permission.requestId),
+    )
+    await handle.done
+    expect(seen).toEqual(['req-1', 'req-2'])
   })
 })
