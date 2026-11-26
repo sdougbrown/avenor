@@ -5794,6 +5794,10 @@ func (w *runtimeFanoutWriter) writeLockedTerminal(ev events.Event, diagnostics *
 				}
 				w.child.permission[k] = v
 			}
+			// A passthrough adapter publishes only the backend's tool call. Lift
+			// the flat summary before anything reads the map, so a consumer is
+			// never asked to decide on a request it cannot name.
+			derivePermissionDetail(w.child.permission)
 			// Stamp the working directory so permission resolvers know the
 			// context the command runs in.
 			if w.child.dir != "" {
