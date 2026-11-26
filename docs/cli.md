@@ -661,7 +661,7 @@ avenor await [flags] <run-id|runtime-id|label>
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--socket` | (none) | Control socket path; the bind coordinates derive it for a configured conversation, and with neither, `avenor await` scans `~/.avenor/sockets` |
+| `--socket` | `AVENOR_SOCKET` | Control socket path; the bind coordinates derive it for a configured conversation, and with neither, `avenor await` scans `~/.avenor/sockets` |
 | `--bind-host` | `AVENOR_BIND_HOST` | Native host of the configured conversation; with `--bind-session`, derives the conversation's supervisor socket |
 | `--bind-session` | `AVENOR_BIND_SESSION` | Native session ID of the configured conversation; with `--bind-host`, derives the conversation's supervisor socket |
 | `--until` | `attention` | Wait target: `attention` (stop at `pending_permission`) or `done` (continue to terminal state) |
@@ -669,11 +669,12 @@ avenor await [flags] <run-id|runtime-id|label>
 | `--print-output` | `false` | Print the result payload after `---` |
 | `--format` | `plain` | Output format: `plain` or `json` |
 
-A conversation that names both bind coordinates dials the supervisor the
-conversation's feed serves, so a registered command waits on its own children
-without a socket in argv. Naming one coordinate without the other exits 2
-before any dial. The coordinates derive the socket path only: `await` never
-reads the conversation's binding, and its dial stays credential-free.
+A conversation that names both bind coordinates — flags or their environment
+defaults — dials the supervisor the conversation's feed serves, so a registered
+command waits on its own children without a socket in argv. Naming one
+coordinate without the other exits 2 before any dial. The coordinates derive
+the socket path only: `await` never reads the conversation's binding, and its
+dial stays credential-free.
 
 ### Exit codes
 

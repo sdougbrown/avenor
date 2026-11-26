@@ -53,18 +53,16 @@ func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writ
 // coordinates names no session to serve, so the mixed forms are refused before
 // any dial; an unconfigured await keeps its socket or scan path.
 func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error) {
-	socket, host, session := inv.Flags["socket"], inv.Flags["bind-host"], inv.Flags["bind-session"]
-	if host != "" || session != "" {
-		if host == "" || session == "" {
-			return awaitOptions{}, usageErrorf("avenor await: --bind-host and --bind-session (or %s and %s) are required together; --socket (or %s) names a supervisor without a conversation", envBindHost, envBindSession, envControlSocket)
-		}
-		if socket == "" {
-			derived, err := supervisor.ConversationSocket(host, session)
-			if err != nil {
-				return awaitOptions{}, err
-			}
-			socket = derived
-		}
+	coords, requested, err := boundOptionalCoordinates(inv, "avenor await")
+	if err != nil {
+		return awaitOptions{}, err
+	}
+	socket := coords.socket
+	if !requested {
+		// no conversation configured: an explicit --socket still names the
+		// supervisor to dial, and await takes no socket default from the
+		// environment — it scans ~/.avenor/sockets instead.
+		socket = inv.Flags["socket"]
 	}
 	opts := awaitOptions{
 		socket:      socket,

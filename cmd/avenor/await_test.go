@@ -720,6 +720,9 @@ func TestAwaitTimeoutAndConnectionLoss(t *testing.T) {
 }
 
 func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
+	// Hermetic against an ambient conversation: the scan-path cases below must
+	// resolve through the scratch roots, not the developer's own binding.
+	conversationScratch(t)
 	t.Run("usage", func(t *testing.T) {
 		// No target is a genuine parser error, not a discovery miss.
 		var stdout, stderr bytes.Buffer
@@ -763,6 +766,7 @@ func TestAwaitUsageNotFoundAndDeadSocket(t *testing.T) {
 }
 
 func TestAwaitTimeoutDoesNotWaitForClientCallDeadline(t *testing.T) {
+	conversationScratch(t)
 	// A listener that accepts but never replies verifies --timeout bounds RPC
 	// attachment too, rather than inheriting client.Call's 30-second deadline.
 	path := filepath.Join(t.TempDir(), "silent.sock")
@@ -800,6 +804,7 @@ func TestAwaitTimeoutDoesNotWaitForClientCallDeadline(t *testing.T) {
 }
 
 func TestAwaitDiscoveryTimeout(t *testing.T) {
+	conversationScratch(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	socketsDir := filepath.Join(home, ".avenor", "sockets")
@@ -909,6 +914,7 @@ func TestAwaitDiscoveryExplicitSocketBypassesScan(t *testing.T) {
 // moving the conversation sockets root under $AVENOR_HOME does not hide the
 // supervisors already published under ~/.avenor/sockets.
 func TestAwaitDiscoveryKeepsTheHomeRootWhenAVENORHomeMoves(t *testing.T) {
+	conversationScratch(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("AVENOR_HOME", t.TempDir())
@@ -928,6 +934,7 @@ func TestAwaitDiscoveryKeepsTheHomeRootWhenAVENORHomeMoves(t *testing.T) {
 // supervisor the feed started under $AVENOR_HOME/sockets is discoverable, so a
 // run it serves resolves by target like any other.
 func TestAwaitDiscoveryScansTheConversationSocketsRoot(t *testing.T) {
+	conversationScratch(t)
 	root := t.TempDir()
 	t.Setenv("AVENOR_HOME", root)
 	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
@@ -943,6 +950,7 @@ func TestAwaitDiscoveryScansTheConversationSocketsRoot(t *testing.T) {
 }
 
 func TestAwaitDiscoverySkipsDeadSockets(t *testing.T) {
+	conversationScratch(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if err := os.MkdirAll(filepath.Join(home, ".avenor", "sockets"), 0o755); err != nil {
@@ -967,6 +975,7 @@ func TestAwaitDiscoverySkipsDeadSockets(t *testing.T) {
 }
 
 func TestAwaitDiscoveryExactRunIDPrecedesLabel(t *testing.T) {
+	conversationScratch(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	exact := newAwaitSocketServer(t, []map[string]any{{"runtime_id": "rt_1", "run_id": "run_1", "label": "other", "status": "idle", "phase": "done"}}, nil)
@@ -991,6 +1000,7 @@ func TestAwaitDiscoveryExactRunIDPrecedesLabel(t *testing.T) {
 }
 
 func TestAwaitDiscoveryLabelCollisionChoosesNewestStartedAt(t *testing.T) {
+	conversationScratch(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	winner := newAwaitSocketServer(t, []map[string]any{{"runtime_id": "rt_1", "run_id": "run_new", "label": "shared", "started_at": float64(1704153600000), "status": "idle", "phase": "done"}}, nil)
@@ -1059,6 +1069,35 @@ func TestAwaitDerivesSocketFromBindCoordinates(t *testing.T) {
 	_ = root
 }
 
+// TestAwaitDerivesSocketFromBindEnv proves the coordinates' environment
+// defaults reach await the same way the flags do: AVENOR_BIND_HOST and
+// AVENOR_BIND_SESSION derive the conversation's supervisor socket without any
+// flag, so a host session awaits its own children with no argv at all.
+func TestAwaitDerivesSocketFromBindEnv(t *testing.T) {
+	conversationScratch(t)
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	derived := derivedSocketFor(t, "poo", "ses_configured")
+	if err := os.MkdirAll(filepath.Dir(derived), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(server.socket(), derived); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(derived) })
+	// conversationScratch clears the bind variables; set them after so the
+	// configured conversation wins.
+	t.Setenv(envBindHost, "poo")
+	t.Setenv(envBindSession, "ses_configured")
+
+	var stdout, stderr bytes.Buffer
+	if got := awaitRunDeclared([]string{"run_1"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "TURN-DONE rt_1") {
+		t.Fatalf("stdout = %q, want the done transition", stdout.String())
+	}
+}
+
 // TestAwaitRefusesPartialBindCoordinates pins the configuration rule on
 // await: half a conversation names no session to serve, so it refuses before
 // any dial. A socket alone keeps its pre-existing meaning — an explicit
@@ -1067,6 +1106,21 @@ func TestAwaitRefusesPartialBindCoordinates(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	args := []string{"--bind-host", "poo", "run_1"}
 	if got := awaitRunDeclared(args, &stdout, &stderr); got != 2 {
+		t.Fatalf("exit code = %d, want a usage refusal 2 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "required together") {
+		t.Fatalf("stderr = %q, want the required-together refusal", stderr.String())
+	}
+}
+
+// TestAwaitRefusesPartialBindEnv pins the same rule on the environment
+// defaults: half a conversation in AVENOR_BIND_HOST or AVENOR_BIND_SESSION
+// names no session to serve, so the shared refusal fires before any dial.
+func TestAwaitRefusesPartialBindEnv(t *testing.T) {
+	conversationScratch(t)
+	t.Setenv(envBindHost, "poo")
+	var stdout, stderr bytes.Buffer
+	if got := awaitRunDeclared([]string{"run_1"}, &stdout, &stderr); got != 2 {
 		t.Fatalf("exit code = %d, want a usage refusal 2 (stderr %q)", got, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "required together") {
