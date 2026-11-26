@@ -1245,7 +1245,10 @@ describe('AvenorPlugin', () => {
     // tool without parsing the peer's text, and names the id the record
     // carried so the answer targets the ask the feed delivered.
     expect(delivered).toContain("this host's avenor_message tool")
-    expect(delivered).toContain('reply_to "m-1"')
+    expect(delivered).toContain('action "reply", reply_to "m-1"')
+    // The note offers call_cli as a fallback for poo sessions; the preface
+    // must steer this host away from it.
+    expect(delivered).toContain("the note's call_cli fallback does not apply to this conversation")
     // The id is a feed record field, so the trusted frame quotes it as a JSON
     // string literal: a crafted id cannot break out of the instruction.
     expect(delivered).toContain('message id "m-1"')
