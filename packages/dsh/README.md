@@ -112,6 +112,13 @@ child finished has nowhere to go.
 not will refuse the bind, and the plugin reports that as a delivery error rather
 than silently receiving nothing.
 
+**Addressing the harness.** A session's inbox is its *bound run*, not the
+`supervisor` run that appears in the peer list under the harness's label. A
+child that resolves the harness by that label and sends to `supervisor` writes
+to an inbox nothing polls; the bound run id is the address that delivers, and a
+spawned child gets it as `parent_run_id` without being told. Publishing the
+bound run's harness name so a peer search finds it naturally is the follow-up.
+
 ## Install (local bundle)
 
 From a DSH session:
