@@ -107,7 +107,7 @@ func TestMessageManifestStdinDelivery(t *testing.T) {
 	// callTool runs one manifest call and reports failures as an error, so a
 	// goroutine caller can forward it and the main goroutine does the failing.
 	callTool := func(args map[string]any) (string, bool, error) {
-		encoded, err := json.Marshal(map[string]any{"name": "avenor_message", "args": args})
+		encoded, err := json.Marshal(map[string]any{"command": "avenor_message", "args": args})
 		if err != nil {
 			return "", false, fmt.Errorf("encode %v: %w", args, err)
 		}

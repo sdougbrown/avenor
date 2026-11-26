@@ -15,7 +15,7 @@ require (
 	github.com/reeflective/readline v1.3.0
 	github.com/sdougbrown/cli-contract v0.10.0
 	github.com/sdougbrown/cli-registry v0.8.0
-	github.com/sdougbrown/poo v0.11.2
+	github.com/sdougbrown/poo v0.13.0
 	github.com/umpire-tools/umpire-go v0.1.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
@@ -59,4 +59,4 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 )
 
-replace github.com/reeflective/readline => github.com/sdougbrown/readline v1.3.0-poo.7
+replace github.com/reeflective/readline => github.com/sdougbrown/readline v1.3.0-poo.8

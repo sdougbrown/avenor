@@ -133,19 +133,18 @@ func checkMessaging(ctx context.Context, opts runtime.StartOptions, info protoco
 	if opts.Broker == nil || opts.RuntimeID == "" {
 		return &messagingFailure{reason: "broker identity was not provisioned"}
 	}
-	// The registry call tool goes by call_cli or call_tool across poo
-	// builds, and a session whose registry entries poo elevated offers
-	// avenor_message directly instead of either name; any of the three says
-	// the session can run the messaging entries the manifests carry.
+	// A session offers avenor_message directly when poo elevated the
+	// registry entries, and call_cli when it kept the call tool; either
+	// says the session can run the messaging entries the manifests carry.
 	found := false
 	for _, tool := range info.Tools {
-		if tool.Name == "avenor_message" || tool.Name == "call_cli" || tool.Name == "call_tool" {
+		if tool.Name == "avenor_message" || tool.Name == "call_cli" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		return &messagingFailure{reason: "the session offered neither avenor_message, call_cli, nor call_tool"}
+		return &messagingFailure{reason: "the session offered neither avenor_message nor call_cli"}
 	}
 	ctx, cancel := context.WithTimeout(ctx, messagingPollLimit)
 	defer cancel()

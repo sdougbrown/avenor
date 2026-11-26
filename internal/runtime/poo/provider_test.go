@@ -401,7 +401,7 @@ func TestMessagingAskRealPoo(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint := newFakeEndpoint(t,
-		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_tool", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "tell", "target": "supervisor", "message": "child-tell-marker"}}}}},
+		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "avenor_message", Arguments: map[string]any{"action": "tell", "target": "supervisor", "message": "child-tell-marker"}}}},
 		scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "bash", Arguments: map[string]any{"command": `if [ "${AVENOR_BROKER_TOKEN+x}" = x ]; then echo credential-present; else echo credential-absent; fi`}}}},
 		scriptedTurn{Text: "done"},
 	)
@@ -423,7 +423,7 @@ func TestMessagingAskRealPoo(t *testing.T) {
 				continue
 			}
 			replies++
-			return scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "call_tool", Arguments: map[string]any{"name": "avenor_message", "args": map[string]any{"action": "reply", "reply_to": match[1], "message": "answer"}}}}}, true
+			return scriptedTurn{ToolCalls: []scriptedToolCall{{Name: "avenor_message", Arguments: map[string]any{"action": "reply", "reply_to": match[1], "message": "answer"}}}}, true
 		}
 		return scriptedTurn{}, false
 	}
@@ -564,7 +564,6 @@ func TestMessagingTakeCheck(t *testing.T) {
 	opts := helperStartOptions()
 	opts.Broker, opts.RuntimeID, opts.BrokerToken, opts.MessagingOn = b, "take", token, true
 	info := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_cli"}}}
-	renamed := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "call_tool"}}}
 	direct := protocol.SessionInfo{Tools: []protocol.ToolInfo{{Name: "avenor_message"}}}
 	t.Setenv(helperEnv, "messaging-poll")
 	// Each accepted tool name owns a session that polls the broker once, so
@@ -574,7 +573,6 @@ func TestMessagingTakeCheck(t *testing.T) {
 		info protocol.SessionInfo
 	}{
 		{"registry call tool", info},
-		{"renamed registry call tool", renamed},
 		{"elevated avenor_message", direct},
 	} {
 		baseline := time.Now()
@@ -596,10 +594,9 @@ func TestMessagingTakeCheck(t *testing.T) {
 		failure bool
 	}{
 		{"old poll", opts, info, "no poll", true},
-		{"old poll, renamed tool", opts, renamed, "no poll", true},
 		{"old poll, elevated tool", opts, direct, "no poll", true},
 		{"no poll", func() avruntime.StartOptions { o := opts; o.RuntimeID = "empty"; return o }(), info, "no poll", true},
-		{"no tool", opts, protocol.SessionInfo{}, "neither avenor_message, call_cli, nor call_tool", true},
+		{"no tool", opts, protocol.SessionInfo{}, "neither avenor_message nor call_cli", true},
 		{"missing record", func() avruntime.StartOptions { o := opts; o.RuntimeID = "missing"; return o }(), info, "no run record", false},
 		{"no broker", func() avruntime.StartOptions { o := opts; o.Broker = nil; return o }(), info, "not provisioned", true},
 	} {
