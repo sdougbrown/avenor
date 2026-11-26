@@ -294,7 +294,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions) 
 		p.mu.Unlock()
 		return c, nil
 	}
-	launchCtx, settle := p.launches.Begin(ctx)
+	launchCtx, _, settle := p.launches.Begin(ctx)
 	p.mu.Unlock()
 	defer settle(false)
 

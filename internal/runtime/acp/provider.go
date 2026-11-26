@@ -14,17 +14,13 @@ import (
 	"github.com/sdougbrown/avenor/internal/permission"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/broker"
+	"github.com/sdougbrown/avenor/internal/runtime/launcher"
 	"github.com/sdougbrown/avenor/internal/runtime/warmqueue"
 )
 
 // errProviderClosed is returned by a launch the provider abandoned because
 // Close ran first.
 var errProviderClosed = errors.New("provider is closed")
-
-// launchSettleTimeout bounds how long Close waits for an in-flight launch to
-// return before it finishes on its own. A launch can be stuck in a start that
-// ignores both the caller's context and the provider lifetime.
-const launchSettleTimeout = 2 * time.Second
 
 // sessionCloseTimeout bounds best-effort remote session cleanup when
 // configureSession fails after session/new or session/resume succeeded.
@@ -134,17 +130,10 @@ type Provider struct {
 	// Overridable in tests; nil uses the provider's own launch.
 	startClient func(context.Context, ClientConfig) (*Client, error)
 
-	// closing latches when Close runs. A launch still in flight when Close is
-	// called tears down what it started instead of installing it afterwards.
-	// launching counts those in-flight launches and launchIdle is closed when
-	// the last of them settles.
-	closing    bool
-	launching  int
-	launchIdle chan struct{}
+	closing  bool
+	launches launcher.Pending
 
-	// lifetimeCtx ends when Close runs, so a launch Close abandoned cannot
-	// outlive the provider. The first admitted launch creates it under the same
-	// lock Close latches closing under, so Close can always cancel it.
+	// lifetimeCtx bounds cleanup of uninstalled sessions to the provider lifetime.
 	lifetimeCtx    context.Context
 	lifetimeCancel context.CancelFunc
 
@@ -794,7 +783,6 @@ func (p *Provider) Close() error {
 	}
 	client := p.client
 	hub := p.hub
-	idle := p.launchIdle
 	cancels := make([]context.CancelFunc, 0, len(p.pollCancels))
 	for _, cancel := range p.pollCancels {
 		cancels = append(cancels, cancel)
@@ -817,22 +805,7 @@ func (p *Provider) Close() error {
 	if hub != nil {
 		hub.requestStop()
 	}
-	// A launch still in flight sees the closing flag when it tries to install,
-	// tears down what it started, and returns an error. Wait for that within a
-	// bound, since a launch can ignore both its caller's context and the
-	// provider lifetime and never return.
-	if idle != nil {
-		select {
-		case <-idle:
-		case <-time.After(launchSettleTimeout):
-			// Closing is latched, so no launch is admitted any more and the count
-			// never has to wake Close again: forgetting the idle channel is enough
-			// to keep a later Close from waiting out the bound once more.
-			p.mu.Lock()
-			p.launchIdle = nil
-			p.mu.Unlock()
-		}
-	}
+	p.launches.CancelAndWait()
 	if p.Queue != nil {
 		p.Queue.Discard()
 	}
@@ -847,58 +820,6 @@ func (p *Provider) Close() error {
 		<-hub.pumpDone
 	}
 	return err
-}
-
-// beginLaunch admits one launch attempt, rejecting it once Close has run. It
-// also creates the provider lifetime if this is the first attempt, inside the
-// same critical section, so a launch admitted here always has a lifetime Close
-// cancels instead of building one Close has already passed.
-func (p *Provider) beginLaunch() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closing {
-		return fmt.Errorf("%s: %w", p.backendID, errProviderClosed)
-	}
-	if p.lifetimeCtx == nil {
-		p.lifetimeCtx, p.lifetimeCancel = context.WithCancel(context.Background())
-	}
-	if p.launching == 0 {
-		p.launchIdle = make(chan struct{})
-	}
-	p.launching++
-	return nil
-}
-
-// settleLaunch records that a counted launch returned, waking Close once the
-// last one has.
-func (p *Provider) settleLaunch() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.launching > 0 {
-		p.launching--
-	}
-	if p.launching > 0 || p.launchIdle == nil {
-		return
-	}
-	close(p.launchIdle)
-	p.launchIdle = nil
-}
-
-// launchContext derives the context for one launch attempt admitted by
-// beginLaunch. It ends when the caller's context ends or when Close cancels the
-// provider lifetime, so a launch nobody is waiting for cannot leave its child
-// behind. keepAlive detaches the attempt from the lifetime once it has handed
-// its client over, which lets Close close that client normally; abandon also
-// ends the context, killing a process that is still starting. The lifetime is
-// created at admission, so a launch cannot outrun Close by building its own.
-func (p *Provider) launchContext(ctx context.Context) (launchCtx context.Context, keepAlive, abandon func()) {
-	p.mu.Lock()
-	lifetime := p.lifetimeCtx
-	p.mu.Unlock()
-
-	launchCtx, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(lifetime, cancel)
-	return launchCtx, func() { stop() }, func() { stop(); cancel() }
 }
 
 // modelInLaunchSpec returns the model a launch should pin into its identity:
@@ -981,25 +902,28 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	p.mu.Lock()
 	client := p.client
 	installedSpec := p.clientLaunch
-	p.mu.Unlock()
 	if client != nil {
+		p.mu.Unlock()
 		if err := p.checkWarmLaunchCompat(opts, spec, installedSpec); err != nil {
 			return nil, nil, err
 		}
 		return client, func() {}, nil
 	}
-	if err := p.beginLaunch(); err != nil {
-		return nil, nil, err
+	if p.closing {
+		p.mu.Unlock()
+		return nil, nil, fmt.Errorf("%s: %w", p.backendID, errProviderClosed)
 	}
-
-	launchCtx, keepAlive, abandon := p.launchContext(ctx)
+	if p.lifetimeCtx == nil {
+		p.lifetimeCtx, p.lifetimeCancel = context.WithCancel(context.Background())
+	}
+	launchCtx, keepAlive, settle := p.launches.Begin(ctx)
+	p.mu.Unlock()
 	handedOff := false
 	defer func() {
 		if handedOff {
 			return
 		}
-		abandon()
-		p.settleLaunch()
+		settle(false)
 	}()
 
 	if opts.ServerURL != "" {
@@ -1076,7 +1000,7 @@ func (p *Provider) ensureClient(ctx context.Context, opts runtime.StartOptions, 
 	// The attempt still counts as in flight, so Close waits for the caller to
 	// finish with the client.
 	handedOff = true
-	return launched, p.settleLaunch, nil
+	return launched, func() { settle(true) }, nil
 }
 
 // launch starts the backend process and completes its handshake.
