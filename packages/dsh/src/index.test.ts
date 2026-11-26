@@ -59,6 +59,9 @@ function fakeRuntime() {
       calls.push(`bind:${sessionId}`)
       return { sessionId, runId: 'bound-1', brokerUrl: 'http://127.0.0.1:1', token: 'tok' }
     },
+    dirFor() {
+      return '/repo'
+    },
     remember(runId, parent) {
       calls.push(`remember:${runId}`)
       parents.set(runId, parent)

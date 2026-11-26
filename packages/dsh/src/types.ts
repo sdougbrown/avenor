@@ -89,4 +89,8 @@ export interface HostContext {
   }
   /** Cordis effect scope: the returned disposer runs when the plugin unloads. */
   effect?(scope: () => (() => void) | void): () => void
+  /** Per-session working directory; names a session's conversation. */
+  workingDirectory?: {
+    get(session: unknown): string
+  }
 }

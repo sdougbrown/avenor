@@ -8,7 +8,7 @@ import {
   type AvenorSeam,
   type AvenorSelection,
 } from './provider.js'
-import type { HostContext } from './types.js'
+import type { HostContext, ParentAgent } from './types.js'
 
 /** Wait for both services this plugin registers into. */
 export const inject = ['subagents', 'tools']
@@ -65,7 +65,7 @@ export function register(
   const answer = deps.answer ?? defaultAnswer
   const makeSeam = deps.makeSeam ?? defaultSeamFactory
   const messaging = config.messaging !== false
-  const runtime = deps.runtime ?? createMessagingRuntime()
+  const runtime = deps.runtime ?? createMessagingRuntime({ dirFor: (parent) => workingDirectoryOf(ctx, parent) })
 
   ctx.subagents.registerProvider(
     createAvenorProvider(makeSeam(selectionOf(config)), messaging ? runtime : undefined),
@@ -74,6 +74,18 @@ export function register(
   ctx.tools.register(messageToolDefinition(runtime))
   ctx.tools.register(peersToolDefinition(runtime))
   return runtime
+}
+
+/** The parent's directory, for naming its conversation; falls back to the host cwd. */
+function workingDirectoryOf(ctx: HostContext, parent: ParentAgent): string | undefined {
+  const service = ctx.workingDirectory
+  if (!service) return process.cwd()
+  try {
+    const dir = service.get(parent.session)
+    return dir === '' ? process.cwd() : dir
+  } catch {
+    return process.cwd()
+  }
 }
 
 export function apply(ctx: HostContext, config: HostConfig = {}, deps: RegisterDeps = {}): void {

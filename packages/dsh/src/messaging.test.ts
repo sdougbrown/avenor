@@ -76,11 +76,31 @@ describe('messaging runtime', () => {
       },
       poll: async () => [],
     })
-    const first = await runtime.bind('sess-1')
+    const first = await runtime.bind('sess-1', { dir: '/repo' })
     const again = await runtime.bind('sess-1')
     expect(binds).toBe(1)
     expect(first.runId).toBe('bound-1')
     expect(again.runId).toBe('bound-1')
+  })
+
+  it('publishes the bound run name once, from the bind seed', async () => {
+    const published: string[] = []
+    let binds = 0
+    const runtime = createMessagingRuntime({
+      bind: async (sessionId) => {
+        binds += 1
+        return bound(sessionId)
+      },
+      publishName: async (bound, dir) => {
+        published.push(`${bound.runId}:${dir}`)
+        return 'dsh-avenor'
+      },
+      poll: async () => [],
+    })
+    await runtime.bind('sess-1', { dir: '/repo' })
+    await runtime.bind('sess-1', { dir: '/repo' })
+    expect(binds).toBe(1)
+    expect(published).toEqual(['bound-1:/repo'])
   })
 
   it('routes a message call as the calling session run', async () => {

@@ -44,7 +44,9 @@ export interface AvenorSeam {
  */
 export interface DelegationTracker {
   /** Bind (or reuse) the calling session's conversation; returns its run id. */
-  bind(sessionId: string): Promise<{ runId: string }>
+  bind(sessionId: string, seed?: { dir?: string }): Promise<{ runId: string }>
+  /** The parent's working directory, the best name seed when the tool omits cwd. */
+  dirFor?(parent: ParentAgent): string | undefined
   remember(runId: string, parent: ParentAgent): void
   forget(runId: string): void
   ensureInbound(sessionId: string): void
@@ -274,7 +276,15 @@ export function createAvenorProvider(
       // supervisor, or its messages would ride an inbox no session reads.
       const sessionId = request.parent.session?.id
       const binding = tracker !== undefined && sessionId !== undefined
-        ? await tracker.bind(sessionId)
+        ? await tracker.bind(sessionId, {
+            // The child's cwd is the parent's unless the caller moved it; when
+            // the tool omits it, ask the tracker for the parent's directory so
+            // the conversation still gets a name.
+            ...(() => {
+              const dir = request.cwd ?? tracker.dirFor?.(request.parent)
+              return dir === undefined ? {} : { dir }
+            })(),
+          })
         : undefined
 
       const handle = await seam.spawn(
