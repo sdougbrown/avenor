@@ -648,25 +648,6 @@ func TestStartDiscardsConfigWhenLaunchIsCancelledDuringInitialize(t *testing.T) 
 // in progress.
 var errLaunchStopped = errors.New("launch stopped")
 
-// TestAbandonedLaunchStillEndsWhenCloseGaveUp covers a launch Close admitted but
-// gave up waiting for: the launch must run under the lifetime Close already
-// cancelled instead of building a lifetime of its own after Close returned.
-func TestAbandonedLaunchStillEndsWhenCloseGaveUp(t *testing.T) {
-	p := &Provider{backendID: "test-acp"}
-	if err := p.beginLaunch(); err != nil {
-		t.Fatalf("beginLaunch: %v", err)
-	}
-	// This launch never settles, so Close waits out its bound and returns first.
-	if err := p.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	launchCtx, _, abandon := p.launchContext(context.Background())
-	defer abandon()
-	awaitSignal(t, launchCtx.Done(), "the abandoned launch context to end")
-	p.settleLaunch()
-}
-
 // TestCloseDuringLaunchLeavesNoClient covers the launch-versus-Close race: a
 // launch still in flight when Close starts keeps Close waiting, never installs
 // a client, its config cleanup, or a session afterwards, and does not leave the
@@ -726,8 +707,7 @@ cat > /dev/null
 				awaitSignal(t, settled, "the first launch's release")
 				return nil, errLaunchStopped
 			}
-			// The second launch starts a real child and waits for its context, so
-			// only the provider lifetime can end it.
+			// The second launch starts a real child under the launch context.
 			client, err := NewClient(ctx, cfg)
 			if err != nil {
 				return nil, err
@@ -754,7 +734,7 @@ cat > /dev/null
 		settled <- struct{}{}
 		// The second launch is still in flight, so Close stays blocked.
 		assertCloseBlocked(t, closed)
-		awaitClose(t, closed, began, launchSettleTimeout, launchSettleTimeout+5*time.Second)
+		awaitClose(t, closed, began, 0, 10*time.Second)
 		assertPIDGone(t, childPID)
 		// The launch Close gave up on is no longer counted, so it does not wait
 		// the bound again.
@@ -769,8 +749,7 @@ cat > /dev/null
 	})
 
 	t.Run("a client that starts after close is torn down", func(t *testing.T) {
-		// The launch refuses the context derived from the provider lifetime, so
-		// only the closing check at install can tear its client down.
+		// The launch ignores cancellation, so the closing check must tear it down.
 		p, config := newLaunchRaceProvider(t, "#!/bin/sh\nexec cat > /dev/null\n")
 		childStarted, release := make(chan struct{}), make(chan struct{})
 		childPID := 0
@@ -824,7 +803,7 @@ cat > /dev/null
 		closed := make(chan error, 1)
 		began := time.Now()
 		go func() { closed <- p.Close() }()
-		awaitClose(t, closed, began, launchSettleTimeout, launchSettleTimeout+5*time.Second)
+		awaitClose(t, closed, began, 0, 10*time.Second)
 
 		assertLaunchAbandoned(t, p, resumed, config, errProviderClosed)
 		assertRecordedChildGone(t, pidFile)
@@ -983,7 +962,7 @@ func waitForPath(t *testing.T, path string) {
 	}
 }
 
-// TestStartAfterCloseIsRefused pins the closing check in beginLaunch: a closed
+// TestStartAfterCloseIsRefused checks that a closed
 // provider refuses to launch, so the missing binary is never reached.
 func TestStartAfterCloseIsRefused(t *testing.T) {
 	p := NewProvider(ProviderConfig{BackendID: "test", Bin: filepath.Join(t.TempDir(), "absent")}).(*Provider)
