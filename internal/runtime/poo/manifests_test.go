@@ -375,16 +375,38 @@ func TestFeedInstructionMatchesManifest(t *testing.T) {
 	if err = json.Unmarshal([]byte(msg.Text[start:end+1]), &call); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := catalog.Plan(call.Command, call.Args)
-	if err != nil {
+	// Both forms the note gives must plan to the same reply: the direct
+	// avenor_message tool takes the entry's arguments unwrapped, and the
+	// call_cli fallback wraps them.
+	planReply := func(name string, args map[string]any) {
+		t.Helper()
+		plan, err := catalog.Plan(name, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(plan.Argv, "\n"); !strings.Contains(got, fmt.Sprintf("--reply-to=%s", "ask-id")) || !strings.Contains(got, "--message-stdin") || strings.Contains(got, "--message=") || !strings.Contains(got, "--action=reply") {
+			t.Fatal(plan.Argv)
+		}
+		if plan.Stdin == nil || *plan.Stdin != "..." {
+			t.Fatalf("stdin = %v, want the reply text", plan.Stdin)
+		}
+	}
+	planReply(call.Command, call.Args)
+	const direct = "call avenor_message with "
+	directStart := strings.Index(msg.Text, direct)
+	if directStart < 0 {
+		t.Fatalf("instruction %q", msg.Text)
+	}
+	directStart += len(direct)
+	directEnd := strings.Index(msg.Text[directStart:], "}.")
+	if directEnd < 0 {
+		t.Fatalf("instruction %q", msg.Text)
+	}
+	var directArgs map[string]any
+	if err = json.Unmarshal([]byte(msg.Text[directStart:directStart+directEnd+1]), &directArgs); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(plan.Argv, "\n"); !strings.Contains(got, fmt.Sprintf("--reply-to=%s", "ask-id")) || !strings.Contains(got, "--message-stdin") || strings.Contains(got, "--message=") || !strings.Contains(got, "--action=reply") {
-		t.Fatal(plan.Argv)
-	}
-	if plan.Stdin == nil || *plan.Stdin != "..." {
-		t.Fatalf("stdin = %v, want the reply text", plan.Stdin)
-	}
+	planReply("avenor_message", directArgs)
 }
 
 // ptr returns a pointer to its argument, for stdin expectations.
