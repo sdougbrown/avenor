@@ -131,7 +131,7 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 | Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
-| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
+| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
 | External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
 | Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
@@ -428,7 +428,7 @@ avenor \
 
 Avenor spawns `fx acp` and talks via ACP over stdio.
 
-**Model selection caveat:** fx reads its provider and model from its own CLI config at spawn time. Passing `--model` to Avenor has no effect on `fx`; use `fx provider` and `fx login` to set it.
+**Model selection:** fx takes its model at process launch, so a run's `--model` rides the launch argv (`fx acp --model <id>`) and the model is part of the launch identity: a warm client started for one model is never reused for another, and changing the model starts a new process. Without `--model`, fx uses the model configured in its own CLI config (`fx provider`, `fx login`); selecting fx's provider is still done through fx's own config.
 
 **Reliability caveat:** fx's ACP server can end a turn by rejecting `session/prompt` with its `InconsistentFinishReason` error instead of a clean stop, especially against local models, even though the reply already streamed. Avenor tolerates that error when the turn streamed message content: it logs a warning and completes the turn, so the session stays usable for a follow-up prompt.
 

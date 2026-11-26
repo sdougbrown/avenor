@@ -30,6 +30,7 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 		SubprocessDiscovery: true,
 		AppendCWDArg:        true,
 		BuildClientEnv:      buildClientEnv,
+		ModelSelection:      true,
 		ConfigureSession: func(ctx context.Context, session *acp.Session, opts runtime.StartOptions) error {
 			return configureSession(ctx, session.Client, session.SessionID, opts)
 		},

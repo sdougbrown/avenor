@@ -68,6 +68,7 @@ func newWithDeps(opts runtime.StartOptions, d deps) runtime.Provider {
 			return buildSessionOpenOptions(d, runID, brokerToken, brokerURL)
 		},
 		ConfigureSession: configureSession,
+		ModelSelection:   true,
 	})
 }
 

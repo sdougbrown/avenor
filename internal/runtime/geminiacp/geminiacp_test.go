@@ -80,4 +80,7 @@ func TestCapabilitiesPinsBackendID(t *testing.T) {
 	if caps.Backend != "gemini-acp" {
 		t.Fatalf("Capabilities.Backend = %q, want gemini-acp", caps.Backend)
 	}
+	if caps.ModelSelection {
+		t.Fatal("Capabilities.ModelSelection = true, want false: gemini reads its model from its own config at spawn time")
+	}
 }

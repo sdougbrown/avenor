@@ -70,6 +70,33 @@ func TestProviderResumeLaunchesWithWrapperFromOpts(t *testing.T) {
 	waitForArgv(t, argvPath, []string{wrapper, "--flag", "fx", "acp"})
 }
 
+// TestLaunchArgvCarriesModel pins the spawn-time model path: a named model
+// rides the launch argv as --model <model>, and an unnamed launch omits it.
+func TestLaunchArgvCarriesModel(t *testing.T) {
+	argvPath := filepath.Join(t.TempDir(), "argv.txt")
+	wrapper := writeArgvRecorder(t, argvPath)
+
+	p := NewWithOptions(runtime.StartOptions{Model: "qwen", LaunchWrapper: []string{wrapper, "--flag"}})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _ = p.Start(ctx, runtime.StartOptions{})
+
+	waitForArgv(t, argvPath, []string{wrapper, "--flag", "fx", "acp", "--model", "qwen"})
+}
+
+// TestCapabilitiesPinsModelSelection pins that fx declares model selection:
+// its model rides the launch, so a run's --model reaches the backend.
+func TestCapabilitiesPinsModelSelection(t *testing.T) {
+	p := New()
+	caps, err := p.Capabilities(context.Background())
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if !caps.ModelSelection {
+		t.Fatal("Capabilities.ModelSelection = false, want true for fx")
+	}
+}
+
 // TestCapabilitiesPinsBackendID keeps the backend id string pinned: the id is
 // the wire identity for backend selection, and a silent rename would break
 // operators' configured backend values without any test failure.
