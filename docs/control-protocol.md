@@ -156,6 +156,10 @@ Returns the current state snapshot:
 - `retry_attempt` / `max_retries` — counts for automatic retry after backend errors.
 - `pending_permission` — true when a permission request is waiting for an answer. It is cleared when the runtime ends, so an ended runtime never reports a request no live turn can answer.
 - `permission` — the full permission request object (all fields from the `permission.request` event), or null.
+  A backend that publishes its request as a nested `toolCall` leaves the flat fields empty, so Avenor
+  adds `description` (the backend's tool title, else its command, else the tool-call kind) and
+  `command` (from `toolCall.rawInput.command`). The command also feeds `resolved_paths` and
+  `path_escapes_cwd`. A request that already carries `description` or `question` is left alone.
 - `turn_state` — internal turn lifecycle: `"idle"`, `"starting"`, `"running"`, `"ending"`, `"cancelling"`, `"ended"`.
 - Times are Unix milliseconds.
 
