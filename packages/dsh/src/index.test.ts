@@ -84,6 +84,21 @@ describe('plugin entry', () => {
     ])
   })
 
+  it('publishes output schemas the tool registry accepts', () => {
+    const fake = fakeContext()
+    register(fake.ctx, {}, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: recordingSeamFactory().makeSeam,
+      getMessagingHost: fakeMessagingHost().getMessagingHost,
+    })
+    // tools.register asserts the raw JSON Schema subset; an authoring-only type
+    // such as 'json' throws there and takes the plugin's other tools with it.
+    const allowed = ['object', 'array', 'string', 'number', 'integer', 'boolean', 'null', undefined]
+    for (const tool of fake.tools as Array<{ name: string; output: { schema: { type?: string } } }>) {
+      expect(allowed).toContain(tool.output.schema.type)
+    }
+  })
+
   it('passes the row config through to the child selection', () => {
     const fake = fakeContext()
     const seams = recordingSeamFactory()

@@ -11,7 +11,11 @@ export const PEERS_TOOL_NAME = 'avenor_peers'
 /** The host is built on first call, so tool registration stays synchronous. */
 export type LazyMessagingHost = () => Promise<MessagingHost>
 
-const outputSchema = { type: 'json' }
+// A raw JSON Schema the registry accepts: `{ type: 'json' }` is the authoring
+// DSL's shorthand, but `tools.register` asserts the raw subset, where the only
+// types are object/array/string/number/integer/boolean/null. Getting this wrong
+// throws at registration and rolls the whole plugin back, tools included.
+const outputSchema = { type: 'object', properties: {}, additionalProperties: true }
 
 function renderValue(value: unknown) {
   const record = (value ?? {}) as { text?: unknown; outcome?: unknown }
