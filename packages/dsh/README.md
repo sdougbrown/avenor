@@ -66,10 +66,18 @@ request.
 3. **No streaming.** `SubagentProvider.start()` returns a terminal promise only,
    so the run panel cannot show live progress from here. Live output needs a
    `ctx.jobs`-backed tool path, which is the next piece, not this one.
-4. **Permissions.** A mid-run Avenor permission request has no DSH seam for an
-   external child; the shipped out-of-process providers answer from config. Until
-   there is a client half, this spike inherits whatever Avenor's default policy
-   is and will stall on a pending permission.
+4. **Permissions belong to the orchestrator, not the human.** Avenor's design is
+   that the parent agent answers a child's permission request, the way
+   `packages/pi/src/index.ts` does: the pending request is surfaced into the
+   parent's context and the parent calls `avenor_answer_permission`. DSH has no
+   seam that carries an external child's request into that child's own session,
+   but the provider does get `request.parent: Agent`, so the plugin can
+   `parent.inject()` the pending request (and `followup()` when the parent's turn
+   has already ended) and register the answer tool. That is a Host-side
+   capability, not a client card — `registerPendingInteraction` would be the
+   wrong mechanism, since it asks the person looking at the harness.
+   Unanswered requests still stall the run, so the plugin also needs a default
+   policy for the unattended case.
 5. **Types are mirrored.** `src/types.ts` restates the subagent contract instead
    of importing `@deepseek-ai/dsh-subagent`, because a bundle must not depend on
    packages the installed Harness provides. Promoting this means switching to the
