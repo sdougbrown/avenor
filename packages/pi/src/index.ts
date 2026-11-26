@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-c
 import { hostname as osHostname } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { combinePeerProviders } from './peer-provider.js'
-import { Text } from '@earendil-works/pi-tui'
+import { Box, Text } from '@earendil-works/pi-tui'
 import { Type } from 'typebox'
 import {
   BrokerHttpError,
@@ -2508,12 +2508,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     // text; the provenance notice and the reply instruction stay model-only in
     // the message content. Every frame carries its display details: the only
     // writer is deliverPeerFrame, which introduced this message type.
-    pi.registerMessageRenderer<InboundAskDisplay>(PEER_MESSAGE_CUSTOM_TYPE, (message, _options, theme: Theme) => {
+    pi.registerMessageRenderer<InboundAskDisplay>(PEER_MESSAGE_CUSTOM_TYPE, (message, options, theme: Theme) => {
       const details = message.details as InboundAskDisplay
       const text = `${details.header}\n\n${details.body}`
       const lines = text.split('\n')
       const rendered = lines.map((line, index) => index === 0 ? theme.fg('accent', theme.bold(line)) : line).join('\n')
-      return new Text(rendered, 0, 0)
+      const box = new Box(options.outputPad, 1, text => theme.bg('userMessageBg', text))
+      box.addChild(new Text(rendered, 0, 0))
+      return box
     })
 
     // A peer frame's delivery is confirmed by the frame's own message_end:
