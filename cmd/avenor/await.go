@@ -47,11 +47,27 @@ func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writ
 	return exitCode(awaitRun(ctx, opts, os.Stdout, stderr)), nil
 }
 
-// awaitOptionsFromInvocation builds the await options from the declared
-// invocation: the target positional plus the until/timeout/format flags.
+// awaitOptionsFromInvocation builds the await options from the invocation: the
+// target positional plus the until/timeout/format flags, and the attachment
+// coordinates a configured host session names. A conversation with half its
+// coordinates names no session to serve, so the mixed forms are refused before
+// any dial; an unconfigured await keeps its socket or scan path.
 func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error) {
+	socket, host, session := inv.Flags["socket"], inv.Flags["bind-host"], inv.Flags["bind-session"]
+	if host != "" || session != "" {
+		if host == "" || session == "" {
+			return awaitOptions{}, usageErrorf("avenor await: --bind-host and --bind-session (or %s and %s) are required together; --socket (or %s) names a supervisor without a conversation", envBindHost, envBindSession, envControlSocket)
+		}
+		if socket == "" {
+			derived, err := supervisor.ConversationSocket(host, session)
+			if err != nil {
+				return awaitOptions{}, err
+			}
+			socket = derived
+		}
+	}
 	opts := awaitOptions{
-		socket:      inv.Flags["socket"],
+		socket:      socket,
 		until:       orDefault(inv.Flags["until"], "attention"),
 		timeout:     inv.Durations["timeout"],
 		printOutput: inv.Bools["print-output"],

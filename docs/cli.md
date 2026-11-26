@@ -446,8 +446,9 @@ environment value or tool argument carries it.
 `avenor feed broker --bind-host poo --bind-session ID` derives the path, starts
 the supervisor if nothing serves it, binds the conversation once, and serves the
 inbox. Every other command derives the same path and only attaches: if the
-session's feed has not started its supervisor yet, `spawn`, `status`, `result`
-and `message` exit 1 with the derived path named and start nothing. A supervisor started that way belongs to the feed:
+session's feed has not started its supervisor yet, `spawn`, `status`, `result`,
+`await` and `message` exit 1 with the derived path named and start nothing. A
+supervisor started that way belongs to the feed:
 the feed stops it when it stops serving, and the supervisor shuts down before its
 own children outlive the session. A feed that is killed outright cannot run that
 stop; on Linux the kernel tells the supervisor its launcher is gone, so it shuts
@@ -660,11 +661,19 @@ avenor await [flags] <run-id|label>
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--socket` | (none) | Control socket path; when omitted, `avenor await` scans `~/.avenor/sockets` |
+| `--socket` | (none) | Control socket path; the bind coordinates derive it for a configured conversation, and with neither, `avenor await` scans `~/.avenor/sockets` |
+| `--bind-host` | `AVENOR_BIND_HOST` | Native host of the configured conversation; with `--bind-session`, derives the conversation's supervisor socket |
+| `--bind-session` | `AVENOR_BIND_SESSION` | Native session ID of the configured conversation; with `--bind-host`, derives the conversation's supervisor socket |
 | `--until` | `attention` | Wait target: `attention` (stop at `pending_permission`) or `done` (continue to terminal state) |
 | `--timeout` | `0` (disabled) | Wall-clock backstop duration; exits `124` when reached |
 | `--print-output` | `false` | Print the result payload after `---` |
 | `--format` | `plain` | Output format: `plain` or `json` |
+
+A conversation that names both bind coordinates dials the supervisor the
+conversation's feed serves, so a registered command waits on its own children
+without a socket in argv. Naming one coordinate without the other exits 2
+before any dial. The coordinates derive the socket path only: `await` never
+reads the conversation's binding, and its dial stays credential-free.
 
 ### Exit codes
 

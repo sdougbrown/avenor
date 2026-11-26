@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -1027,5 +1028,48 @@ func TestAwaitStaysCredentialFree(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if got := awaitRunDeclared([]string{"run_1", "--socket", server.socket()}, &stdout, &stderr); got != 0 {
 		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+}
+
+// TestAwaitDerivesSocketFromBindCoordinates proves a configured host session
+// reaches its conversation's supervisor without naming a socket: the
+// coordinates derive the same path the feed serves, and await dials it with
+// the credential-free path it already had. The target resolves exactly, so
+// the list answer needs no label gymnastics.
+func TestAwaitDerivesSocketFromBindCoordinates(t *testing.T) {
+	root := conversationScratch(t)
+	server := newAwaitSocketServer(t, []map[string]any{awaitStatus("idle", "done", false)}, nil)
+	derived := derivedSocketFor(t, "poo", "ses_configured")
+	if err := os.MkdirAll(filepath.Dir(derived), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(server.socket(), derived); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(derived) })
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"--bind-host", "poo", "--bind-session", "ses_configured", "run_1"}
+	if got := awaitRunDeclared(args, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "TURN-DONE rt_1") {
+		t.Fatalf("stdout = %q, want the done transition", stdout.String())
+	}
+	_ = root
+}
+
+// TestAwaitRefusesPartialBindCoordinates pins the configuration rule on
+// await: half a conversation names no session to serve, so it refuses before
+// any dial. A socket alone keeps its pre-existing meaning — an explicit
+// supervisor to dial, no conversation involved.
+func TestAwaitRefusesPartialBindCoordinates(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	args := []string{"--bind-host", "poo", "run_1"}
+	if got := awaitRunDeclared(args, &stdout, &stderr); got != 2 {
+		t.Fatalf("exit code = %d, want a usage refusal 2 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "required together") {
+		t.Fatalf("stderr = %q, want the required-together refusal", stderr.String())
 	}
 }

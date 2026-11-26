@@ -3,9 +3,13 @@
 A host session that Avenor did not launch — plain `poo` with a feed and
 registered commands, for example — reaches one supervisor through its native
 host name and native session ID. A socket may be configured explicitly instead.
-Only the feed binds. `avenor spawn`, `avenor status`, `avenor result` and
-`avenor message` read the live binding per call, so no credential is ever handed
-to a command, and no command starts a supervisor.
+Only the feed binds. `avenor spawn`, `avenor status`, `avenor result`,
+`avenor await` and `avenor message` resolve the conversation's supervisor per
+call — the run verbs read the live binding too, so no credential is ever handed
+to a command, and no command starts a supervisor. `await` is the one exception
+on the read side: it derives the socket path and keeps its credential-free dial,
+because waiting needs the supervisor's status stream, not the conversation's
+binding.
 
 ## Coordinates and the derived socket
 
@@ -28,9 +32,9 @@ Behaviour that follows from the derivation:
 - `avenor feed broker --bind-host poo --bind-session ID` derives the path, starts
   the supervisor when nothing serves it, binds the conversation once, and serves
   the inbox. It stops the supervisor it started when it stops serving.
-- `spawn`, `status`, `result` and `message` derive the same path and only
-  attach. A run before the session's feed has started its supervisor exits 1,
-  names the derived path and starts nothing.
+- `spawn`, `status`, `result`, `await` and `message` derive the same path and
+  only attach. A run before the session's feed has started its supervisor exits
+  1, names the derived path and starts nothing.
 - `--socket`/`AVENOR_SOCKET` is attach-only and never derived: a socket that is
   not there is an error.
 - A command naming half the conversation, or both coordinates and broker

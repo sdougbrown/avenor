@@ -135,13 +135,12 @@ func app() *clicontract.App {
 				Positionals: []clicontract.Positional{
 					{Name: "target", Required: true},
 				},
-				Flags: []clicontract.Flag{
-					{Name: "socket", Kind: clicontract.String, Usage: "explicit control socket path; omitting scans ~/.avenor/sockets"},
-					{Name: "until", Kind: clicontract.String, Usage: "wait until: attention or done", Default: "attention"},
-					{Name: "timeout", Kind: clicontract.Duration, Usage: "wall-clock timeout"},
-					{Name: "print-output", Kind: clicontract.Bool, Usage: "print complete result output before exiting"},
-					{Name: "format", Kind: clicontract.String, Usage: "output format: plain or json", Default: "plain"},
-				},
+				Flags: append(bindCoordinateFlags(),
+					clicontract.Flag{Name: "until", Kind: clicontract.String, Usage: "wait until: attention or done", Default: "attention"},
+					clicontract.Flag{Name: "timeout", Kind: clicontract.Duration, Usage: "wall-clock timeout"},
+					clicontract.Flag{Name: "print-output", Kind: clicontract.Bool, Usage: "print complete result output before exiting"},
+					clicontract.Flag{Name: "format", Kind: clicontract.String, Usage: "output format: plain or json", Default: "plain"},
+				),
 				Handle: handleAwait,
 			},
 			{
