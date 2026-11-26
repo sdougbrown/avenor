@@ -30,6 +30,7 @@ const (
 
 type awaitOptions struct {
 	socket      string
+	derived     bool
 	until       string
 	timeout     time.Duration
 	printOutput bool
@@ -38,13 +39,28 @@ type awaitOptions struct {
 }
 
 // handleAwait waits for the run to reach the requested state; the exit code
-// encodes the terminal state (failed, timeouts, pending permission).
+// encodes the terminal state (failed, timeouts, pending permission). A dial
+// failure the conversation's own coordinates name reaches the caller as a
+// plain error — the adapter maps it to the retryable exit 1 the sibling
+// commands answer with; every other failure keeps await's own exit encoding.
 func handleAwait(ctx context.Context, inv clicontract.Invocation, stderr io.Writer) (any, error) {
 	opts, err := awaitOptionsFromInvocation(inv)
 	if err != nil {
 		return nil, err
 	}
-	return exitCode(awaitRun(ctx, opts, os.Stdout, stderr)), nil
+	var cancel context.CancelFunc = func() {}
+	if opts.timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, opts.timeout)
+	}
+	defer cancel()
+	resolved, err := awaitResolveTarget(ctx, stderr, opts.socket, opts.target, opts.derived)
+	if err != nil {
+		if opts.derived {
+			return nil, fmt.Errorf("avenor await: %w", err)
+		}
+		return exitCode(awaitCallError(stderr, err)), nil
+	}
+	return exitCode(awaitRun(ctx, opts, resolved, os.Stdout, stderr)), nil
 }
 
 // awaitOptionsFromInvocation builds the await options from the invocation: the
@@ -67,6 +83,7 @@ func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error
 	}
 	opts := awaitOptions{
 		socket:      socket,
+		derived:     requested && coords.derived,
 		until:       orDefault(inv.Flags["until"], "attention"),
 		timeout:     inv.Durations["timeout"],
 		printOutput: inv.Bools["print-output"],
@@ -85,19 +102,10 @@ func awaitOptionsFromInvocation(inv clicontract.Invocation) (awaitOptions, error
 	return opts, nil
 }
 
-// awaitRun attaches to the run and waits for the terminal state, writing
-// transitions to stdout.
-func awaitRun(ctx context.Context, opts awaitOptions, stdout io.Writer, stderr io.Writer) int {
-	var cancel context.CancelFunc = func() {}
-	if opts.timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, opts.timeout)
-	}
-	defer cancel()
-
-	resolved, err := awaitResolveTarget(ctx, stderr, opts.socket, opts.target)
-	if err != nil {
-		return awaitCallError(stderr, err)
-	}
+// awaitRun waits the resolved run out to the requested state, writing
+// transitions to stdout. The caller owns the wall-clock context: it bounds
+// resolution and the wait alike.
+func awaitRun(ctx context.Context, opts awaitOptions, resolved awaitResolvedTarget, stdout io.Writer, stderr io.Writer) int {
 	c := resolved.client
 	defer c.Close()
 	runtimeID := resolved.runtimeID
@@ -218,10 +226,13 @@ type awaitResolvedTarget struct {
 	targetRunID string
 }
 
-func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target string) (awaitResolvedTarget, error) {
+func awaitResolveTarget(ctx context.Context, stderr io.Writer, socket, target string, derived bool) (awaitResolvedTarget, error) {
 	if socket != "" {
 		c, err := client.Dial(socket)
 		if err != nil {
+			if derived {
+				return awaitResolvedTarget{}, fmt.Errorf("attach the conversation's supervisor at %s (its inbox feed starts it): %w", socket, err)
+			}
 			return awaitResolvedTarget{}, err
 		}
 		runtimes, err := awaitList(ctx, c)

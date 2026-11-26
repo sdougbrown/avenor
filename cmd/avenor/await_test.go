@@ -1142,3 +1142,26 @@ func TestAwaitResolvesRuntimeID(t *testing.T) {
 		t.Fatalf("stdout = %q, want the done transition", stdout.String())
 	}
 }
+
+// TestAwaitDerivedSupervisorNotRunningRefuses pins the startup race on await:
+// a conversation whose feed has not started its supervisor is refused with the
+// derived path named and the owner hinted, the same contract its sibling
+// commands honor, and the refusal starts nothing.
+func TestAwaitDerivedSupervisorNotRunningRefuses(t *testing.T) {
+	conversationScratch(t)
+	socket := derivedSocketFor(t, "poo", "ses_idle")
+	launches := &supervisorLaunches{}
+	fakeStartConversationSupervisor(t, launches, nil)
+
+	var stdout, stderr bytes.Buffer
+	args := []string{"--bind-host", "poo", "--bind-session", "ses_idle", "run_1"}
+	if got := awaitRunDeclared(args, &stdout, &stderr); got != 1 {
+		t.Fatalf("exit code = %d, want the attach refusal 1 (stderr %q)", got, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), socket) || !strings.Contains(stderr.String(), "its inbox feed starts it") {
+		t.Fatalf("stderr = %s, want the derived socket and its owner named", stderr.String())
+	}
+	if launches.count() != 0 {
+		t.Fatalf("await started the conversation supervisor %d times, want none", launches.count())
+	}
+}

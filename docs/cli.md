@@ -672,16 +672,19 @@ avenor await [flags] <run-id|runtime-id|label>
 A conversation that names both bind coordinates — flags or their environment
 defaults — dials the supervisor the conversation's feed serves, so a registered
 command waits on its own children without a socket in argv. Naming one
-coordinate without the other exits 2 before any dial. The coordinates derive
-the socket path only: `await` never reads the conversation's binding, and its
-dial stays credential-free.
+coordinate without the other exits 2 before any dial. When that supervisor is
+not running yet, `await` exits 1 with the derived path named and its owner
+hinted, the same retryable refusal its sibling commands answer with; the
+coordinates derive the socket path only, so `await` never reads the
+conversation's binding, and its dial stays credential-free.
 
 ### Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | Reached `done` |
-| `2` | Usage, not found, or dead socket |
+| `1` | The conversation's supervisor is not running (retryable — the inbox feed starts it) |
+| `2` | Usage, not found, dead socket, or lost connection |
 | `10` | Reached `failed` |
 | `11` | Reached phase timeout |
 | `12` | Reached `killed` |
