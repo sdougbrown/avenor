@@ -52,7 +52,7 @@ func TestMessagingLaunchFailures(t *testing.T) {
 				t.Cleanup(func() { _ = p.Close() })
 				session, err := p.Start(context.Background(), avruntime.StartOptions{})
 				if explicit {
-					if err == nil || !strings.Contains(err.Error(), "v0.2.0") {
+					if err == nil || !strings.Contains(err.Error(), "v0.12.0") {
 						t.Fatalf("explicit error = %v", err)
 					}
 					if got := fallbackLaunches(t, dir); got != 1 {
@@ -91,7 +91,7 @@ func TestEarlyManifestFailureReportsOnlyFieldLine(t *testing.T) {
 			t.Cleanup(func() { _ = p.Close() })
 			_, err := p.Start(context.Background(), avruntime.StartOptions{})
 			var unavailable *avruntime.MessagingUnavailableError
-			if !errors.As(err, &unavailable) || err.Error() != "poo messaging requires poo v0.2.0 or later: "+tc.want {
+			if !errors.As(err, &unavailable) || err.Error() != "poo messaging requires poo v0.12.0 or later: "+tc.want {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
@@ -173,7 +173,7 @@ func TestMessagingLoadManifestFailure(t *testing.T) {
 				t.Cleanup(func() { _ = resumer.Close() })
 				resumed, err := resumer.Resume(context.Background(), session.SessionID)
 				if explicit {
-					if err == nil || !strings.Contains(err.Error(), "v0.2.0") {
+					if err == nil || !strings.Contains(err.Error(), "v0.12.0") {
 						t.Fatalf("error = %v", err)
 					}
 					if got := fallbackLaunches(t, dir); got != 2 {

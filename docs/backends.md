@@ -173,7 +173,7 @@ An inbox message can wake a parked poo session. While the supervisor is parked i
 
 At launch Avenor publishes rendered manifests under `<state home>/poo/manifests/<digest>/`. It prunes sibling digest directories older than seven days, never the directory being published. Each launch, including resume, publishes its own manifests again.
 
-The broker token grants messaging as the child run, not supervisor authority. Avenor declares the broker URL, run ID and token through `POO_CREDENTIAL_ENV`. A poo binary that includes [poo#103](https://github.com/sdougbrown/poo/pull/103) keeps them for the inbox feed and `avenor_message` bindings, but removes them from a model-issued `bash` command's environment. Poo v0.2.0 predates this protection: it can run messaging, but its bash commands inherit the token.
+The broker token grants messaging as the child run, not supervisor authority. Avenor declares the broker URL, run ID and token through `POO_CREDENTIAL_ENV`. A poo binary that includes [poo#103](https://github.com/sdougbrown/poo/pull/103) keeps them for the inbox feed and `avenor_message` bindings, but removes them from a model-issued `bash` command's environment. Every poo version that can run messaging (v0.12.0 and later) includes it.
 
 This is environment scrubbing, not process isolation. A registered CLI explicitly bound to a credential can receive it; with poo's `local` executor, a command can also read poo's environment through procfs. Adding the token to `tools.env.scrub` removes it from the feed as well, so the feed fails to start. Claude children instead get a one-shot attach credential.
 
