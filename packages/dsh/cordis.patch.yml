@@ -18,3 +18,7 @@
       config:
         provider: avenor
         toolName: subagent_avenor
+        # The provider declares no depthLimit capability, so DSH refuses to
+        # enforce a numeric budget itself and requires the provider (Avenor's
+        # own nesting rules) to own the recursion budget.
+        maxDepth: provider-managed

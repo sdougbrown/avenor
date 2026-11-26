@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'bun:test'
 import {
   createAvenorProvider,
+  createCoreSeam,
   promptText,
   type AvenorHandle,
   type AvenorSeam,
+  type CoreTools,
 } from './provider.js'
 import type { SubagentProvider, SubagentStartRequest } from './types.js'
 import { diagnosticFor, stopReasonFor, toSubagentResult, type AvenorTerminal } from './stop-reason.js'
@@ -166,5 +168,88 @@ describe('avenor subagent provider', () => {
     await expect(startRun(createAvenorProvider(seam), startRequest('work'))).rejects.toThrow(
       'avenor binary not found',
     )
+  })
+})
+
+describe('core seam', () => {
+  interface FakeTools {
+    readonly tools: CoreTools
+    readonly calls: { spawn: number; kill: number }
+    settle(value: {
+      status: string
+      ready: boolean
+      stop_reason?: string
+      output?: string
+      timed_out?: boolean
+    }): void
+  }
+
+  function fakeTools(overrides: Partial<CoreTools> = {}): FakeTools {
+    const calls = { spawn: 0, kill: 0 }
+    let settle: FakeTools['settle'] = () => {}
+    const tools: CoreTools = {
+      async spawn() {
+        calls.spawn += 1
+        return { run_id: 'run-9' }
+      },
+      result() {
+        return new Promise((resolve) => {
+          settle = resolve
+        })
+      },
+      async kill() {
+        calls.kill += 1
+        return { killed: true }
+      },
+      ...overrides,
+    }
+    return { tools, calls, settle: (value) => settle(value) }
+  }
+
+  it('does not kill a run that already settled', async () => {
+    const fake = fakeTools()
+    const handle = await createCoreSeam({}, fake.tools).spawn({ prompt: 'work' })
+    fake.settle({ status: 'done', ready: true, output: 'ok' })
+    await handle.done
+    await handle.cancel()
+    expect(fake.calls.kill).toBe(0)
+  })
+
+  it('kills an unsettled run once even when asked twice', async () => {
+    const fake = fakeTools()
+    const handle = await createCoreSeam({}, fake.tools).spawn({ prompt: 'work' })
+    await handle.cancel()
+    await handle.cancel()
+    expect(fake.calls.kill).toBe(1)
+  })
+
+  it('maps the broker result onto the terminal contract', async () => {
+    const fake = fakeTools()
+    const handle = await createCoreSeam({}, fake.tools).spawn({ prompt: 'work' })
+    fake.settle({ status: 'killed', ready: true, stop_reason: 'user' })
+    expect(await handle.done).toEqual({
+      runId: 'run-9',
+      status: 'killed',
+      ready: true,
+      stopReason: 'user',
+    })
+  })
+
+  it('forwards the configured selection into the spawn request', async () => {
+    const seen: unknown[] = []
+    const fake = fakeTools({
+      async spawn(request) {
+        seen.push(request)
+        return { run_id: 'run-9' }
+      },
+    })
+    await createCoreSeam({ agent: 'codex', model: 'm' }, fake.tools).spawn({
+      prompt: 'p',
+      cwd: '/w',
+      label: 'L',
+    })
+    expect(seen).toEqual([
+      { prompt: 'p', dir: '/w', label: 'L', agent: 'codex', model: 'm' },
+    ])
   })
 })

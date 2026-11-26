@@ -43,12 +43,51 @@ export function promptText(prompt: readonly ContentBlock[]): string {
     .join('\n')
 }
 
+/**
+ * The broker calls the seam needs. Injected so the seam's own lifecycle rules
+ * — one kill per run and none after settlement — are testable without a
+ * running `avenor`; the defaults are core's tools.
+ */
+export interface CoreTools {
+  spawn(request: {
+    readonly prompt: string
+    readonly dir?: string
+    readonly label?: string
+    readonly agent?: string
+    readonly model?: string
+    readonly backend?: string
+    readonly rosterFile?: string
+    readonly rosterEntry?: string
+  }): Promise<{ readonly run_id: string }>
+  result(request: { readonly runId: string; readonly wait: boolean }): Promise<{
+    readonly status: string
+    readonly ready: boolean
+    readonly stop_reason?: string
+    readonly output?: string
+    readonly timed_out?: boolean
+  }>
+  kill(request: { readonly runId: string }): Promise<unknown>
+}
+
+const coreTools: CoreTools = {
+  // The supervisor owns the broker process; starting it belongs to the real
+  // implementation, not to the seam's lifecycle rules.
+  async spawn(request) {
+    await Supervisor.get()
+    return spawnTool(request)
+  },
+  result: (request) => resultTool(request),
+  kill: (request) => killTool(request),
+}
+
 /** The real seam: core's tools against the singleton supervisor. */
-export function createCoreSeam(selection: AvenorSelection = {}): AvenorSeam {
+export function createCoreSeam(
+  selection: AvenorSelection = {},
+  tools: CoreTools = coreTools,
+): AvenorSeam {
   return {
     async spawn(request) {
-      await Supervisor.get()
-      const spawned = await spawnTool({
+      const spawned = await tools.spawn({
         prompt: request.prompt,
         ...(request.cwd === undefined ? {} : { dir: request.cwd }),
         ...(request.label === undefined ? {} : { label: request.label }),
@@ -60,26 +99,33 @@ export function createCoreSeam(selection: AvenorSelection = {}): AvenorSeam {
       })
 
       const runId = spawned.run_id
-      const done = resultTool({ runId, wait: true }).then(
-        (result): AvenorTerminal => ({
-          runId,
-          status: result.status,
-          ready: result.ready,
-          ...(result.stop_reason === undefined ? {} : { stopReason: result.stop_reason }),
-          ...(result.output === undefined ? {} : { output: result.output }),
-          ...(result.timed_out === undefined ? {} : { timedOut: result.timed_out }),
-        }),
+      // `dispose()` runs after `result` has already resolved, so the seam has
+      // to remember settlement: killing a finished run records a second
+      // `session.end` as `cancelled` and makes a successful run look stopped.
+      let settled = false
+      const done = tools.result({ runId, wait: true }).then(
+        (result): AvenorTerminal => {
+          settled = true
+          return {
+            runId,
+            status: result.status,
+            ready: result.ready,
+            ...(result.stop_reason === undefined ? {} : { stopReason: result.stop_reason }),
+            ...(result.output === undefined ? {} : { output: result.output }),
+            ...(result.timed_out === undefined ? {} : { timedOut: result.timed_out }),
+          }
+        },
       )
 
-      let cancelled = false
+      let killed = false
       return {
         runId,
         done,
         async cancel() {
-          if (cancelled) return
-          cancelled = true
+          if (killed || settled) return
+          killed = true
           try {
-            await killTool({ runId })
+            await tools.kill({ runId })
           } catch {
             // Already terminal, or the broker went away: disposal still
             // succeeds because there is nothing left to stop.

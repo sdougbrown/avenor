@@ -26,7 +26,15 @@ its terminal state with `resultTool`, and projects that state onto
 
 Abort and `dispose()` both cancel the run. `result` never rejects on a child
 failure — only a broker/infrastructure fault rejects, which is what the seam
-requires.
+requires. Disposal after settlement is a no-op: killing a finished run makes
+Avenor append a second `session.end` (`cancelled`, exit 130) after the real
+`end_turn`, so a successful run looks stopped in the event log.
+
+The provider declares no `depthLimit` capability, so DSH refuses to enforce a
+numeric recursion budget itself. The tool row must pass
+`maxDepth: provider-managed`, which makes the provider — Avenor's own nesting
+rules — own that budget. Without it the entry fails to activate with
+`provider "avenor" cannot enforce maxDepth`.
 
 ## Install (local bundle)
 
