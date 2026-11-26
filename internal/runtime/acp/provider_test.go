@@ -2724,3 +2724,15 @@ func TestCapabilitiesModelSelectionWiring(t *testing.T) {
 		}
 	}
 }
+
+// TestModelInLaunchAloneEnablesCompat pins that a ModelInLaunch backend
+// without BuildClientArgs still gets the launch-identity comparison: the gate
+// must not silently disable the model check when gemini-style model support
+// lands without per-run argv.
+func TestModelInLaunchAloneEnablesCompat(t *testing.T) {
+	p := NewProvider(ProviderConfig{BackendID: "fx", ModelInLaunch: true}).(*Provider)
+	installed := clientLaunchSpec{absDir: "/installed", model: "m1", wrapper: []string{}}
+	if err := p.checkWarmLaunchCompat(runtime.StartOptions{Model: "m2"}, clientLaunchSpec{absDir: "/installed", model: "m2"}, installed); err == nil || !strings.Contains(err.Error(), `already running with model "m1"`) {
+		t.Fatalf("warm compat err = %v, want a model mismatch", err)
+	}
+}

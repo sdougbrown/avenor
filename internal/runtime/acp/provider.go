@@ -923,7 +923,7 @@ func resolveAbsDir(dir string) (string, error) {
 // fields this caller set, because a warm launch may reuse a client that was
 // started under defaults the caller never named.
 func (p *Provider) checkLaunchCompat(opts runtime.StartOptions, candidate, installed clientLaunchSpec, strict bool) error {
-	if p.buildClientArgs == nil && !p.setCmdDir {
+	if p.buildClientArgs == nil && !p.setCmdDir && !p.modelInLaunch {
 		return nil
 	}
 	if (strict || opts.Dir != "") && installed.absDir != "" && candidate.absDir != installed.absDir {
