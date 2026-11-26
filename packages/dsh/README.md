@@ -44,7 +44,9 @@ then hands the request to the agent that spawned the child:
 
 The notice carries the run id, Avenor's question, and the option ids, and the
 plugin registers `avenor_answer_permission` (core's `answerPermissionTool`) so
-the orchestrator can decide. Nothing here asks the person looking at the
+the orchestrator can decide. The option ids are Avenor's, not this plugin's
+(`once`, `always`, `reject` today, with `kind` values `allow_once` /
+`allow_always` / `reject_once`), which is why they travel in the notice. Nothing here asks the person looking at the
 harness: `registerPendingInteraction` and a composer card would be the wrong
 mechanism for a delegation decision.
 
