@@ -37,6 +37,7 @@ The native mechanisms below were verified with Codex CLI 0.144.6, Pi 0.83.0, and
 | `opencode-http` | unsupported | unsupported | none verified |
 | `gemini-acp` | unsupported | unsupported | none verified |
 | `cursor-acp` | unsupported | unsupported | none verified |
+| `dsh-acp` | unsupported | unsupported | none verified |
 | `fx` | unsupported | unsupported | none verified |
 | `agy` | `low`, `medium`, `high`, `xhigh` | `low`, `medium`, `high`, `xhigh` | ACP `session/set_config_option` (`thought_level`) |
 | `pony` | unsupported | unsupported | none |

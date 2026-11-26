@@ -6,6 +6,7 @@
 //   - codex-app-server: spawns Codex app-server subprocess via JSON-RPC over stdio.
 //   - gemini-acp: spawns gemini --acp subprocess, owns lifecycle.
 //   - cursor-acp: spawns agent acp subprocess, owns lifecycle.
+//   - dsh-acp: spawns dsh --profile acp subprocess, owns lifecycle.
 //   - fx: spawns fx acp subprocess, owns lifecycle.
 //   - pi: spawns pi --mode rpc subprocess, owns lifecycle.
 //   - poo: spawns a poo binary subprocess and drives it over its stdio protocol.
@@ -23,6 +24,7 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/claude"
 	"github.com/sdougbrown/avenor/internal/runtime/codexappserver"
 	"github.com/sdougbrown/avenor/internal/runtime/cursoracp"
+	"github.com/sdougbrown/avenor/internal/runtime/dshacp"
 	"github.com/sdougbrown/avenor/internal/runtime/fxacp"
 	"github.com/sdougbrown/avenor/internal/runtime/geminiacp"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodeacp"
@@ -52,6 +54,9 @@ var providers = map[string]func(runtime.StartOptions) (runtime.Provider, error){
 	},
 	"cursor-acp": func(o runtime.StartOptions) (runtime.Provider, error) {
 		return cursoracp.NewWithOptions(o), nil
+	},
+	"dsh-acp": func(o runtime.StartOptions) (runtime.Provider, error) {
+		return dshacp.NewWithOptions(o), nil
 	},
 	"fx": func(o runtime.StartOptions) (runtime.Provider, error) {
 		return fxacp.NewWithOptions(o), nil

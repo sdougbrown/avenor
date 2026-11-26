@@ -67,6 +67,16 @@ func TestNewProviderCursorACP(t *testing.T) {
 	}
 }
 
+func TestNewProviderDshACP(t *testing.T) {
+	p, err := NewProvider(runtime.StartOptions{}, "dsh-acp")
+	if err != nil {
+		t.Fatalf("NewProvider(dsh-acp) error = %v", err)
+	}
+	if p == nil {
+		t.Fatal("NewProvider(dsh-acp) provider is nil")
+	}
+}
+
 func TestNewProviderClaude(t *testing.T) {
 	p, err := NewProvider(runtime.StartOptions{}, "claude")
 	if err != nil {

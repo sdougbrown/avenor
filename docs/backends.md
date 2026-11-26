@@ -1,6 +1,6 @@
 # Backends
 
-Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, fx, Pi, agy, or the in-process Pony test backend. Pick the one that matches what's running locally and what you need from the orchestration layer.
+Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, DeepSeek Harness, fx, Pi, agy, or the in-process Pony test backend. Pick the one that matches what's running locally and what you need from the orchestration layer.
 
 ## Backend selection
 
@@ -13,6 +13,7 @@ avenor --backend codex-app-server --prompt "say hi"
 avenor --backend agy --model gemini-4-argon-high --prompt "say hi"
 avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
+avenor --backend dsh-acp --model deepseek-official/deepseek-v4-flash --prompt "say hi"
 avenor --backend fx --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
 avenor --backend claude --prompt "say hi"
@@ -123,18 +124,18 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | fx | pi | claude | pony | poo |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | dsh-acp | fx | pi | claude | pony | poo |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | — | ✓ | ⚠ | ✗ | ✓ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
-| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | — | — | ✓ | ⚠ | ✗ | ✓ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
+| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
@@ -253,15 +254,15 @@ Reports are untrusted: they never approve anything, and report text is display-o
 
 | Capability | Supported |
 |---|---|
-| New sessions | ✓ |
-| Session resume | ⚠ (in-memory, while avenor is alive) |
-| Prompt execution | ✓ (PTY paste) |
-| Cancel | ✓ (Esc-Esc → reported or pane-scrape idle → forced kill) |
-| Event streaming | ✓ |
-| Permission relay | ⚠ (pane-scrape only, experimental) |
-| Model selection | ✓ (via `--model`) |
-| External server URL | ✗ |
-| Subprocess discovery | ✓ |
+| New sessions | ✓ | ✓ |
+| Session resume | ⚠ (in-memory, while avenor is alive) | — |
+| Prompt execution | ✓ (PTY paste) | ✓ |
+| Cancel | ✓ (Esc-Esc → reported or pane-scrape idle → forced kill) | ✓ |
+| Event streaming | ✓ | ✓ |
+| Permission relay | ⚠ (pane-scrape only, experimental) | ✓ |
+| Model selection | ✓ (via `--model`) | ✓ |
+| External server URL | ✗ | ✗ |
+| Subprocess discovery | ✓ | ✗ |
 
 ### Cancel semantics
 
@@ -421,6 +422,39 @@ avenor \
   --dir /repo \
   --sentinel-file /tmp/done.env
 ```
+
+---
+
+## dsh-acp
+
+Avenor spawns `dsh --profile acp` and drives DeepSeek Harness over ACP. DSH's
+ACP server advertises session new/list/resume/close, a model config option, and
+`session/request_permission`, so Avenor's permission relay and model selection
+both work per session.
+
+```sh
+avenor \
+  --backend dsh-acp \
+  --dir /repo \
+  --model deepseek-official/deepseek-v4-flash \
+  --prompt "Review the changes in the current branch"
+```
+
+**Model selection:** DSH's ACP server takes a model as a provider/model pair, so
+pass `provider/model`; Avenor encodes it into the form the server expects. A
+bare model id is forwarded unchanged and DSH rejects it with an unknown-model
+error rather than guessing a provider. Omitting `--model` keeps the model the
+`acp` profile pins.
+
+**Requirements and caveats:**
+
+- `dsh` must resolve on `PATH`. A `npx`/`pnpm dlx` install exposes a shim there;
+  an ephemeral install path is not discovered by Avenor.
+- DSH resolves its own provider credentials. A launch with none succeeds and
+  fails at the first prompt, so the run reports a prompt failure rather than a
+  spawn error — check the run's error output before suspecting the backend.
+- The `acp` profile enables the tools it needs itself; Avenor's agent name is
+  not forwarded, because DSH's ACP modes are permission modes, not agent names.
 
 ---
 
