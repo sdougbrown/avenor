@@ -2494,3 +2494,120 @@ func TestProviderThinkingResumeIgnoresCallOptsWhenNotOptionAware(t *testing.T) {
 		t.Fatalf("non-option-aware resume Thinking = %q, want empty", got)
 	}
 }
+
+// TestPromptToleratesInconsistentFinishAfterStreamedContent pins the fx
+// carve-out: a session/prompt rejected with InconsistentFinishReason after the
+// model already streamed message chunks ends the turn with a warning and a
+// synthetic session.end, while the same error without streamed content — and
+// any prompt error on a backend without the carve-out — still fails the run.
+func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
+	finishError := &rpcError{Code: -32603, Message: "InconsistentFinishReason"}
+	chunkUpdate := rpcEnvelope{
+		JSONRPC: "2.0",
+		Method:  "session/update",
+		Params:  mustRaw(map[string]any{"sessionId": "ses_1", "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "reply"}}}),
+	}
+
+	newProvider := func(t *testing.T, tolerate bool, onCall func(rpcEnvelope, map[string]any) *rpcEnvelope) (*Provider, <-chan events.Event) {
+		peer := newFakeInMemoryPeer(t)
+		peer.onCall = onCall
+		p := NewProvider(ProviderConfig{
+			BackendID:                  "fx",
+			TolerateInconsistentFinish: tolerate,
+		}).(*Provider)
+		p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+			return peer.client, nil
+		}
+		ses, err := p.Start(context.Background(), runtime.StartOptions{})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		eventCh, err := p.Events(context.Background(), ses.SessionID)
+		if err != nil {
+			t.Fatalf("Events: %v", err)
+		}
+		return p, eventCh
+	}
+
+	t.Run("tolerated after streamed content", func(t *testing.T) {
+		var p *Provider
+		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			p.client.dispatch(chunkUpdate)
+			for {
+				p.mu.Lock()
+				streamed := p.streamedChunks["ses_1"] > 0
+				p.mu.Unlock()
+				if streamed {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		}
+		p, eventCh := newProvider(t, true, onCall)
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		done := make(chan error, 1)
+		go func() { done <- p.Prompt(context.Background(), "ses_1", "turn") }()
+		if err := <-done; err != nil {
+			t.Fatalf("Prompt with carve-out: %v, want tolerated", err)
+		}
+
+		var sawWarning, sawEnd bool
+		deadline := time.Now().Add(2 * time.Second)
+		for !(sawWarning && sawEnd) && time.Now().Before(deadline) {
+			select {
+			case ev := <-eventCh:
+				switch ev.Event {
+				case "avenor.error":
+					if ev.Fields["source"] == "warning" {
+						sawWarning = true
+					}
+				case "session.end":
+					if ev.Fields["stop_reason"] == "end_turn" {
+						sawEnd = true
+					}
+				}
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		if !sawWarning || !sawEnd {
+			t.Fatalf("events after tolerated prompt: warning=%v session.end(end_turn)=%v, want both", sawWarning, sawEnd)
+		}
+	})
+
+	t.Run("fails without streamed content", func(t *testing.T) {
+		p, _ := newProvider(t, true, func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		})
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		if err := p.Prompt(context.Background(), "ses_1", "turn"); err == nil || !strings.Contains(err.Error(), "InconsistentFinishReason") {
+			t.Fatalf("Prompt with no streamed content err = %v, want the finish-reason error", err)
+		}
+	})
+
+	t.Run("fails when carve-out is off", func(t *testing.T) {
+		var p *Provider
+		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			p.client.dispatch(chunkUpdate)
+			time.Sleep(50 * time.Millisecond) // let the pump count the chunk
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		}
+		p, _ = newProvider(t, false, onCall)
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		if err := p.Prompt(context.Background(), "ses_1", "turn"); err == nil || !strings.Contains(err.Error(), "InconsistentFinishReason") {
+			t.Fatalf("Prompt with carve-out off err = %v, want the finish-reason error", err)
+		}
+	})
+}

@@ -97,6 +97,7 @@
         "claude",
         "codex-app-server",
         "cursor-acp",
+        "fx",
         "gemini-acp",
         "opencode-acp",
         "opencode-http",

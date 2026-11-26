@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +48,7 @@ const sessionCloseTimeout = 2 * time.Second
 //	BuildSessionOpenOpts channel-tools         unset                 unset       unset
 //	ConfigureSession     model                 model, mode           no-op       no-op
 //	BuildClientEnv       unset                 channel-tools, mode   unset       unset
+//	TolerateInconsistentFinish unset          unset                 unset       unset
 //
 // Leaving a field unset is not neutral, it selects the shared default, and the
 // consequences differ per field. EmitSessionStart publishes session.start, which
@@ -73,6 +75,12 @@ type ProviderConfig struct {
 	BuildSessionOpenOptions func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (SessionOpenOptions, error)
 	ConfigureSession        func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 	BuildClientEnv          func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
+	// TolerateInconsistentFinish is the fx carve-out, not a pattern to build on:
+	// fx's session/prompt can reject with InconsistentFinishReason after the
+	// model already streamed its reply (its own finish-reason bookkeeping
+	// disagrees with itself). When set and the session has streamed message
+	// content, that error ends the turn as a warning instead of failing the run.
+	TolerateInconsistentFinish bool
 }
 
 type brokerIdentity struct {
@@ -122,17 +130,23 @@ type Provider struct {
 	lifetimeCtx    context.Context
 	lifetimeCancel context.CancelFunc
 
-	setCmdDir               bool
-	emitSessionStart        bool
-	subprocessDiscovery     bool
-	appendCWDArg            bool
-	authenticateID          string
-	validateStart           func(opts runtime.StartOptions) error
-	buildClientArgs         func(opts runtime.StartOptions, absDir string) ([]string, error)
-	buildSessionOpenOptions func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (SessionOpenOptions, error)
-	configureSession        func(ctx context.Context, session *Session, opts runtime.StartOptions) error
-	buildClientEnv          func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
-	clientEnvCleanup        func() error
+	setCmdDir                  bool
+	emitSessionStart           bool
+	subprocessDiscovery        bool
+	appendCWDArg               bool
+	authenticateID             string
+	validateStart              func(opts runtime.StartOptions) error
+	buildClientArgs            func(opts runtime.StartOptions, absDir string) ([]string, error)
+	buildSessionOpenOptions    func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (SessionOpenOptions, error)
+	configureSession           func(ctx context.Context, session *Session, opts runtime.StartOptions) error
+	buildClientEnv             func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
+	clientEnvCleanup           func() error
+	tolerateInconsistentFinish bool
+
+	// streamedChunks counts the agent.message_chunk events the pump broadcast
+	// per session. The fx carve-out in Prompt reads it to tell a turn the model
+	// already answered from one that failed before any content.
+	streamedChunks map[string]int
 
 	// Broker fields for channel-wrapped prompt injection.
 	broker       *broker.Broker
@@ -148,28 +162,30 @@ type Provider struct {
 
 func NewProvider(cfg ProviderConfig) runtime.Provider {
 	return &Provider{
-		opts:                    cfg.Opts,
-		backendID:               cfg.BackendID,
-		bin:                     cfg.Bin,
-		args:                    cfg.Args,
-		sessions:                map[string]*Session{},
-		activePrompts:           map[string]chan struct{}{},
-		injectReserved:          map[string]int{},
-		runIDs:                  map[string]string{},
-		pollContexts:            map[string]context.Context{},
-		pollCancels:             map[string]context.CancelFunc{},
-		pollGen:                 map[string]uint64{},
-		Queue:                   warmqueue.NewQueue(),
-		setCmdDir:               cfg.SetCmdDir,
-		emitSessionStart:        cfg.EmitSessionStart,
-		subprocessDiscovery:     cfg.SubprocessDiscovery,
-		appendCWDArg:            cfg.AppendCWDArg,
-		authenticateID:          cfg.Authenticate,
-		validateStart:           cfg.ValidateStart,
-		buildClientArgs:         cfg.BuildClientArgs,
-		buildSessionOpenOptions: cfg.BuildSessionOpenOptions,
-		configureSession:        cfg.ConfigureSession,
-		buildClientEnv:          cfg.BuildClientEnv,
+		opts:                       cfg.Opts,
+		backendID:                  cfg.BackendID,
+		bin:                        cfg.Bin,
+		args:                       cfg.Args,
+		sessions:                   map[string]*Session{},
+		activePrompts:              map[string]chan struct{}{},
+		injectReserved:             map[string]int{},
+		runIDs:                     map[string]string{},
+		pollContexts:               map[string]context.Context{},
+		pollCancels:                map[string]context.CancelFunc{},
+		pollGen:                    map[string]uint64{},
+		Queue:                      warmqueue.NewQueue(),
+		setCmdDir:                  cfg.SetCmdDir,
+		emitSessionStart:           cfg.EmitSessionStart,
+		subprocessDiscovery:        cfg.SubprocessDiscovery,
+		appendCWDArg:               cfg.AppendCWDArg,
+		authenticateID:             cfg.Authenticate,
+		validateStart:              cfg.ValidateStart,
+		buildClientArgs:            cfg.BuildClientArgs,
+		buildSessionOpenOptions:    cfg.BuildSessionOpenOptions,
+		configureSession:           cfg.ConfigureSession,
+		buildClientEnv:             cfg.BuildClientEnv,
+		tolerateInconsistentFinish: cfg.TolerateInconsistentFinish,
+		streamedChunks:             map[string]int{},
 	}
 }
 
@@ -184,6 +200,9 @@ func (p *Provider) ensureMapsLocked() {
 	}
 	if p.injectReserved == nil {
 		p.injectReserved = map[string]int{}
+	}
+	if p.streamedChunks == nil {
+		p.streamedChunks = map[string]int{}
 	}
 	if p.runIDs == nil {
 		p.runIDs = map[string]string{}
@@ -666,10 +685,43 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	event, err := session.Prompt(ctx, prompt)
 	if err != nil {
-		return err
+		if p.tolerateInconsistentFinish && isInconsistentFinishReason(err) && p.hasStreamedChunks(sessionID) {
+			p.publishToHub(hub, events.Event{
+				Event:     "avenor.error",
+				SessionID: sessionID,
+				Fields: map[string]any{
+					"message": "backend ended the turn with an inconsistent finish reason after streaming its reply; treating the turn as complete",
+					"source":  "warning",
+				},
+			})
+			event = events.Event{
+				Event:     "session.end",
+				SessionID: sessionID,
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}
+		} else {
+			return err
+		}
 	}
 	p.publishToHub(hub, event)
 	return nil
+}
+
+// isInconsistentFinishReason matches fx's InconsistentFinishReason JSON-RPC
+// error. It is the fx carve-out's recognizer, not a pattern to build on: the
+// shared ACP client renders the error as "json-rpc session/prompt failed:
+// <message> (<code>)", and fx's message names the condition.
+func isInconsistentFinishReason(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "InconsistentFinishReason")
+}
+
+// hasStreamedChunks reports whether the pump ever broadcast an agent.message_chunk
+// for the session, so a carve-out that swallows a prompt error can tell a turn
+// the model already answered from one that produced nothing.
+func (p *Provider) hasStreamedChunks(sessionID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.streamedChunks[sessionID] > 0
 }
 
 func (p *Provider) Cancel(ctx context.Context, sessionID string) error {
@@ -758,6 +810,7 @@ func (p *Provider) Close() error {
 	p.sessions = map[string]*Session{}
 	p.activePrompts = map[string]chan struct{}{}
 	p.injectReserved = map[string]int{}
+	p.streamedChunks = map[string]int{}
 	p.runIDs = nil
 	p.pollContexts = map[string]context.Context{}
 	p.pollCancels = map[string]context.CancelFunc{}
@@ -1117,6 +1170,12 @@ func (p *Provider) pumpClientEvents(client *Client, hub *eventHub) {
 }
 
 func (p *Provider) processAndBroadcast(hub *eventHub, event events.Event) {
+	if event.Event == "agent.message_chunk" {
+		p.mu.Lock()
+		p.ensureMapsLocked()
+		p.streamedChunks[event.SessionID]++
+		p.mu.Unlock()
+	}
 	p.cachePermissionOptionsWithHub(hub, event)
 	if hub != nil {
 		hub.broadcast(event)

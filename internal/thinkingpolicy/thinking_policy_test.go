@@ -48,7 +48,7 @@ func TestEvaluate(t *testing.T) {
 	}
 
 	// Backends with no support at all.
-	for _, backend := range []string{"opencode-acp", "opencode-http", "gemini-acp", "cursor-acp", "pony"} {
+	for _, backend := range []string{"opencode-acp", "opencode-http", "gemini-acp", "cursor-acp", "fx", "pony"} {
 		if got := Evaluate(backend, "low", false); got != UnsupportedCapability {
 			t.Errorf("%s low = %v, want UnsupportedCapability", backend, got)
 		}

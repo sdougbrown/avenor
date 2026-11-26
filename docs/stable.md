@@ -102,7 +102,7 @@ Spawn parameters (all optional except one prompt source):
 | `--label` | string | Free-form label for log correlation and list output |
 | `--model` | string | Backend-specific model ID (e.g. `claude-sonnet-4-5`) |
 | `--thinking` | string | Run-level backend-native reasoning level; validated against the effective backend |
-| `--backend` | string | Runtime backend (opencode-acp, opencode-http, codex-app-server, agy, gemini-acp, cursor-acp, pi). Defaults to opencode-acp in direct mode |
+| `--backend` | string | Runtime backend (opencode-acp, opencode-http, codex-app-server, agy, gemini-acp, cursor-acp, fx, pi). Defaults to opencode-acp in direct mode |
 | `--roster-file` | string | Roster map for roster mode, or root workflow fallback |
 | `--roster-entry` | string | Entry key for roster mode; invalid with `--loop-file` or `--team-file` |
 | `--server-url` | string | External ACP server endpoint for opencode-http backend |
