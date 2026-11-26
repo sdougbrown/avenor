@@ -2600,7 +2600,15 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 				return nil
 			}
 			p.client.dispatch(chunkUpdate)
-			time.Sleep(50 * time.Millisecond) // let the pump count the chunk
+			for {
+				p.mu.Lock()
+				streamed := p.streamedChunks["ses_1"] > 0
+				p.mu.Unlock()
+				if streamed {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
 			return &rpcEnvelope{ID: msg.ID, Error: finishError}
 		}
 		p, _ = newProvider(t, false, onCall)
@@ -2608,6 +2616,42 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 
 		if err := p.Prompt(context.Background(), "ses_1", "turn"); err == nil || !strings.Contains(err.Error(), "InconsistentFinishReason") {
 			t.Fatalf("Prompt with carve-out off err = %v, want the finish-reason error", err)
+		}
+	})
+
+	// A turn that fails after an earlier turn was tolerated must still fail:
+	// the streamed-chunk counter belongs to the current prompt, so leftover
+	// credit from the tolerated turn cannot mask a later silent failure.
+	t.Run("second silent failure still fails", func(t *testing.T) {
+		var p *Provider
+		firstCall := true
+		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			if firstCall {
+				firstCall = false
+				p.client.dispatch(chunkUpdate)
+				for {
+					p.mu.Lock()
+					streamed := p.streamedChunks["ses_1"] > 0
+					p.mu.Unlock()
+					if streamed {
+						break
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		}
+		p, _ = newProvider(t, true, onCall)
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		if err := p.Prompt(context.Background(), "ses_1", "first turn"); err != nil {
+			t.Fatalf("first Prompt with carve-out: %v, want tolerated", err)
+		}
+		if err := p.Prompt(context.Background(), "ses_1", "second turn"); err == nil || !strings.Contains(err.Error(), "InconsistentFinishReason") {
+			t.Fatalf("second Prompt with no streamed content err = %v, want the finish-reason error", err)
 		}
 	})
 }

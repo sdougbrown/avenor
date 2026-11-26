@@ -30,7 +30,7 @@ func NewWithOptions(opts runtime.StartOptions) runtime.Provider {
 
 // noopConfigureSession is a no-op because fx sets its provider and model via
 // the --provider and --model CLI flags at process spawn time, so per-session
-// config is not currently supported.
+// config is not supported.
 func noopConfigureSession(ctx context.Context, session *acp.Session, opts runtime.StartOptions) error {
 	return nil
 }

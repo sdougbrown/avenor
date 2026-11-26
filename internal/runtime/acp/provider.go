@@ -659,10 +659,16 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	if p.injectReserved == nil {
 		p.injectReserved = map[string]int{}
 	}
+	if p.streamedChunks == nil {
+		p.streamedChunks = map[string]int{}
+	}
 	if p.activePrompts[sessionID] != nil || p.injectReserved[sessionID] > 0 {
 		p.mu.Unlock()
 		return fmt.Errorf("%s: prompt already in flight for session %q", p.backendID, sessionID)
 	}
+	// The carve-out reads only this prompt's streamed chunks, so the counter
+	// starts at zero here and never reflects an earlier turn.
+	p.streamedChunks[sessionID] = 0
 	myDone := make(chan struct{})
 	p.activePrompts[sessionID] = myDone
 	hub := p.hub
@@ -685,7 +691,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	event, err := session.Prompt(ctx, prompt)
 	if err != nil {
-		if p.tolerateInconsistentFinish && isInconsistentFinishReason(err) && p.hasStreamedChunks(sessionID) {
+		if p.tolerateInconsistentFinish && isInconsistentFinishReason(err) && p.awaitStreamedChunks(sessionID) {
 			p.publishToHub(hub, events.Event{
 				Event:     "avenor.error",
 				SessionID: sessionID,
@@ -715,13 +721,35 @@ func isInconsistentFinishReason(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "InconsistentFinishReason")
 }
 
-// hasStreamedChunks reports whether the pump ever broadcast an agent.message_chunk
-// for the session, so a carve-out that swallows a prompt error can tell a turn
-// the model already answered from one that produced nothing.
+// hasStreamedChunks reports whether the pump has broadcast an agent.message_chunk
+// for the session since the current prompt began.
 func (p *Provider) hasStreamedChunks(sessionID string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.streamedChunks[sessionID] > 0
+}
+
+// streamedChunkWait bounds how long the fx carve-out waits for the pump to
+// account the prompt's message chunks before it concedes that the turn
+// produced no content.
+const streamedChunkWait = 2 * time.Second
+
+// awaitStreamedChunks waits, bounded, for the pump to broadcast this prompt's
+// first message chunk. The error response and the chunk notifications sit in
+// the same stream without a happens-before edge, so a single read can miss
+// content that is already queued; the wait keeps the carve-out from depending
+// on pump timing.
+func (p *Provider) awaitStreamedChunks(sessionID string) bool {
+	deadline := time.Now().Add(streamedChunkWait)
+	for {
+		if p.hasStreamedChunks(sessionID) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (p *Provider) Cancel(ctx context.Context, sessionID string) error {

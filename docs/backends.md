@@ -430,7 +430,7 @@ Avenor spawns `fx acp` and talks via ACP over stdio.
 
 **Model selection caveat:** fx reads its provider and model from its own CLI config at spawn time. Passing `--model` to Avenor has no effect on `fx`; use `fx provider` and `fx login` to set it, or pass `--provider`/`--model` through a roster entry's `args` if your setup supports configured launches.
 
-**Reliability caveat:** fx's ACP server can end a turn with its own `system: request failed: inconsistent finish reason` message instead of a clean stop, especially against local models. Avenor treats that text as turn output; the session stays usable for a follow-up prompt.
+**Reliability caveat:** fx's ACP server can end a turn by rejecting `session/prompt` with its `InconsistentFinishReason` error instead of a clean stop, especially against local models, even though the reply already streamed. Avenor tolerates that error when the turn streamed message content: it logs a warning and completes the turn, so the session stays usable for a follow-up prompt.
 
 ```sh
 avenor \
