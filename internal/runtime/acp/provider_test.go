@@ -2529,6 +2529,28 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 		return p, eventCh
 	}
 
+	// waitStreamed waits, bounded, for the pump to record the prompt's first
+	// streamed chunk, so a regression that stops the recording fails the test
+	// instead of hanging it. Safe to call from the fake peer's writer goroutine:
+	// it reports with t.Errorf, never t.Fatalf.
+	waitStreamed := func(t *testing.T, p *Provider) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			p.mu.Lock()
+			streamed := p.streamedChunks["ses_1"] > 0
+			p.mu.Unlock()
+			if streamed {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("pump never recorded a streamed chunk for ses_1 within 2s")
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
 	t.Run("tolerated after streamed content", func(t *testing.T) {
 		var p *Provider
 		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
@@ -2536,15 +2558,7 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 				return nil
 			}
 			p.client.dispatch(chunkUpdate)
-			for {
-				p.mu.Lock()
-				streamed := p.streamedChunks["ses_1"] > 0
-				p.mu.Unlock()
-				if streamed {
-					break
-				}
-				time.Sleep(5 * time.Millisecond)
-			}
+			waitStreamed(t, p)
 			return &rpcEnvelope{ID: msg.ID, Error: finishError}
 		}
 		p, eventCh := newProvider(t, true, onCall)
@@ -2625,15 +2639,7 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 			if firstCall {
 				firstCall = false
 				p.client.dispatch(chunkUpdate)
-				for {
-					p.mu.Lock()
-					streamed := p.streamedChunks["ses_1"] > 0
-					p.mu.Unlock()
-					if streamed {
-						break
-					}
-					time.Sleep(5 * time.Millisecond)
-				}
+				waitStreamed(t, p)
 			}
 			return &rpcEnvelope{ID: msg.ID, Error: finishError}
 		}

@@ -36,19 +36,19 @@ const sessionCloseTimeout = 2 * time.Second
 // optional, and a field left at its zero value keeps the shared default, so this
 // table is the whole of what a backend varies:
 //
-//	                     agy                   opencode-acp          gemini-acp  cursor-acp
-//	Args                 built per run         acp --pure --log-…    --acp …     acp
-//	SetCmdDir            true                  false                 false       false
-//	EmitSessionStart     true                  false                 false       false
-//	SubprocessDiscovery  false                 true                  false       false
-//	AppendCWDArg         false                 true                  false       false
-//	Authenticate         unset                 unset                 unset       cursor_login
-//	ValidateStart        AVENOR_AGY_TRANSPORT  unset                 unset       unset
-//	BuildClientArgs      --add-dir, --agent    unset                 unset       unset
-//	BuildSessionOpenOpts channel-tools         unset                 unset       unset
-//	ConfigureSession     model                 model, mode           no-op       no-op
-//	BuildClientEnv       unset                 channel-tools, mode   unset       unset
-//	TolerateInconsistentFinish unset          unset                 unset       unset
+//	                     agy                   opencode-acp          gemini-acp  cursor-acp  fx
+//	Args                 built per run         acp --pure --log-…    --acp …     acp         acp
+//	SetCmdDir            true                  false                 false       false       false
+//	EmitSessionStart     true                  false                 false       false       false
+//	SubprocessDiscovery  false                 true                  false       false       false
+//	AppendCWDArg         false                 true                  false       false       false
+//	Authenticate         unset                 unset                 unset       cursor_login unset
+//	ValidateStart        AVENOR_AGY_TRANSPORT  unset                 unset       unset       unset
+//	BuildClientArgs      --add-dir, --agent    unset                 unset       unset       unset
+//	BuildSessionOpenOpts channel-tools         unset                 unset       unset       unset
+//	ConfigureSession     model                 model, mode           no-op       no-op       no-op
+//	BuildClientEnv       unset                 channel-tools, mode   unset       unset       unset
+//	TolerateInconsistentFinish unset          unset                 unset       unset       true
 //
 // Leaving a field unset is not neutral, it selects the shared default, and the
 // consequences differ per field. EmitSessionStart publishes session.start, which
@@ -57,9 +57,9 @@ const sessionCloseTimeout = 2 * time.Second
 // neither. SetCmdDir false leaves the child in the provider's own working
 // directory rather than the session's. BuildSessionOpenOptions nil opens every
 // session with no MCP servers, which drops broker messaging without an error.
-// Group these variants behind one backend-options struct when a fifth backend
-// lands; until then the table keeps the combinations in one place instead of
-// spreading them across the backends.
+// Group these variants behind one backend-options struct as a follow-up; until
+// then the table keeps the combinations in one place instead of spreading them
+// across the backends.
 type ProviderConfig struct {
 	BackendID               string
 	Bin                     string
