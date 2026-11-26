@@ -85,4 +85,6 @@ export interface HostContext {
   tools: {
     register(definition: unknown): () => void
   }
+  /** Cordis effect scope: the returned disposer runs when the plugin unloads. */
+  effect?(scope: () => (() => void) | void): () => void
 }

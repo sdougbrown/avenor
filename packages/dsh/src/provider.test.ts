@@ -287,6 +287,32 @@ describe('avenor subagent provider', () => {
     expect(fake.calls.cancel).toBe(2)
   })
 
+  it('tracks a started run for inbound delivery until it settles', async () => {
+    const fake = fakeSeam()
+    const remembered: string[] = []
+    const forgotten: string[] = []
+    let inbound = 0
+    const tracker = {
+      remember(runId: string) {
+        remembered.push(runId)
+      },
+      forget(runId: string) {
+        forgotten.push(runId)
+      },
+      ensureInbound() {
+        inbound += 1
+      },
+    }
+
+    const run = await startRun(createAvenorProvider(fake.seam, tracker), startRequest('work'))
+    expect(remembered).toEqual(['run-1'])
+    expect(inbound).toBe(1)
+
+    fake.settle(terminal())
+    await run.result
+    expect(forgotten).toEqual(['run-1'])
+  })
+
   it('propagates a start failure instead of minting a run', async () => {
     const seam: AvenorSeam = {
       async spawn() {

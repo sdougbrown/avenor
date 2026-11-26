@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'bun:test'
 import { apply, inject, register, type HostConfig } from './index.js'
 import type { AvenorSeam } from './provider.js'
-import type { MessagingHost } from './messaging.js'
-import type { HostContext, SubagentProvider } from './types.js'
+import type { MessagingHost, MessagingRuntime } from './messaging.js'
+import type { InboundAsk } from '@dougbots/avenor-core'
+import type { HostContext, ParentAgent, SubagentProvider } from './types.js'
 
 function fakeContext() {
   const providers: SubagentProvider[] = []
   const tools: unknown[] = []
+  const effects: Array<() => void> = []
   const ctx: HostContext = {
     subagents: {
       registerProvider(provider) {
@@ -20,11 +22,14 @@ function fakeContext() {
         return () => {}
       },
     },
+    effect(scope) {
+      effects.push((scope() ?? (() => {})) as () => void)
+      return () => {}
+    },
   }
-  return { ctx, providers, tools }
+  return { ctx, providers, tools, effects }
 }
 
-/** A seam that never runs anything, recording the request it was built from. */
 function recordingSeamFactory() {
   const requests: unknown[] = []
   const seam: AvenorSeam = {
@@ -41,20 +46,42 @@ function recordingSeamFactory() {
   }
 }
 
-function fakeMessagingHost() {
+function fakeRuntime() {
   const calls: string[] = []
+  const parents = new Map<string, ParentAgent>()
+  const asks: InboundAsk[] = []
   const host: MessagingHost = {
     hostRunId: 'supervisor',
     async message() {
-      calls.push('message')
       return { outcome: 'sent' }
     },
     async peers() {
-      calls.push('peers')
       return { outcome: 'listed' }
     },
   }
-  return { host, calls, getMessagingHost: async () => host }
+  const runtime: MessagingRuntime = {
+    host: async () => host,
+    remember(runId, parent) {
+      calls.push(`remember:${runId}`)
+      parents.set(runId, parent)
+    },
+    forget(runId) {
+      calls.push(`forget:${runId}`)
+      parents.delete(runId)
+    },
+    parentFor: (runId) => parents.get(runId),
+    registerAsk(ask) {
+      calls.push(`ask:${ask.message_id}`)
+      asks.push(ask)
+    },
+    ensureInbound() {
+      calls.push('inbound')
+    },
+    stop() {
+      calls.push('stop')
+    },
+  }
+  return { runtime, calls, asks }
 }
 
 const toolNames = (tools: unknown[]) =>
@@ -68,12 +95,7 @@ describe('plugin entry', () => {
   it('registers the provider and the three tools', () => {
     const fake = fakeContext()
     const seams = recordingSeamFactory()
-    const messaging = fakeMessagingHost()
-    register(fake.ctx, {}, {
-      answer: { answer: async () => ({ ok: true }) },
-      makeSeam: seams.makeSeam,
-      getMessagingHost: messaging.getMessagingHost,
-    })
+    register(fake.ctx, {}, { answer: { answer: async () => ({ ok: true }) }, makeSeam: seams.makeSeam, runtime: fakeRuntime().runtime })
 
     expect(fake.providers.map((provider) => provider.name)).toEqual(['avenor'])
     expect(fake.providers[0].inheritsParentContext).toBe(false)
@@ -89,7 +111,7 @@ describe('plugin entry', () => {
     register(fake.ctx, {}, {
       answer: { answer: async () => ({ ok: true }) },
       makeSeam: recordingSeamFactory().makeSeam,
-      getMessagingHost: fakeMessagingHost().getMessagingHost,
+      runtime: fakeRuntime().runtime,
     })
     // tools.register asserts the raw JSON Schema subset; an authoring-only type
     // such as 'json' throws there and takes the plugin's other tools with it.
@@ -102,65 +124,44 @@ describe('plugin entry', () => {
   it('passes the row config through to the child selection', () => {
     const fake = fakeContext()
     const seams = recordingSeamFactory()
-    const messaging = fakeMessagingHost()
-    const config: HostConfig = {
-      backend: 'dsh',
-      model: 'grace/qwen',
-      rosterEntry: 'reviewer',
-      rosterFile: '/roster.json',
-    }
+    const config: HostConfig = { backend: 'dsh', model: 'grace/qwen' }
 
     register(fake.ctx, config, {
       answer: { answer: async () => ({ ok: true }) },
       makeSeam: seams.makeSeam,
-      getMessagingHost: messaging.getMessagingHost,
+      runtime: fakeRuntime().runtime,
     })
 
     expect(seams.requests).toEqual([
-      {
-        selection: {
-          backend: 'dsh',
-          model: 'grace/qwen',
-          rosterEntry: 'reviewer',
-          rosterFile: '/roster.json',
-        },
-        messaging: false,
-        parentRunId: 'supervisor',
-      },
+      { selection: { backend: 'dsh', model: 'grace/qwen' }, messaging: false, parentRunId: 'supervisor' },
     ])
   })
 
   it('binds messaging to the supervisor by default when enabled', () => {
     const fake = fakeContext()
     const seams = recordingSeamFactory()
-    const messaging = fakeMessagingHost()
     register(fake.ctx, { messaging: true }, {
       answer: { answer: async () => ({ ok: true }) },
       makeSeam: seams.makeSeam,
-      getMessagingHost: messaging.getMessagingHost,
+      runtime: fakeRuntime().runtime,
     })
-
     expect(seams.requests).toEqual([
       { selection: {}, messaging: true, parentRunId: 'supervisor' },
     ])
   })
 
-  it('omits unset selection fields rather than passing empty strings', () => {
+  it('registers everything from apply and stops the runtime on unload', () => {
     const fake = fakeContext()
-    const seams = recordingSeamFactory()
-    const messaging = fakeMessagingHost()
-    register(fake.ctx, { agent: 'planner' }, {
-      answer: { answer: async () => ({ ok: true }) },
-      makeSeam: seams.makeSeam,
-      getMessagingHost: messaging.getMessagingHost,
-    })
-    expect((seams.requests[0] as { selection: unknown }).selection).toEqual({ agent: 'planner' })
-  })
+    const parts = fakeRuntime()
+    apply(fake.ctx, {}, { runtime: parts.runtime })
 
-  it('registers everything from apply', () => {
-    const fake = fakeContext()
-    apply(fake.ctx)
     expect(fake.providers).toHaveLength(1)
     expect(fake.tools).toHaveLength(3)
+    // Activation starts no broker work: the receive loop waits for a delegation
+    // or a message call.
+    expect(parts.calls).toEqual([])
+
+    for (const dispose of fake.effects) dispose()
+    expect(parts.calls).toEqual(['stop'])
   })
 })

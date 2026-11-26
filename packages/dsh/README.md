@@ -94,12 +94,16 @@ the six message actions and the peer listing are core's router, not a copy.
     messaging: true
 ```
 
-**What is not wired: the inbound receive loop.** A child's tell or ask is
-recorded by the broker, but the plugin does not poll `message_receive` yet, so
-nothing delivers it into the agent and an ask sits unanswered. Everything the
-harness *sends* works; everything it must *receive* does not. Wiring it needs
-the receive loop plus ask-claim bookkeeping, and it needs a live broker to
-verify — guessing at that path would ship a silent message sink.
+**Inbound.** The plugin polls the broker's receive endpoint while a delegation
+is live and delivers each tell or ask to the agent that started that run:
+`inject` while the agent is running, `followup` to wake it when idle. An ask is
+registered so `avenor_message action=reply` can reach the sender. A frame from a
+run this harness did not start is dropped rather than delivered to an arbitrary
+agent.
+
+The loop starts with the first delegation, not at activation, and stops when
+the plugin unloads. A settled run is forgotten, so a frame that arrives after
+its child finished has nowhere to go.
 
 ## Install (local bundle)
 

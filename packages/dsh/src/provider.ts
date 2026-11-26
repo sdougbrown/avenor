@@ -34,6 +34,16 @@ export interface AvenorSeam {
   ): Promise<AvenorHandle>
 }
 
+/**
+ * What the plugin tracks outside one run: which agent started it (so an inbound
+ * frame can reach that agent) and whether the receive loop is running.
+ */
+export interface DelegationTracker {
+  remember(runId: string, parent: ParentAgent): void
+  forget(runId: string): void
+  ensureInbound(): void
+}
+
 export interface AvenorHandle {
   readonly runId: string
   /** Resolves once the run is terminal — never while it waits for a decision. */
@@ -249,7 +259,10 @@ export function permissionMessage(runId: string, permission: PendingPermission):
  * run per start, wakes the parent on a permission request, and maps the run's
  * terminal state onto the subagent result.
  */
-export function createAvenorProvider(seam: AvenorSeam): SubagentProvider {
+export function createAvenorProvider(
+  seam: AvenorSeam,
+  tracker?: DelegationTracker,
+): SubagentProvider {
   return {
     name: 'avenor',
     capabilities: NO_START_CAPABILITIES,
@@ -265,6 +278,9 @@ export function createAvenorProvider(seam: AvenorSeam): SubagentProvider {
         (runId, permission) => notifyParent(request.parent, runId, permission),
       )
 
+      tracker?.remember(handle.runId, request.parent)
+      tracker?.ensureInbound()
+
       const onAbort = (): void => {
         void handle.cancel()
       }
@@ -272,10 +288,16 @@ export function createAvenorProvider(seam: AvenorSeam): SubagentProvider {
 
       return {
         id: handle.runId,
-        result: handle.done.then(toSubagentResult),
+        result: handle.done.then((terminal) => {
+          // A settled child sends nothing more; forget it before the manager
+          // disposes, so a late frame cannot reach an agent that moved on.
+          tracker?.forget(handle.runId)
+          return toSubagentResult(terminal)
+        }),
         dispose: async () => {
           request.signal.removeEventListener('abort', onAbort)
           await handle.cancel()
+          tracker?.forget(handle.runId)
         },
       }
     },

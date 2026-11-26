@@ -1,7 +1,7 @@
 import { answerPermissionTool } from '@dougbots/avenor-core'
 import { answerToolDefinition, type AnswerDeps } from './answer-tool.js'
-import { messageToolDefinition, peersToolDefinition, type LazyMessagingHost } from './message-tools.js'
-import { createLazyMessagingHost, HOST_RUN_ID } from './messaging.js'
+import { messageToolDefinition, peersToolDefinition } from './message-tools.js'
+import { createMessagingRuntime, HOST_RUN_ID, type MessagingRuntime } from './messaging.js'
 import {
   createAvenorProvider,
   createCoreSeam,
@@ -66,29 +66,38 @@ function selectionOf(config: HostConfig): AvenorSelection {
 export interface RegisterDeps {
   readonly answer?: AnswerDeps
   readonly makeSeam?: SeamFactory
-  readonly getMessagingHost?: LazyMessagingHost
+  readonly runtime?: MessagingRuntime
 }
 
-export function register(ctx: HostContext, config: HostConfig = {}, deps: RegisterDeps = {}): void {
+export function register(
+  ctx: HostContext,
+  config: HostConfig = {},
+  deps: RegisterDeps = {},
+): MessagingRuntime {
   const answer = deps.answer ?? defaultAnswer
   const makeSeam = deps.makeSeam ?? defaultSeamFactory
   const messaging = config.messaging === true
   const parentRunId = config.parentRunId ?? HOST_RUN_ID
+  const runtime = deps.runtime ?? createMessagingRuntime()
 
   ctx.subagents.registerProvider(
-    createAvenorProvider(makeSeam({ selection: selectionOf(config), messaging, parentRunId })),
+    createAvenorProvider(
+      makeSeam({ selection: selectionOf(config), messaging, parentRunId }),
+      runtime,
+    ),
   )
   ctx.tools.register(answerToolDefinition(answer))
-
-  const getHost = deps.getMessagingHost ?? createLazyMessagingHost()
-  ctx.tools.register(messageToolDefinition(getHost))
-  ctx.tools.register(peersToolDefinition(getHost))
+  ctx.tools.register(messageToolDefinition(() => runtime.host()))
+  ctx.tools.register(peersToolDefinition(() => runtime.host()))
+  return runtime
 }
 
 /**
  * Cordis entry point. `config` is the patch row's `config` object, so a profile
  * chooses the delegated child's route in YAML rather than in code.
  */
-export function apply(ctx: HostContext, config: HostConfig = {}): void {
-  register(ctx, config)
+export function apply(ctx: HostContext, config: HostConfig = {}, deps: RegisterDeps = {}): void {
+  const runtime = register(ctx, config, deps)
+  // Cordis runs the effect callback now and its returned disposer on unload.
+  if (ctx.effect) ctx.effect(() => () => runtime.stop())
 }
