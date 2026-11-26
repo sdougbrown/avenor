@@ -420,6 +420,56 @@ func TestEnsureClientRaceLossClosesLoser(t *testing.T) {
 	}
 }
 
+func TestCloseRejectsLateAppServer(t *testing.T) {
+	c, _, _ := fakeClient()
+	p := NewWithOptions(runtime.StartOptions{})
+	initializing := make(chan context.Context, 1)
+	release := make(chan struct{})
+	p.startClient = func(ctx context.Context, _ runtime.StartOptions) (*client, error) {
+		initializing <- ctx
+		<-release
+		return c, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan error, 1)
+	go func() {
+		_, err := p.ensureClient(ctx, runtime.StartOptions{})
+		started <- err
+	}()
+	launchCtx := <-initializing
+	closed := make(chan struct{})
+	go func() {
+		_ = p.Close()
+		close(closed)
+	}()
+	select {
+	case <-launchCtx.Done():
+	case <-closed:
+	case <-ctx.Done():
+		t.Error("Close neither canceled initialization nor returned")
+	}
+	close(release)
+	select {
+	case err := <-started:
+		if err == nil {
+			t.Error("initialization returned a usable client after Close")
+		}
+	case <-ctx.Done():
+		t.Fatal("initialization did not return")
+	}
+	select {
+	case _, ok := <-c.Events():
+		if ok {
+			t.Error("late app-server client delivered an event")
+		}
+	default:
+		t.Error("late app-server client was left open")
+		_ = p.Close()
+	}
+}
+
 // TestEnsureClientStartError verifies the start-error path: the error
 // propagates, no client is stored, and — critically — p.mu was released so a
 // subsequent call is not deadlocked by a leaked lock. This guards the branch

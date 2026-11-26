@@ -176,6 +176,10 @@ func (c *client) request(ctx context.Context, method string, params any) (json.R
 	ch := make(chan json.RawMessage, 1)
 
 	c.mu.Lock()
+	if c.pending == nil {
+		c.mu.Unlock()
+		return nil, errors.New("client closed")
+	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 
@@ -332,6 +336,11 @@ func (c *client) unsubscribe(threadID string, ch chan events.Event) {
 func (c *client) registerTurn(turnID string) chan events.Event {
 	ch := make(chan events.Event, 1)
 	c.mu.Lock()
+	if c.turns == nil {
+		close(ch)
+		c.mu.Unlock()
+		return ch
+	}
 	c.turns[turnID] = ch
 	if ev, ok := c.turnDone[turnID]; ok {
 		delete(c.turnDone, turnID)

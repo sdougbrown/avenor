@@ -169,6 +169,63 @@ func TestClose(t *testing.T) {
 	}
 }
 
+func TestCloseCancelsHealthCheckBeforeOpeningSession(t *testing.T) {
+	checking := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	var sessionRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/global/health":
+			close(checking)
+			select {
+			case <-release:
+				w.WriteHeader(http.StatusOK)
+			case <-r.Context().Done():
+				close(canceled)
+			}
+		case "/session/ses_test":
+			sessionRequests.Add(1)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer server.Close()
+	p, err := NewWithOptions(runtime.StartOptions{ServerURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closer := p.(*Provider)
+	defer closer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resumed := make(chan error, 1)
+	go func() {
+		_, err := p.Resume(ctx, "ses_test")
+		resumed <- err
+	}()
+	select {
+	case <-checking:
+	case <-ctx.Done():
+		t.Fatal("health check never reached the server")
+	}
+	if err := closer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-canceled:
+	case <-ctx.Done():
+		t.Error("Close did not cancel the health check")
+	}
+	close(release)
+	if err := <-resumed; err == nil {
+		t.Error("Resume succeeded after Close")
+	}
+	if got := sessionRequests.Load(); got != 0 {
+		t.Errorf("server received %d session requests after Close", got)
+	}
+}
+
 func TestPromptFailsBeforeStart(t *testing.T) {
 	p, err := NewWithOptions(runtime.StartOptions{})
 	if err != nil {
