@@ -143,10 +143,13 @@ type Provider struct {
 	clientEnvCleanup           func() error
 	tolerateInconsistentFinish bool
 
-	// streamedChunks counts the agent.message_chunk events the pump broadcast
-	// per session. The fx carve-out in Prompt reads it to tell a turn the model
-	// already answered from one that failed before any content.
+	// The fx carve-out's per-session prompt state, written only when
+	// tolerateInconsistentFinish is set. streamedChunks counts this prompt's
+	// agent.message_chunk events so tests can observe progress; firstChunks is
+	// the per-prompt signal the pump closes on the first chunk, so the carve-out
+	// waits on a channel instead of polling.
 	streamedChunks map[string]int
+	firstChunks    map[string]chan struct{}
 
 	// Broker fields for channel-wrapped prompt injection.
 	broker       *broker.Broker
@@ -186,6 +189,7 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		buildClientEnv:             cfg.BuildClientEnv,
 		tolerateInconsistentFinish: cfg.TolerateInconsistentFinish,
 		streamedChunks:             map[string]int{},
+		firstChunks:                map[string]chan struct{}{},
 	}
 }
 
@@ -203,6 +207,9 @@ func (p *Provider) ensureMapsLocked() {
 	}
 	if p.streamedChunks == nil {
 		p.streamedChunks = map[string]int{}
+	}
+	if p.firstChunks == nil {
+		p.firstChunks = map[string]chan struct{}{}
 	}
 	if p.runIDs == nil {
 		p.runIDs = map[string]string{}
@@ -662,13 +669,20 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 	if p.streamedChunks == nil {
 		p.streamedChunks = map[string]int{}
 	}
+	if p.firstChunks == nil {
+		p.firstChunks = map[string]chan struct{}{}
+	}
 	if p.activePrompts[sessionID] != nil || p.injectReserved[sessionID] > 0 {
 		p.mu.Unlock()
 		return fmt.Errorf("%s: prompt already in flight for session %q", p.backendID, sessionID)
 	}
-	// The carve-out reads only this prompt's streamed chunks, so the counter
-	// starts at zero here and never reflects an earlier turn.
+	// The carve-out reads only this prompt's streamed chunks, so the state
+	// starts fresh here and never reflects an earlier turn. The pump closes
+	// firstChunk on the first message chunk; Prompt waits on it in the
+	// carve-out instead of polling.
 	p.streamedChunks[sessionID] = 0
+	p.firstChunks[sessionID] = make(chan struct{})
+	firstChunk := p.firstChunks[sessionID]
 	myDone := make(chan struct{})
 	p.activePrompts[sessionID] = myDone
 	hub := p.hub
@@ -682,6 +696,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 		if p.activePrompts[sessionID] == myDone {
 			delete(p.activePrompts, sessionID)
 		}
+		delete(p.firstChunks, sessionID)
 		p.mu.Unlock()
 		close(myDone)
 		if hub != nil {
@@ -691,7 +706,7 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	event, err := session.Prompt(ctx, prompt)
 	if err != nil {
-		if p.tolerateInconsistentFinish && isInconsistentFinishReason(err) && p.awaitStreamedChunks(sessionID) {
+		if p.tolerateInconsistentFinish && isInconsistentFinishReason(err) && p.awaitStreamedChunks(sessionID, firstChunk) {
 			p.publishToHub(hub, events.Event{
 				Event:     "avenor.error",
 				SessionID: sessionID,
@@ -734,21 +749,18 @@ func (p *Provider) hasStreamedChunks(sessionID string) bool {
 // produced no content.
 const streamedChunkWait = 2 * time.Second
 
-// awaitStreamedChunks waits, bounded, for the pump to broadcast this prompt's
-// first message chunk. The error response and the chunk notifications sit in
-// the same stream without a happens-before edge, so a single read can miss
-// content that is already queued; the wait keeps the carve-out from depending
-// on pump timing.
-func (p *Provider) awaitStreamedChunks(sessionID string) bool {
-	deadline := time.Now().Add(streamedChunkWait)
-	for {
-		if p.hasStreamedChunks(sessionID) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond)
+// awaitStreamedChunks waits for the pump to close firstChunk — the prompt's
+// first message chunk — bounded by streamedChunkWait. The error response and
+// the chunk notifications share one stream without a happens-before edge, so
+// the wait keeps the carve-out from depending on pump timing.
+func (p *Provider) awaitStreamedChunks(sessionID string, firstChunk <-chan struct{}) bool {
+	timer := time.NewTimer(streamedChunkWait)
+	defer timer.Stop()
+	select {
+	case <-firstChunk:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -839,6 +851,7 @@ func (p *Provider) Close() error {
 	p.activePrompts = map[string]chan struct{}{}
 	p.injectReserved = map[string]int{}
 	p.streamedChunks = map[string]int{}
+	p.firstChunks = map[string]chan struct{}{}
 	p.runIDs = nil
 	p.pollContexts = map[string]context.Context{}
 	p.pollCancels = map[string]context.CancelFunc{}
@@ -1198,10 +1211,14 @@ func (p *Provider) pumpClientEvents(client *Client, hub *eventHub) {
 }
 
 func (p *Provider) processAndBroadcast(hub *eventHub, event events.Event) {
-	if event.Event == "agent.message_chunk" {
+	if p.tolerateInconsistentFinish && event.Event == "agent.message_chunk" {
 		p.mu.Lock()
 		p.ensureMapsLocked()
 		p.streamedChunks[event.SessionID]++
+		if ch := p.firstChunks[event.SessionID]; ch != nil {
+			delete(p.firstChunks, event.SessionID)
+			close(ch)
+		}
 		p.mu.Unlock()
 	}
 	p.cachePermissionOptionsWithHub(hub, event)

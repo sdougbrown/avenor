@@ -2599,16 +2599,9 @@ func TestPromptToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
 			if msg.Method != "session/prompt" {
 				return nil
 			}
+			// Chunks streamed, but the flag is off: the pump never records
+			// them and the carve-out is never consulted, so the error stands.
 			p.client.dispatch(chunkUpdate)
-			for {
-				p.mu.Lock()
-				streamed := p.streamedChunks["ses_1"] > 0
-				p.mu.Unlock()
-				if streamed {
-					break
-				}
-				time.Sleep(5 * time.Millisecond)
-			}
 			return &rpcEnvelope{ID: msg.ID, Error: finishError}
 		}
 		p, _ = newProvider(t, false, onCall)
