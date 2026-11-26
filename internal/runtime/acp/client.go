@@ -60,7 +60,10 @@ type Client struct {
 	pending              map[string]chan rpcEnvelope
 	permissionMu         sync.Mutex
 	permissions          map[string]rpcEnvelope
-	pid                  int
+	// sessions tracks the sessions this client opened, so dispatch can
+	// attribute session updates to the session they name.
+	sessions sync.Map
+	pid      int
 }
 
 func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
@@ -302,12 +305,25 @@ func (c *Client) dispatch(msg rpcEnvelope) {
 		return
 	}
 
-	event, err := mapSessionUpdate(msg.Params)
-	if err == nil {
-		select {
-		case c.events <- event:
-		case <-c.stopEvents:
+	var payload struct {
+		SessionID string         `json:"sessionId"`
+		Update    map[string]any `json:"update"`
+	}
+	if err := json.Unmarshal(msg.Params, &payload); err != nil {
+		return
+	}
+	event, err := mapSessionUpdate(payload.SessionID, payload.Update)
+	if err != nil {
+		return
+	}
+	if event.Event == "agent.message_chunk" {
+		if s, ok := c.sessions.Load(payload.SessionID); ok {
+			s.(*Session).chunks.Add(1)
 		}
+	}
+	select {
+	case c.events <- event:
+	case <-c.stopEvents:
 	}
 }
 

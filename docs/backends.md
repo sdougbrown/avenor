@@ -1,6 +1,6 @@
 # Backends
 
-Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, Pi, agy, or the in-process Pony test backend. Pick the one that matches what's running locally and what you need from the orchestration layer.
+Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, fx, Pi, agy, or the in-process Pony test backend. Pick the one that matches what's running locally and what you need from the orchestration layer.
 
 ## Backend selection
 
@@ -13,6 +13,7 @@ avenor --backend codex-app-server --prompt "say hi"
 avenor --backend agy --model gemini-4-argon-high --prompt "say hi"
 avenor --backend gemini-acp --prompt "say hi"
 avenor --backend cursor-acp --prompt "say hi"
+avenor --backend fx --prompt "say hi"
 avenor --backend pi --model anthropic/claude-sonnet-4-5 --prompt "say hi"
 avenor --backend claude --prompt "say hi"
 ```
@@ -95,7 +96,7 @@ A backend that starts a harness process exports Avenor's launch identity in that
 | Backend | Harness child receives identity |
 |---|---|
 | `pi` | ✓ RPC subprocess |
-| `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp` | ✓ ACP subprocess |
+| `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `fx` | ✓ ACP subprocess |
 | `codex-app-server` | ✓ app-server subprocess |
 | `poo` | ✓ stdio subprocess |
 | `claude` | ✓ PTY or tmux pane |
@@ -122,18 +123,18 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | pi | claude | pony | poo |
-|---|---|---|---|---|---|---|---|---|---|---|
-| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | ✓ | ⚠ | ✗ | ✓ |
-| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
-| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
-| Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
-| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | fx | pi | claude | pony | poo |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Session resume | ✓ | ✓ | ✓ | ✓ | — | — | — | ✓ | ⚠ | ✗ | ✓ |
+| Prompt execution | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cancel | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
+| Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
+| Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
+| External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
+| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
@@ -416,6 +417,24 @@ Avenor spawns `agent acp` and authenticates via `cursor_login`. Talks via ACP ov
 ```sh
 avenor \
   --backend cursor-acp \
+  --prompt "Review the changes in the current branch" \
+  --dir /repo \
+  --sentinel-file /tmp/done.env
+```
+
+---
+
+## fx
+
+Avenor spawns `fx acp` and talks via ACP over stdio.
+
+**Model selection caveat:** fx reads its provider and model from its own CLI config at spawn time. Passing `--model` to Avenor has no effect on `fx`; use `fx provider` and `fx login` to set it.
+
+**Reliability caveat:** fx's ACP server can end a turn by rejecting `session/prompt` with its `InconsistentFinishReason` error instead of a clean stop, especially against local models, even though the reply already streamed. Avenor tolerates that error when the turn streamed message content: it logs a warning and completes the turn, so the session stays usable for a follow-up prompt.
+
+```sh
+avenor \
+  --backend fx \
   --prompt "Review the changes in the current branch" \
   --dir /repo \
   --sentinel-file /tmp/done.env

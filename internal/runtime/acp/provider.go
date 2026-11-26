@@ -35,18 +35,19 @@ const sessionCloseTimeout = 2 * time.Second
 // optional, and a field left at its zero value keeps the shared default, so this
 // table is the whole of what a backend varies:
 //
-//	                     agy                   opencode-acp          gemini-acp  cursor-acp
-//	Args                 built per run         acp --pure --log-…    --acp …     acp
-//	SetCmdDir            true                  false                 false       false
-//	EmitSessionStart     true                  false                 false       false
-//	SubprocessDiscovery  false                 true                  false       false
-//	AppendCWDArg         false                 true                  false       false
-//	Authenticate         unset                 unset                 unset       cursor_login
-//	ValidateStart        AVENOR_AGY_TRANSPORT  unset                 unset       unset
-//	BuildClientArgs      --add-dir, --agent    unset                 unset       unset
-//	BuildSessionOpenOpts channel-tools         unset                 unset       unset
-//	ConfigureSession     model                 model, mode           no-op       no-op
-//	BuildClientEnv       unset                 channel-tools, mode   unset       unset
+//	                     agy                   opencode-acp          gemini-acp  cursor-acp  fx
+//	Args                 built per run         acp --pure --log-…    --acp …     acp         acp
+//	SetCmdDir            true                  false                 false       false       false
+//	EmitSessionStart     true                  false                 false       false       false
+//	SubprocessDiscovery  false                 true                  false       false       false
+//	AppendCWDArg         false                 true                  false       false       false
+//	Authenticate         unset                 unset                 unset       cursor_login unset
+//	ValidateStart        AVENOR_AGY_TRANSPORT  unset                 unset       unset       unset
+//	BuildClientArgs      --add-dir, --agent    unset                 unset       unset       unset
+//	BuildSessionOpenOpts channel-tools         unset                 unset       unset       unset
+//	ConfigureSession     model                 model, mode           no-op       no-op       no-op
+//	BuildClientEnv       unset                 channel-tools, mode   unset       unset       unset
+//	PromptFailedPolicy    unset                 unset                 unset       unset       finish policy
 //
 // Leaving a field unset is not neutral, it selects the shared default, and the
 // consequences differ per field. EmitSessionStart publishes session.start, which
@@ -55,9 +56,9 @@ const sessionCloseTimeout = 2 * time.Second
 // neither. SetCmdDir false leaves the child in the provider's own working
 // directory rather than the session's. BuildSessionOpenOptions nil opens every
 // session with no MCP servers, which drops broker messaging without an error.
-// Group these variants behind one backend-options struct when a fifth backend
-// lands; until then the table keeps the combinations in one place instead of
-// spreading them across the backends.
+// Group these variants behind one backend-options struct as a follow-up; until
+// then the table keeps the combinations in one place instead of spreading them
+// across the backends.
 type ProviderConfig struct {
 	BackendID               string
 	Bin                     string
@@ -73,7 +74,19 @@ type ProviderConfig struct {
 	BuildSessionOpenOptions func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (SessionOpenOptions, error)
 	ConfigureSession        func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 	BuildClientEnv          func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
+	// PromptFailedPolicy decides, for a session/prompt that returned an error,
+	// whether the turn should be treated as complete anyway. The provider
+	// publishes the decision's warning and synthetic session end; the policy
+	// owns the backend knowledge of which failures qualify. Nil means every
+	// prompt error fails the run.
+	PromptFailedPolicy PromptFailedPolicy
 }
+
+// PromptFailedPolicy decides, for a session/prompt that returned an error,
+// whether the turn should be treated as complete anyway. The provider
+// publishes the decision's warning and synthetic session end; the policy
+// owns the backend knowledge of which failures qualify.
+type PromptFailedPolicy func(session *Session, err error) bool
 
 type brokerIdentity struct {
 	runID  string
@@ -133,6 +146,7 @@ type Provider struct {
 	configureSession        func(ctx context.Context, session *Session, opts runtime.StartOptions) error
 	buildClientEnv          func(opts runtime.StartOptions, runID, brokerToken, brokerURL string) (map[string]string, func() error)
 	clientEnvCleanup        func() error
+	promptFailedPolicy      PromptFailedPolicy
 
 	// Broker fields for channel-wrapped prompt injection.
 	broker       *broker.Broker
@@ -170,6 +184,7 @@ func NewProvider(cfg ProviderConfig) runtime.Provider {
 		buildSessionOpenOptions: cfg.BuildSessionOpenOptions,
 		configureSession:        cfg.ConfigureSession,
 		buildClientEnv:          cfg.BuildClientEnv,
+		promptFailedPolicy:      cfg.PromptFailedPolicy,
 	}
 }
 
@@ -666,7 +681,23 @@ func (p *Provider) Prompt(ctx context.Context, sessionID string, prompt string) 
 
 	event, err := session.Prompt(ctx, prompt)
 	if err != nil {
-		return err
+		if p.promptFailedPolicy != nil && p.promptFailedPolicy(session, err) {
+			p.publishToHub(hub, events.Event{
+				Event:     "avenor.error",
+				SessionID: sessionID,
+				Fields: map[string]any{
+					"message": "backend ended the turn with an inconsistent finish reason after streaming its reply; treating the turn as complete",
+					"source":  "warning",
+				},
+			})
+			event = events.Event{
+				Event:     "session.end",
+				SessionID: sessionID,
+				Fields:    map[string]any{"stop_reason": "end_turn"},
+			}
+		} else {
+			return err
+		}
 	}
 	p.publishToHub(hub, event)
 	return nil

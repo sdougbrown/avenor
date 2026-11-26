@@ -2494,3 +2494,168 @@ func TestProviderThinkingResumeIgnoresCallOptsWhenNotOptionAware(t *testing.T) {
 		t.Fatalf("non-option-aware resume Thinking = %q, want empty", got)
 	}
 }
+
+// TestPromptFailedPolicyToleratesInconsistentFinishAfterStreamedContent pins
+// the fx carve-out mechanism: a prompt-failure policy that recognizes fx's
+// InconsistentFinishReason and checks the session's streamed content ends the
+// turn with a warning and a synthetic session.end when the turn streamed, and
+// lets the failure stand otherwise — including on later silent turns and when
+// no policy is configured. Chunks are counted at dispatch (the read loop's
+// serial wire order), so no synchronization with the pump is needed.
+func TestPromptFailedPolicyToleratesInconsistentFinishAfterStreamedContent(t *testing.T) {
+	finishError := &rpcError{Code: -32603, Message: "InconsistentFinishReason"}
+	chunkUpdate := rpcEnvelope{
+		JSONRPC: "2.0",
+		Method:  "session/update",
+		Params:  mustRaw(map[string]any{"sessionId": "ses_1", "update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "reply"}}}),
+	}
+	finishPolicy := func(session *Session, err error) bool {
+		return err != nil && strings.Contains(err.Error(), "InconsistentFinishReason") && session.StreamedContent()
+	}
+
+	newProvider := func(t *testing.T, policy func(session *Session, err error) bool, onCall func(rpcEnvelope, map[string]any) *rpcEnvelope) (*Provider, <-chan events.Event) {
+		peer := newFakeInMemoryPeer(t)
+		peer.onCall = onCall
+		p := NewProvider(ProviderConfig{
+			BackendID:          "fx",
+			PromptFailedPolicy: policy,
+		}).(*Provider)
+		p.startClient = func(context.Context, ClientConfig) (*Client, error) {
+			return peer.client, nil
+		}
+		ses, err := p.Start(context.Background(), runtime.StartOptions{})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		eventCh, err := p.Events(context.Background(), ses.SessionID)
+		if err != nil {
+			t.Fatalf("Events: %v", err)
+		}
+		return p, eventCh
+	}
+
+	t.Run("tolerated after streamed content", func(t *testing.T) {
+		var p *Provider
+		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			p.client.dispatch(chunkUpdate)
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		}
+		p, eventCh := newProvider(t, finishPolicy, onCall)
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		done := make(chan error, 1)
+		go func() { done <- p.Prompt(context.Background(), "ses_1", "turn") }()
+		if err := <-done; err != nil {
+			t.Fatalf("Prompt with carve-out: %v, want tolerated", err)
+		}
+
+		var sawWarning, sawEnd bool
+		deadline := time.Now().Add(2 * time.Second)
+		for !(sawWarning && sawEnd) && time.Now().Before(deadline) {
+			select {
+			case ev := <-eventCh:
+				switch ev.Event {
+				case "avenor.error":
+					if ev.Fields["source"] == "warning" {
+						sawWarning = true
+					}
+				case "session.end":
+					if ev.Fields["stop_reason"] == "end_turn" {
+						sawEnd = true
+					}
+				}
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		if !sawWarning || !sawEnd {
+			t.Fatalf("events after tolerated prompt: warning=%v session.end(end_turn)=%v, want both", sawWarning, sawEnd)
+		}
+	})
+
+	t.Run("fails without streamed content", func(t *testing.T) {
+		p, _ := newProvider(t, finishPolicy, func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		})
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		if err := p.Prompt(context.Background(), "ses_1", "turn"); err == nil || !strings.Contains(err.Error(), "InconsistentFinishReason") {
+			t.Fatalf("Prompt with no streamed content err = %v, want the finish-reason error", err)
+		}
+	})
+
+	t.Run("fails when no policy is configured", func(t *testing.T) {
+		var p *Provider
+		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			p.client.dispatch(chunkUpdate)
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		}
+		p, _ = newProvider(t, nil, onCall)
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		if err := p.Prompt(context.Background(), "ses_1", "turn"); err == nil || !strings.Contains(err.Error(), "InconsistentFinishReason") {
+			t.Fatalf("Prompt with no policy err = %v, want the finish-reason error", err)
+		}
+	})
+
+	// A turn that fails after an earlier turn was tolerated must still fail:
+	// the content baseline is taken when each prompt begins, so the tolerated
+	// turn's streamed chunks cannot mask a later silent failure.
+	t.Run("second silent failure still fails", func(t *testing.T) {
+		var p *Provider
+		firstCall := true
+		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			if firstCall {
+				firstCall = false
+				p.client.dispatch(chunkUpdate)
+			}
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		}
+		p, _ = newProvider(t, finishPolicy, onCall)
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		if err := p.Prompt(context.Background(), "ses_1", "first turn"); err != nil {
+			t.Fatalf("first Prompt with carve-out: %v, want tolerated", err)
+		}
+		if err := p.Prompt(context.Background(), "ses_1", "second turn"); err == nil || !strings.Contains(err.Error(), "InconsistentFinishReason") {
+			t.Fatalf("second Prompt with no streamed content err = %v, want the finish-reason error", err)
+		}
+	})
+
+	// A warm resume reuses the registered session, so the chunk counter the
+	// policy reads is the one dispatch writes after the resume too.
+	t.Run("warm resume keeps the chunk counter alive", func(t *testing.T) {
+		var p *Provider
+		var dispatched bool
+		onCall := func(msg rpcEnvelope, _ map[string]any) *rpcEnvelope {
+			if msg.Method != "session/prompt" {
+				return nil
+			}
+			if !dispatched {
+				dispatched = true
+				p.client.dispatch(chunkUpdate)
+			}
+			return &rpcEnvelope{ID: msg.ID, Error: finishError}
+		}
+		p, _ = newProvider(t, finishPolicy, onCall)
+		defer func() { close(p.client.events); close(p.client.done); _ = p.Close() }()
+
+		if _, err := p.Resume(context.Background(), "ses_1"); err != nil {
+			t.Fatalf("warm Resume: %v", err)
+		}
+		if err := p.Prompt(context.Background(), "ses_1", "turn"); err != nil {
+			t.Fatalf("Prompt after warm resume with carve-out: %v, want tolerated", err)
+		}
+	})
+}

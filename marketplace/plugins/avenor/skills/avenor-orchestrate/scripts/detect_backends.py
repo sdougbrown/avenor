@@ -20,6 +20,7 @@ DISPLAY_ORDER = [
     "claude",
     "gemini-acp",
     "cursor-acp",
+    "fx",
     "opencode-http",
 ]
 
@@ -31,6 +32,7 @@ MODEL_SELECTION = {
     "agy": True,
     "gemini-acp": False,
     "cursor-acp": False,
+    "fx": False,
     "claude": True,
 }
 
@@ -163,6 +165,7 @@ def detect(server_url: str | None, preferred: str | None) -> dict:
             existing([home / ".gemini" / "oauth_creds.json", home / ".gemini" / "settings.json"]),
         ),
         "cursor-acp": backend("agent", existing([home / ".cursor"])),
+        "fx": backend("fx", existing([home / ".fx"])),
         "claude": backend("claude", existing([home / ".claude.json", home / ".claude"])),
         "opencode-http": http_backend(server_url),
     }
