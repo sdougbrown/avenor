@@ -15,7 +15,8 @@ type Pending struct {
 }
 
 // Begin derives a launch context and returns functions to detach it from
-// shutdown and settle the attempt. A detached context still follows its caller.
+// shutdown and settle the attempt. Detach under the provider lock when adopting
+// a client, then settle once the provider has finished using it.
 func (p *Pending) Begin(ctx context.Context) (context.Context, func(), func(keep bool)) {
 	ctx, cancel := context.WithCancel(ctx)
 	p.mu.Lock()
@@ -27,7 +28,9 @@ func (p *Pending) Begin(ctx context.Context) (context.Context, func(), func(keep
 	p.mu.Unlock()
 	return ctx, func() {
 			p.mu.Lock()
-			p.cancels[&cancel] = false
+			if _, ok := p.cancels[&cancel]; ok {
+				p.cancels[&cancel] = false
+			}
 			p.mu.Unlock()
 		}, func(keep bool) {
 			if !keep {

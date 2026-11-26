@@ -26,12 +26,12 @@ func TestDetachedLaunchRemainsLiveUntilSettled(t *testing.T) {
 	case <-deadline.Done():
 		t.Fatal("shutdown did not cancel the pending launch")
 	}
+	settleStarting(false)
 	select {
 	case <-adopted.Done():
 		t.Fatal("shutdown canceled the adopted client")
 	default:
 	}
-	settleStarting(false)
 	select {
 	case <-done:
 		t.Fatal("shutdown returned before the adopted launch settled")

@@ -707,8 +707,7 @@ cat > /dev/null
 				awaitSignal(t, settled, "the first launch's release")
 				return nil, errLaunchStopped
 			}
-			// The second launch starts a real child and waits for its context, so
-			// only the provider lifetime can end it.
+			// The second launch starts a real child under the launch context.
 			client, err := NewClient(ctx, cfg)
 			if err != nil {
 				return nil, err
@@ -750,8 +749,7 @@ cat > /dev/null
 	})
 
 	t.Run("a client that starts after close is torn down", func(t *testing.T) {
-		// The launch refuses the context derived from the provider lifetime, so
-		// only the closing check at install can tear its client down.
+		// The launch ignores cancellation, so the closing check must tear it down.
 		p, config := newLaunchRaceProvider(t, "#!/bin/sh\nexec cat > /dev/null\n")
 		childStarted, release := make(chan struct{}), make(chan struct{})
 		childPID := 0
