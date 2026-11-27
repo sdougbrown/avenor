@@ -1070,9 +1070,10 @@ func validateCLISelection(backend string, discovery ServerDiscovery, thinking st
 		if discovery.URL == "" {
 			return fmt.Errorf("--server-url is required for backend opencode-http")
 		}
-	case "pony":
-		return fmt.Errorf("backend %q was removed; use %q instead", backend, "poo")
 	default:
+		if replacement, removed := factory.RemovedReplacement(backend); removed {
+			return fmt.Errorf("backend %q was removed; use %q instead", backend, replacement)
+		}
 		if !factory.IsKnown(backend) {
 			return fmt.Errorf("unknown backend %q", backend)
 		}

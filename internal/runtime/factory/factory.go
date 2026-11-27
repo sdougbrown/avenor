@@ -82,6 +82,20 @@ func KnownBackends() []string {
 	return slices.Sorted(maps.Keys(providers))
 }
 
+// removedBackends is the tombstone table for backends this build dropped:
+// a removed name is not in providers, so it is unknown, but errors name its
+// replacement rather than a bare unknown-backend. Both the factory and the
+// CLI's backend selection read this one fact.
+var removedBackends = map[string]string{
+	"pony": "poo",
+}
+
+// RemovedReplacement reports the backend that replaced a removed backend.
+func RemovedReplacement(backend string) (replacement string, removed bool) {
+	replacement, removed = removedBackends[backend]
+	return replacement, removed
+}
+
 // noProcessBackends connect to an already-running or in-process runtime and
 // never exec a child process, so a launch wrapper has nothing to prefix.
 var noProcessBackends = map[string]bool{
@@ -94,8 +108,8 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 	}
 	construct := providers[backend]
 	if construct == nil {
-		if backend == "pony" {
-			return nil, fmt.Errorf("unknown backend %q (removed; use %q instead)", backend, "poo")
+		if replacement, removed := removedBackends[backend]; removed {
+			return nil, fmt.Errorf("unknown backend %q (removed; use %q instead)", backend, replacement)
 		}
 		return nil, fmt.Errorf("unknown backend %q", backend)
 	}
