@@ -100,13 +100,26 @@ func TestNewProviderUnknown(t *testing.T) {
 	}
 }
 
+func TestNewProviderRemovedPony(t *testing.T) {
+	p, err := NewProvider(runtime.StartOptions{}, "pony")
+	if p != nil {
+		t.Fatal("NewProvider(pony) expected nil provider")
+	}
+	if err == nil {
+		t.Fatal("NewProvider(pony) expected error")
+	}
+	if err.Error() != `unknown backend "pony" (removed; use "poo" instead)` {
+		t.Fatalf("NewProvider(pony) error = %q, want poo pointer", err.Error())
+	}
+}
+
 // TestNewProviderRejectsWrapperForNoProcessBackends pins the admission
 // contract: backends that never exec a child process (opencode-http connects
-// to a running server, pony runs in-process) must reject a launch_wrapper at
+// to a running server) must reject a launch_wrapper at
 // provider construction instead of silently recording a wrapper that is
 // never applied.
 func TestNewProviderRejectsWrapperForNoProcessBackends(t *testing.T) {
-	for _, backend := range []string{"opencode-http", "pony"} {
+	for _, backend := range []string{"opencode-http"} {
 		_, err := NewProvider(runtime.StartOptions{LaunchWrapper: []string{"/usr/bin/nice", "-n", "5"}}, backend)
 		if err == nil {
 			t.Fatalf("NewProvider(%s) with launch_wrapper: want error, got nil", backend)

@@ -65,7 +65,7 @@ jobs:
         shard:
           - { name: supervisor, packages: ./internal/stable }
           - name: control-plane
-            packages: "./client ./internal/control ./internal/cli ./internal/runtime/broker ./internal/messaging/... ./internal/workflow ./internal/workflowcontroller ./internal/runtime/pony"
+            packages: "./client ./internal/control ./internal/cli ./internal/runtime/broker ./internal/messaging/... ./internal/workflow ./internal/workflowcontroller"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

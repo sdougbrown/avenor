@@ -5988,6 +5988,17 @@ func TestRunUnknownBackend(t *testing.T) {
 	}
 }
 
+func TestRunRemovedPonyBackend(t *testing.T) {
+	var stderr strings.Builder
+	code := run([]string{"--backend", "pony"}, nil, &stderr)
+	if code != 1 {
+		t.Fatalf("run() = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), `backend "pony" was removed; use "poo" instead`) {
+		t.Fatalf("stderr = %q, want poo pointer", stderr.String())
+	}
+}
+
 func TestRunOpenCodeHTTPWithoutServerURL(t *testing.T) {
 	var stderr strings.Builder
 	code := run([]string{"--backend", "opencode-http"}, nil, &stderr)

@@ -485,7 +485,7 @@ func TestMCPDeclaredConversationIsTheChildParent(t *testing.T) {
 			t.Fatalf("bind %s reported created=false, want the conversation's own run", session)
 		}
 		bound[session] = identity
-		spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "pony"})
+		spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "poo"})
 	}
 	if bound["ses_poo_a"].RunID == bound["ses_poo_b"].RunID {
 		t.Fatal("two conversations must not share one bound run")
@@ -612,7 +612,7 @@ func TestMCPDeclaredConversationSkipsAnAlternateSupervisor(t *testing.T) {
 	spawnOverMCP(t, ctx, cs, map[string]any{
 		"dir":           t.TempDir(),
 		"prompt":        "report",
-		"backend":       "pony",
+		"backend":       "poo",
 		"supervisor_id": alternate.socket,
 	})
 
@@ -687,7 +687,7 @@ func TestMCPDeclaredConversationRefusesAStaleBinding(t *testing.T) {
 		res, err := cs.CallTool(ctx, &mcpsdk.CallToolParams{Name: "spawn", Arguments: map[string]any{
 			"dir":     t.TempDir(),
 			"prompt":  "report",
-			"backend": "pony",
+			"backend": "poo",
 		}})
 		if err != nil {
 			t.Fatalf("spawn tool call: %v", err)
@@ -782,7 +782,7 @@ func (d legacyInboxDriver) subscribe(t *testing.T) {
 
 func (d legacyInboxDriver) spawn(t *testing.T, dir string) {
 	t.Helper()
-	spawnOverMCP(t, d.ctx, d.cs, map[string]any{"dir": dir, "prompt": "report", "backend": "pony"})
+	spawnOverMCP(t, d.ctx, d.cs, map[string]any{"dir": dir, "prompt": "report", "backend": "poo"})
 }
 
 func (d legacyInboxDriver) awaitAsk(t *testing.T) inboxAsk {
@@ -956,7 +956,7 @@ func (d modernInboxDriver) spawn(t *testing.T, dir string) {
 	t.Helper()
 	d.stream.call(11, "tools/call", map[string]any{
 		"name":      "spawn",
-		"arguments": map[string]any{"dir": dir, "prompt": "report", "backend": "pony"},
+		"arguments": map[string]any{"dir": dir, "prompt": "report", "backend": "poo"},
 	})
 	res := d.stream.result(d.stream.await("the spawn result", mcpFrameWithID(11)))
 	if isError, _ := res["isError"].(bool); isError {
@@ -1137,7 +1137,7 @@ func TestMCPInboxReplyWorksForFeedDeliveredAsk(t *testing.T) {
 		}.Run(feedCtx)
 	}()
 
-	spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "pony"})
+	spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "poo"})
 	child := awaitConversationChild(t, ctx, children)
 	h.awaitCondition("the feed to record the child's ask", func() bool {
 		return strings.Contains(records.String(), "\n")
@@ -1219,7 +1219,7 @@ func TestMCPInboxSharesLockWithFeedBroker(t *testing.T) {
 		contended.Out = &records
 		contended.Run(feedCtx)
 	}()
-	spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "pony"})
+	spawnOverMCP(t, ctx, cs, map[string]any{"dir": t.TempDir(), "prompt": "report", "backend": "poo"})
 	awaitConversationChild(t, ctx, children)
 	h.awaitCondition("the released feed to deliver the child's ask", func() bool {
 		return strings.Contains(records.String(), "\n")

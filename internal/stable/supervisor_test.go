@@ -6049,7 +6049,7 @@ func TestIdleTimeoutWaitsForParkedRuntime(t *testing.T) {
 	done := startStableRun(t, sup, socketPath)
 
 	parked, err := sup.spawn(SpawnParams{
-		Prompt: "go", Dir: t.TempDir(), Backend: "pony", Label: "idle-parked",
+		Prompt: "go", Dir: t.TempDir(), Backend: "poo", Label: "idle-parked",
 	})
 	if err != nil {
 		t.Fatalf("spawn parked runtime: %v", err)
@@ -6060,7 +6060,7 @@ func TestIdleTimeoutWaitsForParkedRuntime(t *testing.T) {
 	// A second runtime ends while the first is parked. Its completion wakes
 	// the idle loop; the parked runtime must still count as live.
 	second, err := sup.spawn(SpawnParams{
-		Prompt: "go", Dir: t.TempDir(), Backend: "pony", Label: "idle-second", MaxRetries: 0,
+		Prompt: "go", Dir: t.TempDir(), Backend: "poo", Label: "idle-second", MaxRetries: 0,
 	})
 	if err != nil {
 		t.Fatalf("spawn second runtime: %v", err)
@@ -6432,12 +6432,12 @@ func TestSpawnAndSendToParent(t *testing.T) {
 	}
 	eventCh := c.Events()
 
-	// 1. Spawn a parent runtime (the jockey) using pony backend so no
+	// 1. Spawn a parent runtime (the jockey) using the poo backend so no
 	// external server is needed.
 	parentParams := map[string]any{
 		"prompt":  "You are a jockey.",
 		"dir":     ".",
-		"backend": "pony",
+		"backend": "poo",
 	}
 	parentResult, err := c.Spawn(parentParams)
 	if err != nil {
@@ -6472,7 +6472,7 @@ func TestSpawnAndSendToParent(t *testing.T) {
 		childParams := map[string]any{
 			"prompt":     "Do work.",
 			"dir":        ".",
-			"backend":    "pony",
+			"backend":    "poo",
 			"runtime_id": parentID, // tells supervisor "I am the parent"
 			"label":      fmt.Sprintf("child_%d", i+1),
 		}
@@ -8181,7 +8181,7 @@ func runControlTurnsTest(t *testing.T, turns int, betweenTurn func(turn int, sup
 	}
 	eventCh := c.Events()
 
-	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "pony"})
+	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "poo"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -8283,7 +8283,7 @@ func TestSubscribeRuntimeOnlyReceivesSessionEnd(t *testing.T) {
 	defer c.Close()
 	attachOwnerForTest(t, c, socketPath)
 
-	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "pony"})
+	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "poo"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

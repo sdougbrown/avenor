@@ -15,8 +15,8 @@ const permissionDetailLimit = 400
 // something it cannot name. It also fills "command" when the request nests one,
 // which is what the command-path analysis in the event fanout reads.
 //
-// Requests that already carry a description (the claudecore and pony adapters
-// both publish one) are left untouched. Returns true when it changed the map.
+// Requests that already carry a description (the claudecore adapter publishes
+// one) are left untouched. Returns true when it changed the map.
 func derivePermissionDetail(permission map[string]any) bool {
 	if permission == nil {
 		return false

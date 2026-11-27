@@ -35,8 +35,7 @@ avenor run [flags]
 | `--dir` | `.` | Working directory for the agent |
 | `--resume` | (none) | Resume an existing session by ID; incompatible with `--loop-file`. Messaging is off for this path, so a poo session created with messaging on may fail to resume if its recorded tools are unavailable |
 | `--server-url` | (none) | Long-lived ACP server endpoint; required for `--backend opencode-http` |
-| `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `dsh`, `fx`, `codex-app-server`, `opencode-http`, `pi`, `claude` |
-| `--pony-config` | (none) | Path to the pony backend JSON config; required for `--backend pony` |
+| `--backend` | `opencode-acp` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `dsh`, `fx`, `codex-app-server`, `opencode-http`, `pi`, `poo`, `claude` |
 | `--model` | (none) | Backend-specific model ID; if not set, resolved from opencode config via `--agent` |
 | `--thinking` | (none) | Backend-native reasoning level; validated against the effective backend |
 | `--claude-mcp-wait` | `0` (off) | Hold the first prompt of a `claude` run until this long after launch (Go duration, at most `60s`), so MCP servers Claude Code connects in the background are available to the first turn. Direct runs only; rejected with other backends, with `--loop-file`/`--team-file`, and when not shorter than `--progress-timeout`. See [backends.md](backends.md#claude) |
@@ -583,7 +582,7 @@ Spawn flags (all optional):
 | `--agent` | Agent persona |
 | `--label` | Free-form label for log correlation |
 | `--model` | Backend-specific model ID |
-| `--backend` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `dsh`, `fx`, `codex-app-server`, `opencode-http`, `pi`, `claude` |
+| `--backend` | Runtime backend: `opencode-acp`, `agy`, `gemini-acp`, `cursor-acp`, `dsh`, `fx`, `codex-app-server`, `opencode-http`, `pi`, `poo`, `claude` |
 | `--server-url` | Long-lived ACP server endpoint |
 | `--on-event` | Path to write NDJSON events |
 | `--sentinel-file` | Path to write completion sentinel |

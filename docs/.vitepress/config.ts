@@ -46,7 +46,6 @@ export default defineConfig({
         items: [
           { text: 'CLI Reference', link: '/cli' },
           { text: 'Backends', link: '/backends' },
-          { text: 'Pony', link: '/pony' },
         ],
       },
       {

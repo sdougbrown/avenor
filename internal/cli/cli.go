@@ -25,8 +25,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/rosterconfig"
 	"github.com/sdougbrown/avenor/internal/runtime"
 	"github.com/sdougbrown/avenor/internal/runtime/factory"
-	"github.com/sdougbrown/avenor/internal/runtime/pony"
-	"github.com/sdougbrown/avenor/internal/runtime/pony/model/openai"
 	"github.com/sdougbrown/avenor/internal/teamrunner"
 	"github.com/sdougbrown/cli-contract"
 )
@@ -34,7 +32,6 @@ import (
 const (
 	DefaultBackend      = "opencode-acp"
 	backendOpenCodeHTTP = "opencode-http"
-	backendPony         = "pony"
 )
 
 // DefaultPermissionClaimTimeout is the zero value, meaning "no timeout":
@@ -109,7 +106,6 @@ type runOptions struct {
 	TeamFile               string
 	RosterFile             string
 	RosterEntry            string
-	PonyConfig             string
 }
 
 // RunCommand declares the run command's flag surface, in runOptions field
@@ -149,7 +145,6 @@ func RunCommand() *clicontract.Command {
 			{Name: "team-file", Kind: clicontract.String, Usage: "path to team config JSON (optional; enables parallel-team mode)"},
 			{Name: "roster-file", Kind: clicontract.String, Usage: "path to roster JSON (direct selector or workflow fallback)"},
 			{Name: "roster-entry", Kind: clicontract.String, Usage: "roster entry name for direct selection"},
-			{Name: "pony-config", Kind: clicontract.String, Usage: "path to pony backend JSON config (required for --backend pony)"},
 		},
 		InputRules: []*clicontract.Rule{
 			clicontract.EnabledOn("prompt-file", clicontract.Or(clicontract.Not(clicontract.Truthy("prompt-file")), clicontract.Not(clicontract.Truthy("prompt"))), "--prompt and --prompt-file are mutually exclusive"),
@@ -189,7 +184,6 @@ func RunInvocation(inv clicontract.Invocation, getenv func(string) string, stder
 		TeamFile:               inv.Flags["team-file"],
 		RosterFile:             inv.Flags["roster-file"],
 		RosterEntry:            inv.Flags["roster-entry"],
-		PonyConfig:             inv.Flags["pony-config"],
 		BackendSet:             inv.Supplied["backend"],
 	}
 	if inv.Supplied["persist-sessions"] {
@@ -328,95 +322,6 @@ func runWithOptions(opts runOptions, getenv func(string) string, stderr io.Write
 		if opts.ClaudeMCPWait != 0 && opts.ProgressTimeout != 0 && opts.ClaudeMCPWait >= opts.ProgressTimeout {
 			fmt.Fprintf(stderr, "avenor: --claude-mcp-wait %s must be shorter than --progress-timeout %s, which fires while the first prompt is held\n", opts.ClaudeMCPWait, opts.ProgressTimeout)
 			return exitWithSentinel(1)
-		}
-	}
-
-	// Pony backend setup
-	if opts.Backend == backendPony {
-		if opts.PonyConfig == "" {
-			fmt.Fprintln(stderr, "avenor: --pony-config is required for backend pony")
-			return exitWithSentinel(1)
-		}
-		ponyCfg, err := pony.LoadPonyConfig(opts.PonyConfig)
-		if err != nil {
-			fmt.Fprintf(stderr, "avenor: %v\n", err)
-			return exitWithSentinel(1)
-		}
-		profileConfigs := make(map[string]pony.Config, len(ponyCfg.Profiles))
-		configDir := filepath.Dir(opts.PonyConfig)
-		for name, profile := range ponyCfg.Profiles {
-			resolvedBaseURL := ponyCfg.BaseURL
-			resolvedAPIKeyEnv := ponyCfg.APIKeyEnv
-			if profile.BaseURL != "" {
-				resolvedBaseURL = profile.BaseURL
-			}
-			if profile.APIKeyEnv != "" {
-				resolvedAPIKeyEnv = profile.APIKeyEnv
-			}
-
-			adapter, err := openai.New(openai.Config{
-				BaseURL: resolvedBaseURL,
-				APIKey:  getenv(resolvedAPIKeyEnv),
-			})
-			if err != nil {
-				fmt.Fprintf(stderr, "avenor: %v\n", err)
-				return exitWithSentinel(1)
-			}
-
-			var executor pony.OrchestratorExecutor
-			if profile.Tools.Orchestration && opts.ControlSocket != "" {
-				executor, err = pony.NewControlSocketExecutor(opts.ControlSocket)
-				if err != nil {
-					fmt.Fprintf(stderr, "avenor: %v\n", err)
-					return exitWithSentinel(1)
-				}
-			}
-
-			systemPrompt := profile.SystemPrompt
-			initialPrompt := profile.InitialPrompt
-			var allowedDirs []string
-			if len(profile.Skills) > 0 {
-				skills, err := pony.LoadSkills(configDir, profile.Skills)
-				if err != nil {
-					fmt.Fprintf(stderr, "avenor: %v\n", err)
-					return exitWithSentinel(1)
-				}
-				systemPrompt, initialPrompt = pony.MergeSkills(systemPrompt, initialPrompt, skills)
-
-				if skillsDir := os.Getenv("PONY_SKILLS_DIR"); skillsDir != "" {
-					allowedDirs = append(allowedDirs, skillsDir)
-				}
-				if configDir != "" {
-					allowedDirs = append(allowedDirs, filepath.Join(configDir, ".pony"))
-				}
-			}
-
-			profileConfigs[name] = pony.Config{
-				Adapter:          adapter,
-				Model:            profile.Model,
-				MaxTokens:        profile.MaxTokens,
-				SystemPrompt:     systemPrompt,
-				InitialPrompt:    initialPrompt,
-				Executor:         executor,
-				LocalTools:       profile.Tools.Local,
-				OrchTools:        profile.Tools.Orchestration,
-				WorkingDir:       opts.Dir,
-				InjectAgentsMD:   profile.InjectAgentsMD,
-				ToolApproval:     profile.ToolApproval,
-				ShellConfig:      profile.ShellConfig,
-				FileReadConfig:   profile.FileReadConfig,
-				AllowedReadDirs:  allowedDirs,
-				Context:          profile.Context,
-				CompactionPrompt: profile.CompactionPrompt,
-			}
-		}
-
-		pony.SetGlobalProfiles(ponyCfg.DefaultAgent, profileConfigs)
-		if opts.Agent != "" {
-			if _, ok := profileConfigs[opts.Agent]; !ok {
-				fmt.Fprintf(stderr, "avenor: pony config: unknown profile %q\n", opts.Agent)
-				return exitWithSentinel(1)
-			}
 		}
 	}
 
@@ -1166,6 +1071,9 @@ func validateCLISelection(backend string, discovery ServerDiscovery, thinking st
 			return fmt.Errorf("--server-url is required for backend opencode-http")
 		}
 	default:
+		if replacement, removed := factory.RemovedReplacement(backend); removed {
+			return fmt.Errorf("backend %q was removed; use %q instead", backend, replacement)
+		}
 		if !factory.IsKnown(backend) {
 			return fmt.Errorf("unknown backend %q", backend)
 		}

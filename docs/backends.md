@@ -1,6 +1,6 @@
 # Backends
 
-Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, DeepSeek Harness, fx, Pi, agy, or the in-process Pony test backend. Pick the one that matches what's running locally and what you need from the orchestration layer.
+Avenor talks to agents through backends. Each backend speaks a different protocol to a different runtime — OpenCode, Claude, Codex, Gemini, Cursor, DeepSeek Harness, fx, Pi, agy, or poo. Pick the one that matches what's running locally and what you need from the orchestration layer.
 
 ## Backend selection
 
@@ -102,10 +102,8 @@ A backend that starts a harness process exports Avenor's launch identity in that
 | `poo` | ✓ stdio subprocess |
 | `claude` | ✓ PTY or tmux pane |
 | `opencode-http` | ✗ no child process |
-| `pony` | ✗ in-process |
 
 - `opencode-http` attaches to an external `opencode serve` instance. Avenor starts no backend process, so it cannot inject a per-session environment. MCP servers loaded by that server do not see the identity. A successful attach also leaves the Avenor process environment unchanged.
-- `pony` runs in-process. It has no harness child.
 - With the tmux launcher, Avenor removes inherited identity and exports the launch values inside the pane command, except the values a launch provisions for a broker peer: those go into a mode-0600 file in a mode-0700 directory the launch owns, which the pane command sources (`unset …; . <file>; exec claude`) and which the launcher removes when the session is torn down. A `tmux new-session` command string is argv, readable by any local process through `ps` or `/proc/<pid>/cmdline`, so no provisioned value may appear in it; the file's path may. The tmux server environment keeps its values.
 
 Each spawning backend removes inherited identity before it adds the current launch values, and the same scrub removes the broker peer credentials (`AVENOR_BROKER_URL`, `AVENOR_RUN_ID`, `AVENOR_BROKER_TOKEN`) and the retired `AVENOR_SESSION_NAME`. A backend therefore cannot pass a launcher's peer credential down by forgetting a call: the strip list is `runtime.ScrubbedEnvNames`, applied by `runtime.LaunchEnv`, and the terminal launchers unset the same list in the pane command. Other variables keep their values, including `AVENOR_TREE_BUDGET` and backend selectors such as `AVENOR_CLAUDE_TERMINAL`.
@@ -124,7 +122,7 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 
 ## Capability matrix
 
-| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | dsh | fx | pi | claude | pony | poo |
+| Capability | opencode-acp | opencode-http | codex-app-server | agy | gemini-acp | cursor-acp | dsh | fx | pi | claude | poo |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | New sessions | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Session resume | ✓ | ✓ | ✓ | ✓ | — | — | — | — | ✓ | ⚠ | ✗ | ✓ |

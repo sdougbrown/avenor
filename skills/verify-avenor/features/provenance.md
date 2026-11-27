@@ -18,7 +18,7 @@ the member's `avenor.phase.end` and the team's `avenor.team.end`.
 
 The variable table and trust rules are in
 [docs/events.md](../../../docs/events.md#launch-identity). Per-backend delivery
-and the `opencode-http`/`pony` limits are in
+and the `opencode-http` limits are in
 [docs/backends.md](../../../docs/backends.md#launch-identity).
 
 ## Driving it with the avenor binary
@@ -331,7 +331,7 @@ The drive passes when all of these are captured:
   process name.
 - The supervisor writes child state under
   `${TMPDIR:-/tmp}/avenor-stable-$(id -u)/`. Copy evidence out before cleanup.
-- `opencode-http` attaches to an external server and `pony` runs in-process, so
+- `opencode-http` attaches to an external server, so
   neither can produce this proof. See
   [backends.md](../../../docs/backends.md#launch-identity).
 - Repeated nested phase names share one execution ID and can produce identical

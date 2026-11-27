@@ -137,7 +137,7 @@ func waitForTurnWaiterRegistered(t *testing.T, sup *Supervisor, runtimeID string
 
 func spawnWaitTurnRuntime(t *testing.T, c *client.Client) string {
 	t.Helper()
-	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "pony"})
+	spawnResult, err := c.Spawn(map[string]any{"prompt": "turn 0", "dir": ".", "backend": "poo"})
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

@@ -39,7 +39,7 @@ func TestBackendPolicyGenerated(t *testing.T) {
 		// Backends with no thinking support
 		{"gemini-acp", str("low"), false, false, true},
 		{"opencode-acp", str("off"), false, false, true},
-		{"pony", str("high"), true, false, true},
+		{"poo", str("high"), true, false, true},
 
 		// Non-canonical values: valid=false, fair depends on backend
 		{"codex-app-server", str("HIGH"), false, false, false},

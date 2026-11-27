@@ -339,7 +339,7 @@ func (h *itestHarness) spawn(params map[string]any) string {
 }
 
 func (h *itestHarness) trySpawn(params map[string]any) (string, error) {
-	merged := map[string]any{"prompt": "go", "dir": h.t.TempDir(), "backend": "pony"}
+	merged := map[string]any{"prompt": "go", "dir": h.t.TempDir(), "backend": "poo"}
 	for k, v := range params {
 		merged[k] = v
 	}
@@ -1173,7 +1173,7 @@ func TestRuntimeResultReportsSentinelPath(t *testing.T) {
 	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
 	dir := h.t.TempDir()
 	raw, err := json.Marshal(map[string]any{
-		"prompt": "go", "dir": dir, "backend": "pony",
+		"prompt": "go", "dir": dir, "backend": "poo",
 		"sentinel_file": filepath.Join(dir, "first.env"),
 	})
 	if err != nil {
@@ -2029,7 +2029,7 @@ func TestSupervisorPublicAPIPermissionRequestAnswerContinue(t *testing.T) {
 }
 
 func itestDecider() map[string]any {
-	return map[string]any{"entry": "guard", "backend": "pony", "agent": "guard", "model": "guard-model"}
+	return map[string]any{"entry": "guard", "backend": "poo", "agent": "guard", "model": "guard-model"}
 }
 
 // itestDeciderLabel splits a decider run label into the worker runtime and
@@ -2684,7 +2684,7 @@ func TestSupervisorPublicAPIDeciderCarriesPersistChoice(t *testing.T) {
 	rt := h.spawn(map[string]any{
 		"label": "worker",
 		"permission_decider": map[string]any{
-			"entry": "guard", "backend": "pony", "agent": "guard", "model": "guard-model",
+			"entry": "guard", "backend": "poo", "agent": "guard", "model": "guard-model",
 			"persist_sessions": deciderChoice,
 		},
 	})

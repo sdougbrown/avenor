@@ -1286,7 +1286,7 @@ func TestRunPhaseEndPreservesExplicitStopReason(t *testing.T) {
 // outputs of completed members. This is the user-visible contract
 // that umpire-bot's Run() relies on when it falls back to partial
 // reviewer output (see review/runner.go: reviewRawHasFindings +
-// "Pony team produced no raw findings").
+// "team produced no raw findings").
 func TestRunTeamPreservesCompletedMembersOnDegenerateStream(t *testing.T) {
 	cfg := makeConfig(
 		nil,
@@ -1315,10 +1315,8 @@ func TestRunTeamPreservesCompletedMembersOnDegenerateStream(t *testing.T) {
 					FinalReply: "Looks good.",
 				}, nil
 			case "test-reviewer":
-				// Failed member: pony's reasoning stream guard tripped.
-				// The runner returns ExitCode 1 (mapped from
-				// unknown stop reason) and the explicit stop_reason
-				// of degenerate_reasoning_stream.
+				// Failed member: aborted with the degenerate_reasoning_stream
+				// stop reason; the runner maps it to a non-zero exit code.
 				return PhaseAttemptResult{
 					ExitCode:   runtime.ExitCodeForStopReason("degenerate_reasoning_stream"),
 					SessionID:  "test-reviewer-s",
@@ -1345,9 +1343,9 @@ func TestRunTeamPreservesCompletedMembersOnDegenerateStream(t *testing.T) {
 	// Note: the team runner counts every member that returned a result as
 	// "completed" (only directive=abort counts as aborted). The failure
 	// is signalled by exit_reason=phase_failure together with the
-	// RunResult's stop_reason. This mirrors the actual production
-	// behaviour seen in /tmp/pony/failed-run-18.ndjson where
-	// members_completed=2, members_aborted=0, exit_reason=phase_failure.
+	// RunResult's stop_reason. This mirrors the production failure this
+	// test was written from, where members_completed=2,
+	// members_aborted=0, exit_reason=phase_failure.
 	var teamEnd *events.Event
 	for i := range sink.events {
 		if sink.events[i].Event == "avenor.team.end" {
