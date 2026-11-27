@@ -30,6 +30,19 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	// A poo binary must resolve on PATH for spawns that name the poo backend:
+	// backendlaunch.Resolve looks the executable up even when a test injects
+	// its own provider. Tests that need a specific poo stub still narrow PATH
+	// with t.Setenv; this only guarantees one exists.
+	pooStub := filepath.Join(root, "bin")
+	if err := os.MkdirAll(pooStub, 0o700); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(pooStub, "poo"), []byte("#!/bin/sh\nexit 0\n"), 0o750); err != nil {
+		panic(err)
+	}
+	path := os.Getenv("PATH")
+	os.Setenv("PATH", pooStub+string(os.PathListSeparator)+path)
 	home := filepath.Join(root, "home")
 	tmp := filepath.Join(root, "tmp")
 	for _, dir := range []string{home, tmp} {
@@ -56,6 +69,7 @@ func TestMain(m *testing.M) {
 		_ = os.Unsetenv("TMPDIR")
 	}
 	_ = os.RemoveAll(root)
+	os.Setenv("PATH", path)
 	os.Exit(code)
 }
 
