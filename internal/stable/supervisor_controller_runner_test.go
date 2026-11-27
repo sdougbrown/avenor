@@ -1002,9 +1002,12 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 	}
 
 	waitBlocked("local")
-	// Several fast passes later, the log still holds exactly one local
-	// capacity_blocked event (deduped across passes).
-	time.Sleep(200 * time.Millisecond)
+	// Extra passes under the unchanged block append nothing: the runner's
+	// blocked pass never re-records an unchanged reason, so the log still
+	// holds exactly one local capacity_blocked event.
+	for i := 0; i < 3; i++ {
+		f.sup.signalCapacityChange()
+	}
 	blocked, _ := capacityEvents(t)
 	if len(blocked) != 1 || blocked[0] != "local" {
 		t.Fatalf("capacity_blocked events = %v, want exactly [local]", blocked)
