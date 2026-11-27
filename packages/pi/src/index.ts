@@ -560,6 +560,8 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     interface PeerFrame {
       /** No further send is worth making: the frame landed, or its budget is spent. */
       settled: boolean
+      /** The session holds this frame: its body reached the transcript. */
+      landed: boolean
       /** Attempts spent sending it. */
       attempts: number
       /** Attempts awaiting this frame's landing. */
@@ -570,7 +572,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
     function peerFrame(id: string): PeerFrame {
       const known = peerFrames.get(id)
       if (known) return known
-      const frame: PeerFrame = { settled: false, attempts: 0, waiting: [] }
+      const frame: PeerFrame = { settled: false, landed: false, attempts: 0, waiting: [] }
       peerFrames.set(id, frame)
       return frame
     }
@@ -634,8 +636,10 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
      * operation. A frame the session already surfaced is dropped, and an
      * attempt budget stops a frame that never confirms from looping.
      *
-     * Resolves true when the frame landed in this attempt, false when it was
-     * dropped without a send. */
+     * Resolves true when the session holds the frame — landed in this attempt,
+     * or already landed before — and false when the frame is gone without one:
+     * budget spent, or a nameless send that timed out. A caller opening a reply
+     * edge needs that distinction, not just "did this attempt send". */
     function deliverPeerFrame(ask: InboundAsk, options: InboundAskBodyOptions): Promise<boolean> {
       // The broker stamps an id on every row it queues, so a row without one was
       // hand-queued and nothing links its redeliveries. It gets an id for the
@@ -644,11 +648,14 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const unaddressed = ask.message_id === ''
       const id = unaddressed ? `unaddressed:${randomUUID()}` : ask.message_id
       const frame = peerFrame(id)
-      if (frame.settled) return Promise.resolve(false)
+      // A settled frame still answers for the session: a landing that arrived
+      // after its attempt expired is what opens an ask's reply edge on the
+      // queued retry.
+      if (frame.settled) return Promise.resolve(frame.landed)
       if (frame.attempts >= MAX_PEER_FRAME_ATTEMPTS) {
         frame.settled = true
         pruneSettledPeerFrames()
-        reportPeerFailure('deliver', new Error(`message ${describePeerFrame(ask)} was never confirmed after ${frame.attempts} attempts`))
+        reportPeerFailure('deliver', new Error(`${describePeerFrame(ask)} was never confirmed after ${frame.attempts} attempts`))
         return Promise.resolve(false)
       }
       return new Promise<boolean>((resolve, reject) => {
@@ -657,6 +664,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
         const settle = () => {
           clearTimeout(timer)
           frame.settled = true
+          frame.landed = true
           frame.waiting = frame.waiting.filter(waiting => waiting !== settle)
           pruneSettledPeerFrames()
           // A delivered frame ends the delivery-failure episode, so a failure
@@ -682,7 +690,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
           frame.settled = true
           pruneSettledPeerFrames()
-          reportPeerFailure('deliver', new Error(`message ${describePeerFrame(ask)} was never confirmed and stays unread`))
+          reportPeerFailure('deliver', new Error(`${describePeerFrame(ask)} was never confirmed and stays unread`))
           resolve(false)
         }
         const arm = () => {
@@ -2636,6 +2644,7 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
       const frame = peerFrames.get(frameId)
       if (!frame) return
       frame.settled = true
+      frame.landed = true
       const waiting = frame.waiting
       frame.waiting = []
       for (const settle of waiting) settle()

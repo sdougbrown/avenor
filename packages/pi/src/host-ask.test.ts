@@ -143,6 +143,54 @@ describe('host inbound ask delivery', () => {
     } finally { await harness.eventHandlers.session_shutdown({}, {}) }
   })
 
+  it('opens a reply edge for an ask that landed after its attempt expired', async () => {
+    // The attempt timed out, then the frame reached the transcript anyway and a
+    // duplicate row followed it. The session has shown the ask, so the queued
+    // retry must open the reply edge without sending it again — otherwise the
+    // agent answers a question the extension has no route for.
+    const brokerReceiveTool = drainOnce([
+      { message_id: 'ask-late', from_run_id: 'rt_child', message: 'landed late', role: 'agent', expects_reply: true },
+      { message_id: 'ask-late', from_run_id: 'rt_child', message: 'landed late', role: 'agent', expects_reply: true },
+      { message_id: 'ask-next', from_run_id: 'rt_child', message: 'the ask behind it', role: 'agent', expects_reply: true },
+    ])
+    // The poll interval leaves room to land the frame after the timeout and
+    // before the queue's retry, which is the window this contract covers.
+    const harness = await startHostExtension(brokerReceiveTool, async () => {}, {
+      pollIntervalMs: 300,
+      peerDeliveryConfirmTimeoutMs: 20,
+    })
+    let lateFrame: Record<string, unknown> | undefined
+    try {
+      harness.sendMessage.mockImplementation((message: Record<string, unknown>) => {
+        if (String(message.content).includes('landed late')) {
+          // The first send is accepted and never confirms; the landing only
+          // shows up once the attempt has already expired.
+          if (!lateFrame) { lateFrame = message; return }
+          return
+        }
+        harness.eventHandlers['message_end']?.({ message: { role: 'custom', customType: 'avenor-peer-message', details: message.details } })
+      })
+      await waitFor(() => harness.sendMessage.mock.calls.some(([m]) => String((m as Record<string, unknown>).content).includes('landed late')))
+      await waitFor(() => lateFrame !== undefined && harness.emitted.some(([channel, payload]) =>
+        channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver'))
+      // The landed frame arrives after the attempt gave up on it.
+      harness.eventHandlers['message_end']?.({ message: { role: 'custom', customType: 'avenor-peer-message', details: lateFrame!.details } })
+      // The ask behind the duplicate proves the queue passed it.
+      await waitFor(() => harness.sendMessage.mock.calls.some(([m]) => String((m as Record<string, unknown>).content).includes('the ask behind it')))
+      const lateReply = await harness.registeredTools.avenor_message.execute('r1', {
+        action: 'reply',
+        reply_to: 'ask-late',
+        message: 'answer',
+      })
+      expect(lateReply.details.outcome).toBe('replied')
+      // The duplicate opened the edge; it did not put a second frame on screen.
+      const frames = harness.sendMessage.mock.calls
+        .map(([m]) => String((m as Record<string, unknown>).content))
+        .filter(text => text.includes('landed late'))
+      expect(frames).toHaveLength(1)
+    } finally { await harness.eventHandlers.session_shutdown({}, {}) }
+  })
+
   it('delivers a tell without the reply line and without registering it', async () => {
     // A tell has no reply edge, so nothing is registered for a reply to
     // correlate against: a reply to its id reports edge-absent.
