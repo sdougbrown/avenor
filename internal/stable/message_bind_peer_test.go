@@ -200,4 +200,3 @@ func TestMessageBindReclaimsAfterReapWithoutAdoptingAnAttackerClaimedRecord(t *t
 		t.Fatalf("repeated rebind = %+v, want %+v reused without minting", repeat, rebound)
 	}
 }
-
