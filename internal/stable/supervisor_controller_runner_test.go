@@ -958,8 +958,9 @@ func TestControllerInflightViewDistinguishesSupervisorsOnSharedRoot(t *testing.T
 // TestControllerRunnerCapacityBlockedEventDedup proves capacity_blocked
 // controller events are appended once per reason change: many blocked passes
 // under one reason append a single event, a reason change local→tree appends
-// the second, and a successful dispatch clears the block with one
-// capacity_cleared event.
+// the second, a revert tree→local (the tree freed while the local slot is
+// still occupied) appends the third, and a successful dispatch clears the
+// block with one capacity_cleared event.
 func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 	t.Parallel()
 	f := newRunnerFixture(t, "runner-cap-event", "", 1, 2, true)
@@ -1023,9 +1024,15 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 		t.Fatalf("capacity_blocked events = %v, want [local tree]", blocked)
 	}
 
-	// Free everything: the next dispatch succeeds, clears the block, and
-	// appends exactly one capacity_cleared event.
+	// Free the tree budget before the local slot: the next pass runs while the
+	// occupied runtime is still alive, so the block reason reverts to local and
+	// appends the third event. Waiting for the revert pins the pass that a CI
+	// run once raced into the final assertion (#722's family).
 	releaseTree()
+	waitBlocked("local")
+
+	// Free the local slot too: the next dispatch succeeds, clears the block,
+	// and appends exactly one capacity_cleared event.
 	_ = f.sup.cancelRuntime(res.RuntimeID)
 	f.waitRunning(t, wf)
 	waitFor(t, "capacity cleared", func() bool {
@@ -1033,8 +1040,8 @@ func TestControllerRunnerCapacityBlockedEventDedup(t *testing.T) {
 		return err == nil && ok && rec.CapacityBlocked == ""
 	})
 	blocked, cleared := capacityEvents(t)
-	if len(blocked) != 2 {
-		t.Fatalf("capacity_blocked events = %v, want still [local tree]", blocked)
+	if len(blocked) != 3 || blocked[0] != "local" || blocked[1] != "tree" || blocked[2] != "local" {
+		t.Fatalf("capacity_blocked events = %v, want [local tree local]", blocked)
 	}
 	if cleared != 1 {
 		t.Fatalf("capacity_cleared events = %d, want exactly 1", cleared)
