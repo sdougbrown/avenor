@@ -20,6 +20,8 @@ export async function startExtensionHarness(options: {
   cwd?: string
   /** Replaces the whole session-manager mock; without it the default reports `sessionName`. */
   sessionManager?: unknown
+  /** Whether the session has a run in flight; defaults to idle. */
+  isIdle?: () => boolean
   onEmit?: (channel: string, payload: unknown) => void
   sendUserMessage?: (text: string, options: { deliverAs: string }) => void
   sendMessage?: (message: Record<string, unknown>, options?: Record<string, unknown>) => void
@@ -113,7 +115,7 @@ export async function startExtensionHarness(options: {
     sessionManager: options.sessionManager ?? { getSessionName: options.sessionName ?? (() => undefined) },
     ui: { setStatus, setWidget, notify, ...(options.ui ?? {}) },
     // Pi 1.4 ExtensionContext always exposes idle state; idle delivery reads it.
-    isIdle: () => true,
+    isIdle: options.isIdle ?? (() => true),
   }
   await eventHandlers.session_start({}, ctx)
   return { ctx, emitted, eventHandlers, notify, registeredCommands, registeredTools, sendUserMessage, sendMessage, setStatus, setWidget }
