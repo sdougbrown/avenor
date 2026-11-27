@@ -782,6 +782,11 @@ test('an unconfirmed peer frame is retried a bounded number of times, then repor
     b.inbox.push({ type: 'agent_message', payload: { id: 'tell-silent', from_run_id: 'claude-peer', message: 'never confirmed' } })
     await waitFor(() => h!.emitted.some(([channel, payload]) =>
       channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver'))
+    // The one report an episode lets through has to name the lost frame, or the
+    // operator reads "delivery failed" and cannot find out which message.
+    const [loss] = h.emitted.filter(([channel, payload]) =>
+      channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver')
+    expect(String((loss[1] as Record<string, unknown>).error)).toContain('tell-silent')
     b.inbox.push({ type: 'agent_message', payload: { id: 'tell-behind', from_run_id: 'claude-peer', message: 'the frame behind it' } })
     await waitFor(() => h!.sendMessage.mock.calls.some(([m]) => String(m.content).includes('the frame behind it')))
     const bodies = h.sendMessage.mock.calls.map(([m]) => String(m.content))
@@ -804,6 +809,9 @@ test('a frame that names no message id reports its loss instead of vanishing', a
     b.inbox.push({ type: 'agent_message', payload: { from_run_id: 'claude-peer', message: 'no id at all' } })
     await waitFor(() => h!.emitted.some(([channel, payload]) =>
       channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver'))
+    const [loss] = h.emitted.filter(([channel, payload]) =>
+      channel === CHANNEL_PEER_ERROR && (payload as Record<string, unknown>).operation === 'deliver')
+    expect(String((loss[1] as Record<string, unknown>).error)).toContain('an unaddressed frame')
     expect(h.sendMessage.mock.calls).toHaveLength(1)
   } finally { await h?.eventHandlers.session_shutdown({}, {}); b.restore() }
 })

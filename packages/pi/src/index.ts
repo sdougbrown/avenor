@@ -685,7 +685,9 @@ export function createExtension(deps: ExtensionDeps = defaultDeps, options: Exte
           }
           frame.waiting = frame.waiting.filter(waiting => waiting !== settle)
           if (!unaddressed) {
-            reject(new Error('delivery not confirmed'))
+            // The queues report this rejection, and the episode latch lets only
+            // the first report through, so it has to name the frame it lost.
+            reject(new Error(`${describePeerFrame(ask)} was not confirmed`))
             return
           }
           frame.settled = true
