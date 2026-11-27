@@ -107,6 +107,9 @@ describe('plugin entry', () => {
       'avenor_answer_permission',
       'avenor_message',
       'avenor_peers',
+      'avenor_status',
+      'avenor_result',
+      'avenor_kill',
     ])
   })
 
@@ -156,7 +159,7 @@ describe('plugin entry', () => {
     apply(fake.ctx, {}, { runtime: parts.runtime })
 
     expect(fake.providers).toHaveLength(1)
-    expect(fake.tools).toHaveLength(3)
+    expect(fake.tools).toHaveLength(6)
     expect(parts.calls).toEqual([])
 
     for (const dispose of fake.effects) dispose()

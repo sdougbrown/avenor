@@ -1,5 +1,6 @@
 import { answerPermissionTool } from '@dougbots/avenor-core'
 import { answerToolDefinition, type AnswerDeps } from './answer-tool.js'
+import { controlToolDefinitions, type ControlTools } from './control-tools.js'
 import { messageToolDefinition, peersToolDefinition } from './message-tools.js'
 import { createMessagingRuntime, type MessagingRuntime } from './messaging.js'
 import {
@@ -55,6 +56,7 @@ export interface RegisterDeps {
   readonly answer?: AnswerDeps
   readonly makeSeam?: SeamFactory
   readonly runtime?: MessagingRuntime
+  readonly control?: ControlTools
 }
 
 export function register(
@@ -73,6 +75,7 @@ export function register(
   ctx.tools.register(answerToolDefinition(answer))
   ctx.tools.register(messageToolDefinition(runtime))
   ctx.tools.register(peersToolDefinition(runtime))
+  for (const definition of controlToolDefinitions(deps.control)) ctx.tools.register(definition)
   return runtime
 }
 
