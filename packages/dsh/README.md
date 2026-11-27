@@ -148,7 +148,7 @@ The pi plugin is the reference surface. This is what matches, and what does not.
 | tell / ask / reply | yes | yes, verified live |
 | Peer listing and rename | yes | `avenor_peers` (list, rename); `last` not exposed |
 | Named peer | publishes its harness name | publishes its harness name (issue #734 bind + this PR) |
-| Run status, result, cancel | `avenor_status`, `avenor_result`, `avenor_kill` | not exposed; the subagent result is the only channel, and a long run cannot be stopped from here |
+| Run status, result, cancel | `avenor_status`, `avenor_result`, `avenor_kill` | the same three; `result` matters only for a run this session did not delegate, since a delegation's result already arrives |
 | Run inspection and events | `avenor_inspect`, `avenor_events` | not exposed |
 | Workflow tools | `avenor_workflow` | not exposed |
 | Live output while a run works | TUI watch overlay | no channel: `SubagentProvider.start()` returns a terminal promise |
@@ -156,8 +156,14 @@ The pi plugin is the reference surface. This is what matches, and what does not.
 | Per-call model and thinking | per call | per bundle row |
 | Packaging | published npm package | private, 0.0.0; the publish step is a stacked PR |
 
-The three missing tool families are the real gap: without status and cancel, a
-delegation that goes wrong can only be waited out.
+Two families are still missing: `avenor_inspect` / `avenor_events`, and
+`avenor_workflow`.
+
+`result` earns its place even though the subagent seam already delivers a
+delegation's output: it reads a run this session did not spawn, a notice the
+context dropped, or a run whose delegation outlived a restart. It reports what
+is ready and does not wait unless `wait: true`, so it cannot turn a status check
+into a hang.
 
 ## Open questions this spike does not answer
 
