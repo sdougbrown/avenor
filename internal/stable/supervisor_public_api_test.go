@@ -511,16 +511,39 @@ func (h *itestHarness) consistentlyFor(window time.Duration, what string, cond f
 	}
 }
 
+// waitTurn returns the settled turn of rtID. The settle is persistent state
+// (a parked runtime holds it), so the helper reads the state instead of the
+// edge: a registration that lands after the settle would otherwise wait for
+// a running→idle transition a park-forever runtime never produces (#722).
+// The stop reason is the runtime's most recent session.end event, the record
+// the supervisor's own wait_turn result mirrors.
 func (h *itestHarness) waitTurn(rtID string) map[string]any {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(h.t.Context(), itestWaitCap)
-	defer cancel()
-	out, err := h.sup.RuntimeWaitTurn(ctx, rtID, 0)
-	if err != nil {
-		h.t.Fatalf("RuntimeWaitTurn(%s): %v", rtID, err)
+	deadline := time.Now().Add(itestWaitCap)
+	for {
+		v := h.view(rtID)
+		end, ended := h.lastSessionEnd(rtID)
+		if v.TurnComplete && ended {
+			stopReason, _ := end.Fields["stop_reason"].(string)
+			return map[string]any{"stop_reason": stopReason}
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("runtime %s never settled a turn (status %q phase %q)", rtID, v.Status, v.Phase)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	res, _ := out.(map[string]any)
-	return res
+}
+
+// lastSessionEnd returns the runtime's most recent session.end event, or
+// false before one is published.
+func (h *itestHarness) lastSessionEnd(rtID string) (events.Event, bool) {
+	all := h.log.all()
+	for i := len(all) - 1; i >= 0; i-- {
+		if itestEventIs("session.end", rtID)(all[i]) {
+			return all[i], true
+		}
+	}
+	return events.Event{}, false
 }
 
 func (h *itestHarness) result(rtID string) string {
@@ -1019,6 +1042,24 @@ func TestSupervisorPublicAPIRecordsIdleEndInBroker(t *testing.T) {
 	defer state.Mu.Unlock()
 	if len(state.Reports) == 0 || state.Reports[len(state.Reports)-1].State != "cancelled" {
 		t.Fatalf("broker last recording = %v, want the idle end's cancelled recording", state.Reports)
+	}
+}
+
+// TestWaitTurnHelperReturnsAParkedRuntimesSettledTurn pins the helper on the
+// #722 race: the helper can run after the runtime's turn settled, when a
+// parked runtime holds the settled turn as state and never produces the next
+// running→idle transition an edge wait registers for. The helper reads the
+// settled state instead, so the call returns the settled turn's result.
+func TestWaitTurnHelperReturnsAParkedRuntimesSettledTurn(t *testing.T) {
+	t.Parallel()
+	provider := newItestProvider(itestAttempt("ses_settled", itestSessionEnd("ses_settled", "end_turn", "done")))
+	h := newItestHarness(t, Config{}, itestSingleProvider(provider))
+
+	rt := h.spawn(map[string]any{"label": "wait-settled"})
+	h.awaitSettledStatus(rt)
+	turn := h.waitTurn(rt)
+	if got, _ := turn["stop_reason"].(string); got != "end_turn" {
+		t.Fatalf("WaitTurn stop_reason = %q, want end_turn", got)
 	}
 }
 
