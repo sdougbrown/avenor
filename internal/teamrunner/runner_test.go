@@ -1315,10 +1315,8 @@ func TestRunTeamPreservesCompletedMembersOnDegenerateStream(t *testing.T) {
 					FinalReply: "Looks good.",
 				}, nil
 			case "test-reviewer":
-				// Failed member: the reasoning stream guard tripped.
-				// The runner returns ExitCode 1 (mapped from
-				// unknown stop reason) and the explicit stop_reason
-				// of degenerate_reasoning_stream.
+				// Failed member: aborted with the degenerate_reasoning_stream
+				// stop reason; the runner maps it to a non-zero exit code.
 				return PhaseAttemptResult{
 					ExitCode:   runtime.ExitCodeForStopReason("degenerate_reasoning_stream"),
 					SessionID:  "test-reviewer-s",
