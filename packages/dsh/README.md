@@ -137,6 +137,28 @@ The `avenor` binary is an external prerequisite, resolved by
 install. This bundle declares no `postinstall` and makes no install-time network
 request.
 
+## Parity with the pi plugin
+
+The pi plugin is the reference surface. This is what matches, and what does not.
+
+| Capability | pi plugin | this plugin |
+|---|---|---|
+| Delegate a run | `avenor_spawn` and friends | `subagent_avenor`, through the subagent provider |
+| Permission relay | notice plus `avenor_answer_permission` | provider notice plus `avenor_answer_permission` |
+| tell / ask / reply | yes | yes, verified live |
+| Peer listing and rename | yes | `avenor_peers` (list, rename); `last` not exposed |
+| Named peer | publishes its harness name | publishes its harness name (issue #734 bind + this PR) |
+| Run status, result, cancel | `avenor_status`, `avenor_result`, `avenor_kill` | not exposed; the subagent result is the only channel, and a long run cannot be stopped from here |
+| Run inspection and events | `avenor_inspect`, `avenor_events` | not exposed |
+| Workflow tools | `avenor_workflow` | not exposed |
+| Live output while a run works | TUI watch overlay | no channel: `SubagentProvider.start()` returns a terminal promise |
+| Client UI | TUI | none, by design |
+| Per-call model and thinking | per call | per bundle row |
+| Packaging | published npm package | private, 0.0.0; the publish step is a stacked PR |
+
+The three missing tool families are the real gap: without status and cancel, a
+delegation that goes wrong can only be waited out.
+
 ## Open questions this spike does not answer
 
 1. **Child runtime selection is per bundle, not per call.** The bundle row's
