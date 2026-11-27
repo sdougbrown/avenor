@@ -40,7 +40,6 @@ The native mechanisms below were verified with Codex CLI 0.144.6, Pi 0.83.0, and
 | `dsh` | unsupported | unsupported | none verified |
 | `fx` | unsupported | unsupported | none verified |
 | `agy` | `low`, `medium`, `high`, `xhigh` | `low`, `medium`, `high`, `xhigh` | ACP `session/set_config_option` (`thought_level`) |
-| `pony` | unsupported | unsupported | none |
 | `poo` | unsupported | unsupported | none: the binary's settings choose the model |
 
 Every explicit value on an unsupported path fails with an error such as:
@@ -93,6 +92,6 @@ The static policy admits `low`, `medium`, `high`, and `xhigh` before Avenor star
 
 OpenCode ACP 1.18.3 has no verified thinking config option. OpenCode HTTP SDK 1.15.3 exposes model variants, but a variant name is not a canonical thinking level. Avenor does not infer a mapping or add an unverified payload field.
 
-Gemini ACP and Cursor ACP have no verified session control for this setting. Pony's model request has no thinking field. A poo binary takes its model and its options from its own settings file, and its wire protocol has no reasoning field, so the backend rejects an explicit level rather than ignoring it. Agy no longer appears here: it uses ACP (`agy acp`) and applies `thought_level`; see its section above for values and model-specific validation.
+Gemini ACP and Cursor ACP have no verified session control for this setting. A poo binary takes its model and its options from its own settings file, and its wire protocol has no reasoning field, so the backend rejects an explicit level rather than ignoring it. Agy no longer appears here: it uses ACP (`agy acp`) and applies `thought_level`; see its section above for values and model-specific validation.
 
 None of these backends receives a prompt prefix, system instruction, warning-only fallback, or silent no-op.

@@ -6,7 +6,7 @@ import "github.com/sdougbrown/avenor/internal/thinkingpolicy"
 // It is the only backend the MCP wait applies to, and the only one that holds
 // start-only options (the thinking level and the MCP wait) in the process it
 // spawns: its explicit resume takes no per-call options. Other bare-Resume
-// backends (pony, opencode-http) reject start-only options at start, so their
+// backends (opencode-http) reject start-only options at start, so their
 // resumes never carry any.
 func IsClaudeFamily(backend string) bool {
 	return backend == "claude"

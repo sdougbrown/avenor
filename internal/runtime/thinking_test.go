@@ -34,7 +34,7 @@ func TestThinkingBackendPolicy(t *testing.T) {
 		"gemini-acp":       {},
 		"cursor-acp":       {},
 		"agy":              {"low": true, "medium": true, "high": true, "xhigh": true},
-		"pony":             {},
+		"poo":              {},
 	}
 	for backend, accepted := range policy {
 		if err := ValidateThinkingForBackend(backend, ""); err != nil {

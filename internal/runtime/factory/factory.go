@@ -10,7 +10,6 @@
 //   - fx: spawns fx acp subprocess, owns lifecycle.
 //   - pi: spawns pi --mode rpc subprocess, owns lifecycle.
 //   - poo: spawns a poo binary subprocess and drives it over its stdio protocol.
-//   - pony: test/stub backend.
 //   - claude: Claude Code backend; PTY by default, AVENOR_CLAUDE_TERMINAL=tmux for tmux.
 package factory
 
@@ -30,7 +29,6 @@ import (
 	"github.com/sdougbrown/avenor/internal/runtime/opencodeacp"
 	"github.com/sdougbrown/avenor/internal/runtime/opencodehttp"
 	"github.com/sdougbrown/avenor/internal/runtime/pi"
-	"github.com/sdougbrown/avenor/internal/runtime/pony"
 	"github.com/sdougbrown/avenor/internal/runtime/poo"
 )
 
@@ -67,9 +65,6 @@ var providers = map[string]func(runtime.StartOptions) (runtime.Provider, error){
 	"poo": func(o runtime.StartOptions) (runtime.Provider, error) {
 		return poo.NewWithOptions(o), nil
 	},
-	"pony": func(o runtime.StartOptions) (runtime.Provider, error) {
-		return pony.NewWithOptions(o), nil
-	},
 	"claude": func(o runtime.StartOptions) (runtime.Provider, error) {
 		return claude.NewWithOptions(o), nil
 	},
@@ -91,7 +86,6 @@ func KnownBackends() []string {
 // never exec a child process, so a launch wrapper has nothing to prefix.
 var noProcessBackends = map[string]bool{
 	"opencode-http": true,
-	"pony":          true,
 }
 
 func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provider, error) {
@@ -100,6 +94,9 @@ func NewProvider(startOpts runtime.StartOptions, backend string) (runtime.Provid
 	}
 	construct := providers[backend]
 	if construct == nil {
+		if backend == "pony" {
+			return nil, fmt.Errorf("unknown backend %q (removed; use %q instead)", backend, "poo")
+		}
 		return nil, fmt.Errorf("unknown backend %q", backend)
 	}
 	return construct(startOpts)

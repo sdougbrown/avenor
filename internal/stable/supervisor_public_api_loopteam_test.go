@@ -1365,7 +1365,7 @@ func TestSupervisorPublicAPITeamStatusRunningBeforeFirstMemberAttempt(t *testing
 		"team_file": file,
 		"dir":       t.TempDir(),
 		"label":     "team-start",
-		"backend":   "pony",
+		"backend":   "poo",
 		"timeout":   30,
 	}, &spawned); err != nil {
 		t.Fatalf("spawn: %v", err)

@@ -406,7 +406,7 @@ Under a supervisor, the same join uses `runtime_id: "rt_4"` while `run_id` stays
 
 ### Coverage limits
 
-- `opencode-http` attaches to an external server and starts no backend process. `pony` runs in-process. Neither delivers an environment to a harness child.
+- `opencode-http` attaches to an external server and starts no backend process, so it delivers no environment to a harness child.
 - Repeated nested phase names with the same iteration produce identical tuples. The join is ambiguous; no scope ID is generated.
 - An opaque launch wrapper can drop or rewrite the environment. Avenor does not verify wrapper behavior.
 

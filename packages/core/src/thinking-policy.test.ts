@@ -98,7 +98,7 @@ describe('thinking policy helpers', () => {
       'gemini-acp',
       'cursor-acp',
       'agy',
-      'pony',
+      'poo',
     ]
     const fixtureBackends = new Set(
       conformanceData.backendCases.map((c) => c.backend),

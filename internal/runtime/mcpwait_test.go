@@ -34,7 +34,7 @@ func TestIsClaudeFamily(t *testing.T) {
 		want    bool
 	}{
 		{"claude", true},
-		{"pony", false},
+		{"poo", false},
 		{"opencode-http", false},
 		{"codex-app-server", false},
 		{"pi", false},
