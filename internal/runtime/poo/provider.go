@@ -370,7 +370,8 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 		// Both closed-pipe shapes mean the child is gone: EPIPE because its
 		// end of the pipe closed first, ErrClosed because exec's Wait closed
 		// our stdin pipe while it reaped the child.
-		exited := errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
+		closedPipe := errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed)
+		exited := closedPipe
 		select {
 		case <-c.stdoutDone:
 			exited = true
@@ -388,6 +389,14 @@ func (p *Provider) openProcess(ctx context.Context, opts runtime.StartOptions) (
 					return nil, &messagingFailure{reason: line}
 				}
 			}
+		}
+		// The RPC can see stdout close before the stderr reader records the cause.
+		var unanswered *unansweredError
+		if errors.As(err, &unanswered) {
+			return nil, &unansweredError{method: unanswered.method, cause: cause}
+		}
+		if closedPipe {
+			return nil, fmt.Errorf("%w: %s", err, cause)
 		}
 		return nil, err
 	}

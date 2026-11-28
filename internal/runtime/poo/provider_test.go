@@ -1770,6 +1770,32 @@ func TestStartReadsFinalInitializeError(t *testing.T) {
 	}
 }
 
+func TestStartReportsStderrAfterHandshakeFailure(t *testing.T) {
+	t.Setenv(helperEnv, "stderr-after-initialize-eof")
+	for _, tc := range []string{"stdout EOF", "stdin closed"} {
+		t.Run(tc, func(t *testing.T) {
+			provider := NewWithOptions(avruntime.StartOptions{})
+			t.Cleanup(func() { _ = provider.Close() })
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			opts := helperStartOptions()
+			if tc == "stdin closed" {
+				c, err := provider.ensureClient(ctx, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := c.stdin.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := provider.Start(ctx, opts)
+			if err == nil || !strings.Contains(err.Error(), `profile "no-such-profile" is unknown`) {
+				t.Fatalf("Start error = %v, want Poo's profile diagnostic", err)
+			}
+		})
+	}
+}
+
 // TestStartRefusesAnUnsupportedProtocolVersion proves the handshake checks the
 // agreed version instead of assuming the one it offered.
 func TestStartRefusesAnUnsupportedProtocolVersion(t *testing.T) {
@@ -2232,6 +2258,11 @@ func runHelperServer(mode string) int {
 				"result":  protocol.InspectResult{Settled: &protocol.Settled{RunID: "run-busy", Reason: "end_turn"}},
 			})
 		case protocol.MethodInitialize:
+			if mode == "stderr-after-initialize-eof" {
+				_ = os.Stdout.Close()
+				// Read to EOF so the diagnostic follows the client's shutdown.
+				continue
+			}
 			if mode == "exit-after-initialize" || mode == "exit-with-descendant" {
 				if mode == "exit-with-descendant" {
 					child := exec.Command("sleep", "30")
@@ -2295,6 +2326,10 @@ func runHelperServer(mode string) int {
 		default:
 			write(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": map[string]any{}})
 		}
+	}
+	if mode == "stderr-after-initialize-eof" {
+		fmt.Fprintln(os.Stderr, `poo serve: profile "no-such-profile" is unknown`)
+		return 1
 	}
 	if mode == "ignoreterm" {
 		// Stdin closed and the scanner ended; a child that ignores SIGTERM has
