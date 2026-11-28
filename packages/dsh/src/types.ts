@@ -29,6 +29,8 @@ export interface UserMessageLike {
  */
 export interface ParentAgent {
   readonly status: 'idle' | 'running'
+  /** The DSH session this agent speaks for; a conversation binds by its id. */
+  readonly session?: { readonly id: string }
   inject(message: UserMessageLike): void
   followup(message: UserMessageLike): void
 }
@@ -85,4 +87,6 @@ export interface HostContext {
   tools: {
     register(definition: unknown): () => void
   }
+  /** Cordis effect scope: the returned disposer runs when the plugin unloads. */
+  effect?(scope: () => (() => void) | void): () => void
 }

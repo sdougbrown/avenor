@@ -2,14 +2,16 @@
 // every surface; a test fails if the copy drifts.
 import messageSchema from './schemas/message.input.flat.json'
 import peersSchema from './schemas/peers.input.flat.json'
-import type { ToolDefinitionLike } from './answer-tool.js'
-import type { MessagingHost } from './messaging.js'
+import type { ToolDefinitionLike, ToolExecContext } from './answer-tool.js'
+import type { MessagingSurface } from './messaging.js'
 
 export const MESSAGE_TOOL_NAME = 'avenor_message'
 export const PEERS_TOOL_NAME = 'avenor_peers'
 
-/** The host is built on first call, so tool registration stays synchronous. */
-export type LazyMessagingHost = () => Promise<MessagingHost>
+/** The caller's DSH session; the bound conversation is selected by it. */
+export function sessionIdOf(exec: ToolExecContext | undefined): string | undefined {
+  return exec?.agent?.session?.id
+}
 
 // A raw JSON Schema the registry accepts: `{ type: 'json' }` is the authoring
 // DSL's shorthand, but `tools.register` asserts the raw subset, where the only
@@ -33,7 +35,7 @@ function renderValue(value: unknown) {
  * not a hand-written copy: one field list for every surface, so a renamed field
  * cannot drift between them.
  */
-export function messageToolDefinition(getHost: LazyMessagingHost): ToolDefinitionLike {
+export function messageToolDefinition(surface: MessagingSurface): ToolDefinitionLike {
   return {
     name: MESSAGE_TOOL_NAME,
     description:
@@ -42,17 +44,17 @@ export function messageToolDefinition(getHost: LazyMessagingHost): ToolDefinitio
       'that was spawned with messaging enabled can address this harness as "supervisor".',
     parameters: messageSchema as unknown as ToolDefinitionLike['parameters'],
     output: { schema: outputSchema, render: (_args, value) => renderValue(value) },
-    execute: async (args) => (await getHost()).message(args),
+    execute: async (args, exec) => surface.message(args, sessionIdOf(exec)),
   }
 }
 
-export function peersToolDefinition(getHost: LazyMessagingHost): ToolDefinitionLike {
+export function peersToolDefinition(surface: MessagingSurface): ToolDefinitionLike {
   return {
     name: PEERS_TOOL_NAME,
     description:
       'List connected Avenor runs, rename a run label, or read a peer\'s last agent message.',
     parameters: peersSchema as unknown as ToolDefinitionLike['parameters'],
     output: { schema: outputSchema, render: (_args, value) => renderValue(value) },
-    execute: async (args) => (await getHost()).peers(args),
+    execute: async (args, exec) => surface.peers(args, sessionIdOf(exec)),
   }
 }
