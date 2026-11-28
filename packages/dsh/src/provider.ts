@@ -66,6 +66,8 @@ export interface CoreTools {
     readonly backend?: string
     readonly rosterFile?: string
     readonly rosterEntry?: string
+    readonly messaging?: boolean
+    readonly parent_run_id?: string
   }): Promise<{ readonly run_id: string }>
   result(request: { readonly runId: string; readonly wait: boolean }): Promise<{
     readonly status: string
@@ -94,6 +96,14 @@ export interface CoreSeamOptions {
   readonly tools?: CoreTools
   readonly pollIntervalMs?: number
   readonly sleep?: (ms: number) => Promise<void>
+  /** Make the child addressable as `parentRunId` in the broker. */
+  readonly messaging?: boolean
+  /** The run id a messaging-enabled child addresses; the harness is `supervisor`. */
+  readonly parentRunId?: string
+}
+
+function selectionParentRunId(parentRunId: string | undefined): { parent_run_id?: string } {
+  return parentRunId === undefined ? {} : { parent_run_id: parentRunId }
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -143,6 +153,9 @@ export function createCoreSeam(options: CoreSeamOptions = {}): AvenorSeam {
         ...(selection.backend === undefined ? {} : { backend: selection.backend }),
         ...(selection.rosterFile === undefined ? {} : { rosterFile: selection.rosterFile }),
         ...(selection.rosterEntry === undefined ? {} : { rosterEntry: selection.rosterEntry }),
+        ...(options.messaging === true
+          ? { messaging: true, ...(selectionParentRunId(options.parentRunId)) }
+          : {}),
       })
 
       const runId = spawned.run_id

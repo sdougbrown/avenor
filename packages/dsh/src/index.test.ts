@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test'
 import { apply, inject, register, type HostConfig } from './index.js'
-import type { AvenorSeam, AvenorSelection } from './provider.js'
+import type { AvenorSeam } from './provider.js'
+import type { MessagingHost } from './messaging.js'
 import type { HostContext, SubagentProvider } from './types.js'
 
 function fakeContext() {
@@ -23,42 +24,85 @@ function fakeContext() {
   return { ctx, providers, tools }
 }
 
-/** A seam that never runs anything, recording the selection it was built with. */
+/** A seam that never runs anything, recording the request it was built from. */
 function recordingSeamFactory() {
-  const selections: AvenorSelection[] = []
+  const requests: unknown[] = []
   const seam: AvenorSeam = {
     async spawn() {
       throw new Error('not used in this test')
     },
   }
   return {
-    selections,
-    makeSeam(selection: AvenorSelection) {
-      selections.push(selection)
+    requests,
+    makeSeam(request: unknown) {
+      requests.push(request)
       return seam
     },
   }
 }
+
+function fakeMessagingHost() {
+  const calls: string[] = []
+  const host: MessagingHost = {
+    hostRunId: 'supervisor',
+    async message() {
+      calls.push('message')
+      return { outcome: 'sent' }
+    },
+    async peers() {
+      calls.push('peers')
+      return { outcome: 'listed' }
+    },
+  }
+  return { host, calls, getMessagingHost: async () => host }
+}
+
+const toolNames = (tools: unknown[]) =>
+  tools.map((tool) => (tool as { name: string }).name)
 
 describe('plugin entry', () => {
   it('waits for the subagent registry and the tool registry', () => {
     expect(inject).toEqual(['subagents', 'tools'])
   })
 
-  it('registers the avenor provider and the answer tool', () => {
+  it('registers the provider and the three tools', () => {
     const fake = fakeContext()
     const seams = recordingSeamFactory()
-    register(fake.ctx, {}, { answer: async () => ({ ok: true }) }, seams.makeSeam)
+    const messaging = fakeMessagingHost()
+    register(fake.ctx, {}, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: seams.makeSeam,
+      getMessagingHost: messaging.getMessagingHost,
+    })
 
     expect(fake.providers.map((provider) => provider.name)).toEqual(['avenor'])
     expect(fake.providers[0].inheritsParentContext).toBe(false)
-    expect(fake.tools).toHaveLength(1)
-    expect((fake.tools[0] as { name: string }).name).toBe('avenor_answer_permission')
+    expect(toolNames(fake.tools)).toEqual([
+      'avenor_answer_permission',
+      'avenor_message',
+      'avenor_peers',
+    ])
+  })
+
+  it('publishes output schemas the tool registry accepts', () => {
+    const fake = fakeContext()
+    register(fake.ctx, {}, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: recordingSeamFactory().makeSeam,
+      getMessagingHost: fakeMessagingHost().getMessagingHost,
+    })
+    // tools.register asserts the raw JSON Schema subset; an authoring-only type
+    // such as 'json' throws there and takes the plugin's other tools with it.
+    const allowed = ['object', 'array', 'string', 'number', 'integer', 'boolean', 'null', undefined]
+    for (const tool of fake.tools as Array<{ name: string; output: { schema: { type?: string } } }>) {
+      expect(allowed).toContain(tool.output.schema.type)
+    }
   })
 
   it('passes the row config through to the child selection', () => {
     const fake = fakeContext()
     const seams = recordingSeamFactory()
+    const messaging = fakeMessagingHost()
     const config: HostConfig = {
       backend: 'dsh',
       model: 'grace/qwen',
@@ -66,29 +110,57 @@ describe('plugin entry', () => {
       rosterFile: '/roster.json',
     }
 
-    register(fake.ctx, config, { answer: async () => ({ ok: true }) }, seams.makeSeam)
+    register(fake.ctx, config, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: seams.makeSeam,
+      getMessagingHost: messaging.getMessagingHost,
+    })
 
-    expect(seams.selections).toEqual([
+    expect(seams.requests).toEqual([
       {
-        backend: 'dsh',
-        model: 'grace/qwen',
-        rosterEntry: 'reviewer',
-        rosterFile: '/roster.json',
+        selection: {
+          backend: 'dsh',
+          model: 'grace/qwen',
+          rosterEntry: 'reviewer',
+          rosterFile: '/roster.json',
+        },
+        messaging: false,
+        parentRunId: 'supervisor',
       },
+    ])
+  })
+
+  it('binds messaging to the supervisor by default when enabled', () => {
+    const fake = fakeContext()
+    const seams = recordingSeamFactory()
+    const messaging = fakeMessagingHost()
+    register(fake.ctx, { messaging: true }, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: seams.makeSeam,
+      getMessagingHost: messaging.getMessagingHost,
+    })
+
+    expect(seams.requests).toEqual([
+      { selection: {}, messaging: true, parentRunId: 'supervisor' },
     ])
   })
 
   it('omits unset selection fields rather than passing empty strings', () => {
     const fake = fakeContext()
     const seams = recordingSeamFactory()
-    register(fake.ctx, { agent: 'planner' }, { answer: async () => ({ ok: true }) }, seams.makeSeam)
-    expect(seams.selections).toEqual([{ agent: 'planner' }])
+    const messaging = fakeMessagingHost()
+    register(fake.ctx, { agent: 'planner' }, {
+      answer: { answer: async () => ({ ok: true }) },
+      makeSeam: seams.makeSeam,
+      getMessagingHost: messaging.getMessagingHost,
+    })
+    expect((seams.requests[0] as { selection: unknown }).selection).toEqual({ agent: 'planner' })
   })
 
-  it('registers both halves from apply', () => {
+  it('registers everything from apply', () => {
     const fake = fakeContext()
     apply(fake.ctx)
     expect(fake.providers).toHaveLength(1)
-    expect(fake.tools).toHaveLength(1)
+    expect(fake.tools).toHaveLength(3)
   })
 })
