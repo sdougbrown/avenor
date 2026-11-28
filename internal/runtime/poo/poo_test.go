@@ -152,30 +152,6 @@ func TestRosterPooEntryResolvesItsLaunchFields(t *testing.T) {
 	}
 }
 
-// A poo roster entry loads, but the shared thinking policy refuses it with the
-// same unsupported-parameter error every backend without thinking support gets.
-func TestRosterPooEntryWithThinkingIsRefused(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "roster.json")
-	if err := os.WriteFile(path, []byte(`{"reviewer":{"backend":"poo","agent":"search","thinking":"high"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	roster, err := rosterconfig.Load(path)
-	if err != nil {
-		t.Fatalf("Load() = %v", err)
-	}
-	entry, err := roster.Lookup("reviewer")
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = runtime.ValidateThinkingForBackend(entry.Backend, entry.Thinking)
-	if err == nil {
-		t.Fatal("ValidateThinkingForBackend(poo, high) = nil, want the unsupported-parameter error")
-	}
-	if err.Error() != runtime.NewUnsupportedThinkingError(entry.Backend).Error() {
-		t.Fatalf("ValidateThinkingForBackend() = %q, want the shared unsupported-parameter error", err)
-	}
-}
-
 // A start with no resolved executable fails before any process is spawned, and
 // the error says what the launch was missing.
 func TestProviderStartWithoutAResolvedLaunchFails(t *testing.T) {

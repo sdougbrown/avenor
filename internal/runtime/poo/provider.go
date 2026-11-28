@@ -49,6 +49,9 @@ type sessionState struct {
 	id        string
 	mu        sync.Mutex
 	activeRun string
+
+	thinkingMu sync.Mutex
+	thinking   string
 }
 
 func (s *sessionState) activeRunID() string {
@@ -61,6 +64,24 @@ func (s *sessionState) setActiveRun(runID string) {
 	s.mu.Lock()
 	s.activeRun = runID
 	s.mu.Unlock()
+}
+
+// A retry can reuse a session while its inbox has started a turn. Only ask
+// Poo to change the level if this resume actually requests a different one.
+func (s *sessionState) setThinking(ctx context.Context, c *client, level string) error {
+	if level == "" {
+		return nil
+	}
+	s.thinkingMu.Lock()
+	defer s.thinkingMu.Unlock()
+	if level == s.thinking {
+		return nil
+	}
+	if err := c.setThinking(ctx, s.id, level); err != nil {
+		return err
+	}
+	s.thinking = level
+	return nil
 }
 
 // NewWithOptions builds the poo provider for one session.
@@ -116,7 +137,7 @@ func (p *Provider) Start(ctx context.Context, opts runtime.StartOptions) (runtim
 	on := merged.MessagingOn
 	p.mu.Lock()
 	p.opts = merged
-	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
+	p.sessions[info.SessionID] = &sessionState{id: info.SessionID, thinking: merged.Thinking}
 	p.mu.Unlock()
 
 	return runtime.Session{
@@ -183,14 +204,24 @@ func describeCreateFailure(opts runtime.StartOptions, err error) error {
 }
 
 func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Session, error) {
+	return p.ResumeWithOptions(ctx, sessionID, runtime.StartOptions{})
+}
+
+// ResumeWithOptions uses the recorded launch identity and applies only the
+// reasoning override requested for this resume.
+func (p *Provider) ResumeWithOptions(ctx context.Context, sessionID string, opts runtime.StartOptions) (runtime.Session, error) {
 	if sessionID == "" {
 		return runtime.Session{}, errors.New("session id is required")
+	}
+	if err := runtime.ValidateThinkingForBackendResume(backendID, opts.Thinking); err != nil {
+		return runtime.Session{}, err
 	}
 	// The launch is the identity the session was created with: the supervisor
 	// resolves it from the session's own record before this provider exists, so
 	// the process that resumes is the one the session belongs to.
 	p.mu.Lock()
 	merged := runtime.MergeStartOptions(p.opts, runtime.StartOptions{})
+	merged.Thinking = opts.Thinking
 	st := p.sessions[sessionID]
 	c := p.client
 	other := len(p.sessions) > 0 && st == nil
@@ -204,6 +235,9 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	// itself instead of a refusal.
 	if st != nil {
 		if c != nil && c.live() {
+			if err := st.setThinking(ctx, c, merged.Thinking); err != nil {
+				return runtime.Session{}, err
+			}
 			return runtime.Session{
 				SessionID:   sessionID,
 				Backend:     backendID,
@@ -233,7 +267,7 @@ func (p *Provider) Resume(ctx context.Context, sessionID string) (runtime.Sessio
 	}
 	p.mu.Lock()
 	p.opts = merged
-	p.sessions[info.SessionID] = &sessionState{id: info.SessionID}
+	p.sessions[info.SessionID] = &sessionState{id: info.SessionID, thinking: merged.Thinking}
 	p.mu.Unlock()
 
 	return runtime.Session{
@@ -294,6 +328,9 @@ func (p *Provider) openSession(ctx context.Context, opts runtime.StartOptions, b
 			info, err = open(c)
 			if err != nil && manifestRefusal(err.Error()) {
 				err = &messagingFailure{reason: err.Error()}
+			}
+			if err == nil && opts.Thinking != "" {
+				err = c.setThinking(ctx, info.SessionID, opts.Thinking)
 			}
 			if err == nil && opts.MessagingOn {
 				err = checkMessaging(ctx, opts, info, baseline)

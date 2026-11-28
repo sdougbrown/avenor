@@ -126,6 +126,19 @@ names before signalling — a bare `kill -0` also succeeds for a recycled pid, a
 a `$!` captured from a `setsid` launcher can name a shell that already exited.
 The pid file is gone after the sentinel appears.
 
+## Poo backend: explicit thinking
+
+Use Poo v0.3.0 or later and a configured chat model that accepts both test levels.
+Open a logged session with `--thinking high`, then resume its `SESSION=` ID with
+`--thinking low`. Use the same backend, profile, model, and working directory.
+Capture a separate sentinel, result file, and event log for each run as above.
+
+**Poo proof:** both runs return `OK` and the same session ID. Each event log
+has an `avenor.turn.start` and terminal `session.end` with `stop_reason: end_turn`.
+The CLI drive proves both setters succeeded and the turns completed. The Poo
+provider integration tests also check the actual reasoning field on the model
+request, which the CLI events do not expose.
+
 ## Claude backend: OSC 7501 status reports
 
 On its default PTY launcher the `claude` backend answers Claude Code's OSC 7501

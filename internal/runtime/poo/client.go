@@ -326,6 +326,25 @@ func (c *client) loadSession(ctx context.Context, params protocol.LoadParams) (p
 	return info, nil
 }
 
+func (c *client) setThinking(ctx context.Context, sessionID, level string) error {
+	method := protocol.MethodSessionConfigure
+	raw, rpcErr, err := c.call(ctx, method, protocol.ConfigureParams{SessionID: sessionID, Reasoning: level})
+	if err == nil {
+		err = rpcError(method, rpcErr)
+	}
+	if err != nil {
+		return fmt.Errorf("poo thinking %q: %w", level, err)
+	}
+	var result protocol.ConfigureResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return fmt.Errorf("decode poo %s result: %w", method, err)
+	}
+	if result.Reasoning != level {
+		return fmt.Errorf("poo %s returned reasoning %q, requested %q", method, result.Reasoning, level)
+	}
+	return nil
+}
+
 // call sends one request and waits for its answer.
 func (c *client) call(ctx context.Context, method string, params any) (json.RawMessage, *protocol.Error, error) {
 	id := newRequestID()

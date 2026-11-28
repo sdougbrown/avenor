@@ -43,7 +43,8 @@
     { "name": "gemini-acp low resume", "backend": "gemini-acp", "value": "low", "resume": true, "valid": false },
     { "name": "opencode-http off start", "backend": "opencode-http", "value": "off", "resume": false, "valid": false },
     { "name": "cursor-acp high start", "backend": "cursor-acp", "value": "high", "resume": false, "valid": false },
-    { "name": "poo medium resume", "backend": "poo", "value": "medium", "resume": true, "valid": false },
+    { "name": "poo off start", "backend": "poo", "value": "off", "resume": false, "valid": true },
+    { "name": "poo max resume", "backend": "poo", "value": "max", "resume": true, "valid": true },
     { "name": "codex empty start", "backend": "codex-app-server", "value": "", "resume": false, "valid": true }
   ]
 }

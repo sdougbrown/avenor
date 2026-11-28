@@ -34,7 +34,7 @@ func TestThinkingBackendPolicy(t *testing.T) {
 		"gemini-acp":       {},
 		"cursor-acp":       {},
 		"agy":              {"low": true, "medium": true, "high": true, "xhigh": true},
-		"poo":              {},
+		"poo":              {"off": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true},
 	}
 	for backend, accepted := range policy {
 		if err := ValidateThinkingForBackend(backend, ""); err != nil {
@@ -72,8 +72,7 @@ func TestThinkingErrorsDistinguishUnsupportedValueAndCapability(t *testing.T) {
 }
 
 func TestValidateThinkingForBackendResume(t *testing.T) {
-	// Codex and Pi accept canonical values on explicit resume.
-	for _, backend := range []string{"codex-app-server", "pi"} {
+	for _, backend := range []string{"codex-app-server", "pi", "poo"} {
 		if err := ValidateThinkingForBackendResume(backend, "off"); err != nil {
 			t.Errorf("%s resume off: %v", backend, err)
 		}

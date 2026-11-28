@@ -6,6 +6,7 @@ Avenor exposes one optional `thinking` setting for backend-native reasoning cont
 avenor --backend pi --thinking high --prompt "Review this change"
 avenor --backend codex-app-server --thinking xhigh --prompt "Implement the plan"
 avenor --backend claude --thinking medium --prompt "Summarize the design"
+avenor --backend poo --thinking high --prompt "Check the edge cases"
 ```
 
 The control is also available in stable spawn JSON, `avenor control spawn`, the Go and TypeScript MCP tools, and the core, Pi, and OpenCode TypeScript spawn tools.
@@ -40,7 +41,7 @@ The native mechanisms below were verified with Codex CLI 0.144.6, Pi 0.83.0, and
 | `dsh` | unsupported | unsupported | none verified |
 | `fx` | unsupported | unsupported | none verified |
 | `agy` | `low`, `medium`, `high`, `xhigh` | `low`, `medium`, `high`, `xhigh` | ACP `session/set_config_option` (`thought_level`) |
-| `poo` | unsupported | unsupported | none: the binary's settings choose the model |
+| `poo` | all seven values, subject to the model | all seven values, subject to the model | `session/configure.reasoning` |
 
 Every explicit value on an unsupported path fails with an error such as:
 
@@ -88,10 +89,16 @@ The effort flag is startup-only. Claude rejects every explicit resume value, eve
 
 The static policy admits `low`, `medium`, `high`, and `xhigh` before Avenor starts a provider. `agy acp` validates the level against the selected model when it applies it, after the session is open. If that model does not offer the requested level, Avenor reports the backend, the requested value, and the `agy acp` rejection instead of presenting the static allowed-values error. The failed launch sends no prompt: a fresh start or cold resume closes the session it opened, while a warm resume leaves its owned session and event poller in place. Avenor does not roll back a model change `agy acp` already accepted.
 
+### Poo
+
+Avenor sends `session/configure.reasoning` after Poo selects or restores the session's chat model. Poo validates the level against that model. For example, `max` is accepted only if the model declares it and its reasoning control can send it. If Poo refuses the level, Avenor reports the reason without prompting. Poo rejects a change during an active turn. A failed change on a live session does not close it.
+
+Omitting thinking sends no setter. A live session keeps its current level, and a newly opened session uses the level Poo supplies. Explicit thinking requires Poo v0.3.0 or later. Use v0.15.0 or later if you need `off` to request less reasoning rather than merely omit the reasoning field. The exact behavior of `off` depends on the model's reasoning control.
+
 ## Unsupported backends
 
 OpenCode ACP 1.18.3 has no verified thinking config option. OpenCode HTTP SDK 1.15.3 exposes model variants, but a variant name is not a canonical thinking level. Avenor does not infer a mapping or add an unverified payload field.
 
-Gemini ACP and Cursor ACP have no verified session control for this setting. A poo binary takes its model and its options from its own settings file, and its wire protocol has no reasoning field, so the backend rejects an explicit level rather than ignoring it. Agy no longer appears here: it uses ACP (`agy acp`) and applies `thought_level`; see its section above for values and model-specific validation.
+Gemini ACP and Cursor ACP have no verified session control for this setting.
 
 None of these backends receives a prompt prefix, system instruction, warning-only fallback, or silent no-op.

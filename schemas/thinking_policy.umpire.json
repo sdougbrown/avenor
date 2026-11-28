@@ -50,11 +50,11 @@
             "when": {
               "op": "and",
               "exprs": [
-                { "op": "condIn", "condition": "backend", "values": ["codex-app-server", "pi"] },
+                { "op": "condIn", "condition": "backend", "values": ["codex-app-server", "pi", "poo"] },
                 { "op": "in", "field": "thinking", "values": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] }
               ]
             },
-            "reason": "codex-app-server and pi support all canonical thinking values on start and resume"
+            "reason": "codex-app-server, pi, and poo admit all canonical thinking values on start and resume"
           }
         ],
         "claudeStart": [

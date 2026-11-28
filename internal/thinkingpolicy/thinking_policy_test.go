@@ -48,7 +48,7 @@ func TestEvaluate(t *testing.T) {
 	}
 
 	// Backends with no support at all.
-	for _, backend := range []string{"opencode-acp", "opencode-http", "gemini-acp", "cursor-acp", "fx", "poo"} {
+	for _, backend := range []string{"opencode-acp", "opencode-http", "gemini-acp", "cursor-acp", "fx"} {
 		if got := Evaluate(backend, "low", false); got != UnsupportedCapability {
 			t.Errorf("%s low = %v, want UnsupportedCapability", backend, got)
 		}
@@ -74,7 +74,7 @@ func TestEvaluate(t *testing.T) {
 	}
 
 	// Full-support backends accept everything on start and resume.
-	for _, backend := range []string{"codex-app-server", "pi"} {
+	for _, backend := range []string{"codex-app-server", "pi", "poo"} {
 		for _, value := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
 			if got := Evaluate(backend, value, false); got != OK {
 				t.Errorf("%s start %s = %v", backend, value, got)
