@@ -126,6 +126,9 @@ func TestThinkingUnchangedResumeWhileTurnIsActive(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+	if _, err := p.ResumeWithOptions(ctx, session.SessionID, avruntime.StartOptions{Thinking: "medium"}); err == nil || !strings.Contains(err.Error(), "session/configure: busy") {
+		t.Fatalf("changing the level during an active turn = %v, want Poo's busy refusal", err)
+	}
 	if _, err := p.ResumeWithOptions(ctx, session.SessionID, avruntime.StartOptions{Thinking: "high"}); err != nil {
 		t.Fatalf("resume at the current level while the model is answering: %v", err)
 	}

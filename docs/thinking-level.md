@@ -91,7 +91,7 @@ The static policy admits `low`, `medium`, `high`, and `xhigh` before Avenor star
 
 ### Poo
 
-Avenor sends `session/configure.reasoning` after Poo selects or restores the session's chat model. Poo validates the level against that model. For example, `max` is accepted only if the model declares it and its reasoning control can send it. If Poo refuses the level, Avenor reports the reason without prompting. A failed change on a live session does not close it.
+Avenor sends `session/configure.reasoning` after Poo selects or restores the session's chat model. Poo validates the level against that model. For example, `max` is accepted only if the model declares it and its reasoning control can send it. If Poo refuses the level, Avenor reports the reason without prompting. Poo rejects a change during an active turn. A failed change on a live session does not close it.
 
 Omitting thinking sends no setter. A live session keeps its current level, and a newly opened session uses the level Poo supplies. Explicit thinking requires Poo v0.3.0 or later. Use v0.15.0 or later if you need `off` to request less reasoning rather than merely omit the reasoning field. The exact behavior of `off` depends on the model's reasoning control.
 
