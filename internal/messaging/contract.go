@@ -173,6 +173,10 @@ var bindHosts = map[string]BindHost{
 	"pi":       {Semantics: BindReusesSupervisorRun, Backend: "pi"},
 	"opencode": {Semantics: BindMintsPerConversation, Backend: "opencode-acp"},
 	"poo":      {Semantics: BindMintsPerConversation, Backend: "poo"},
+	// A DeepSeek Harness host runs many sessions in one process, so each
+	// session binds its own conversation and inbox rather than sharing the
+	// supervisor's single run the way pi does.
+	"dsh": {Semantics: BindMintsPerConversation, Backend: "dsh"},
 }
 
 // BindHostSemantics returns how the bind policy serves host, and whether it

@@ -80,7 +80,7 @@ func TestMessageBindPiReusesTheSupervisorRun(t *testing.T) {
 // same way; poo is the host a native MCP client binds per conversation.
 func TestMessageBindMintsOneRunPerConversation(t *testing.T) {
 	t.Parallel()
-	for _, host := range []string{"opencode", "poo"} {
+	for _, host := range []string{"opencode", "poo", "dsh"} {
 		t.Run(host, func(t *testing.T) {
 			t.Parallel()
 			sup, _ := newStage2Supervisor(t, 2)

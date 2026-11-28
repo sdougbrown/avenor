@@ -81,6 +81,10 @@ that broker holds no record of the bound run, so its child starts without one.
 The supervisor reclaims a bound run the broker reports dead and mints a
 replacement on the next bind.
 
+A DeepSeek Harness session binds as host `dsh` and gets its own minted run, so
+each session's children ride a different inbox; the harness passes that run id
+as `parent_run_id` for the spawns it starts.
+
 The pi extension supplies it too, as `supervisor` — the run id, not the
 display label — for host-mode spawns that reach this process's singleton
 supervisor: omit `supervisor_id` or supply the singleton's own socket. The
