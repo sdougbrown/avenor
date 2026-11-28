@@ -37,6 +37,19 @@
         "unrun": "^0.3.0",
       },
     },
+    "packages/dsh": {
+      "name": "@dougbots/dsh-avenor",
+      "version": "0.0.0",
+      "dependencies": {
+        "@dougbots/avenor-core": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.12",
+        "@types/node": "^25.8.0",
+        "tsdown": "^0.22.0",
+        "typescript": "^6.0.3",
+      },
+    },
     "packages/escalation-bridge": {
       "name": "@dougbots/avenor-escalation-bridge",
       "version": "0.27.1",
@@ -265,6 +278,8 @@
     "@dougbots/avenor-opencode": ["@dougbots/avenor-opencode@workspace:packages/opencode"],
 
     "@dougbots/avenor-pi": ["@dougbots/avenor-pi@workspace:packages/pi"],
+
+    "@dougbots/dsh-avenor": ["@dougbots/dsh-avenor@workspace:packages/dsh"],
 
     "@earendil-works/pi-agent-core": ["@earendil-works/pi-agent-core@1.4.0", "", { "dependencies": { "@earendil-works/pi-ai": "1.4.0", "typebox": "1.3.27" } }, "sha512-PoKY84SKUwnt7S5QBZaGUqfNO1kjP3KHpHUA9QpFTj4cOjaVWMYIcBPJ6FDRCdE8Zen9OSECQUd0uUfVgtSmgA=="],
 
@@ -1441,6 +1456,8 @@
     "@dougbots/avenor-opencode/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "@dougbots/avenor-pi/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
+
+    "@dougbots/dsh-avenor/typescript": ["typescript@6.0.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw=="],
 
     "@earendil-works/pi-coding-agent/semver": ["semver@7.8.5", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA=="],
 

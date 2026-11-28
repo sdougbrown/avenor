@@ -1,0 +1,32 @@
+# Avenor bundle layer for a DeepSeek Harness profile.
+#
+# `avenor-delegation` registers the `avenor` subagent provider.
+# `avenor-subagent-tool` mounts DSH's own subagent tool against it, under a
+# distinct tool name so the shipped `subagent` tool keeps its local behaviour.
+#
+# To make Avenor the harness's only delegation backend instead, override the
+# shipped row (`id: tool-subagent`) with `provider: avenor` and
+# `toolName: subagent`. That reroutes every agent in the profile, so it stays
+# an explicit opt-in rather than part of this spike.
+- insert:
+    - id: avenor-delegation
+      name: '@dougbots/dsh-avenor'
+      # Every field is optional. Omitted, the delegated child runs Avenor's
+      # own defaults (roster and environment decide).
+      config:
+        # backend: dsh
+        # model: grace/qwen
+        # agent: planner
+        # rosterFile: /path/to/roster.json
+        # rosterEntry: reviewer
+        {}
+
+    - id: avenor-subagent-tool
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: avenor
+        toolName: subagent_avenor
+        # The provider declares no depthLimit capability, so DSH refuses to
+        # enforce a numeric budget itself and requires the provider (Avenor's
+        # own nesting rules) to own the recursion budget.
+        maxDepth: provider-managed
