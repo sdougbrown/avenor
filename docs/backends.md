@@ -133,7 +133,6 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 | Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✓ |
 | External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
@@ -262,7 +261,6 @@ Reports are untrusted: they never approve anything, and report text is display-o
 | Permission relay | ⚠ (pane-scrape only, experimental) |
 | Model selection | ✓ (via `--model`) |
 | External server URL | ✗ |
-| Subprocess discovery | ✓ |
 
 ### Cancel semantics
 
