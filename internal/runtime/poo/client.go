@@ -345,6 +345,15 @@ func (c *client) setThinking(ctx context.Context, sessionID, level string) error
 	return nil
 }
 
+type unansweredError struct {
+	method string
+	cause  string
+}
+
+func (e *unansweredError) Error() string {
+	return fmt.Sprintf("poo exited before answering %s: %s", e.method, e.cause)
+}
+
 // call sends one request and waits for its answer.
 func (c *client) call(ctx context.Context, method string, params any) (json.RawMessage, *protocol.Error, error) {
 	id := newRequestID()
@@ -403,7 +412,7 @@ func (c *client) call(ctx context.Context, method string, params any) (json.RawM
 		default:
 		}
 		c.forget(key)
-		return nil, nil, fmt.Errorf("poo exited before answering %s: %s", method, c.exitCause())
+		return nil, nil, &unansweredError{method: method, cause: c.exitCause()}
 	}
 }
 
