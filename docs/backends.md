@@ -131,13 +131,13 @@ A nested loop or team inside one CLI run shares the CLI run ID. `AVENOR_KIND` na
 | Event streaming | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Permission relay | ✓ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ⚠ | ⚠ | ✓ |
 | Model selection | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✗ | ✗ |
+| Thinking control | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✓ | ⚠ | ✓ |
 | External server URL | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
 | Subprocess discovery | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ |
 
 `—` means not verified; `✗` means not supported, `⚠ ` means experimental.
 
-Thinking control is native for Codex, Pi, and Agy. Agy accepts `low` through `xhigh` on both a fresh start and an explicit resume, and rejects `off`, `minimal`, and `max` before spawning. Claude supports five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
+Thinking control is native for Codex, Pi, Agy, and Poo. Agy accepts `low` through `xhigh` on both a fresh start and an explicit resume, and rejects `off`, `minimal`, and `max` before spawning. Claude supports five startup values but no explicit resume value. Every other backend rejects explicit thinking. See [Thinking level](thinking-level.md) for values, version scope, validation order, and resume behavior.
 
 Session resume for `claude` is in-memory only: a long-lived avenor process (stable mode) keeps sessions in its map and lets clients reattach by `session_id` while the session is alive. Cross-restart resume (avenor process exits, then a new one tries to pick up the same session) is not yet supported by this backend.
 
@@ -159,7 +159,9 @@ A poo roster entry is the only place `command`, `args` and `settings` are accept
 }
 ```
 
-`command` is used as given and recorded as an absolute path; a relative `command` resolves against Avenor's working directory, not the roster file's directory. Without `command` Avenor runs `poo` from `PATH`. `args` defaults to `["serve"]`. The launch argv is `<bin> <args...> --settings <path>`, with `--settings` only when the entry names a settings file. The resolved binary, args and settings path are part of the session's ownership record, so a resume that resolves differently is rejected before a provider exists. A backend that does not own these fields rejects them. A poo entry cannot carry `thinking`; the shared thinking policy refuses it like any backend without thinking support.
+`command` is used as given and recorded as an absolute path; a relative `command` resolves against Avenor's working directory, not the roster file's directory. Without `command` Avenor runs `poo` from `PATH`. `args` defaults to `["serve"]`. The launch argv is `<bin> <args...> --settings <path>`, with `--settings` only when the entry names a settings file. The resolved binary, args and settings path are part of the session's ownership record, so a resume that resolves differently is rejected before a provider exists. A backend that does not own these fields rejects them. A Poo roster entry can set a default `thinking` level. An explicit spawn value overrides it.
+
+An explicit `--thinking` uses Poo's `session/configure` after the chat model is selected or restored. Poo decides whether the model accepts the requested level. See [Thinking level](thinking-level.md#poo) for version and resume behavior.
 
 ### Messaging
 

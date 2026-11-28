@@ -54,6 +54,7 @@ const (
 var supportedBackendsFallback = map[string]bool{
 	"codex-app-server": true,
 	"pi":               true,
+	"poo":              true,
 	"claude":           true,
 	"agy":              true,
 }

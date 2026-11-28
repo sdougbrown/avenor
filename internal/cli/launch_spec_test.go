@@ -155,11 +155,11 @@ func TestRunRosterPooMissingBinaryNamesEntry(t *testing.T) {
 	}
 }
 
-func TestRunRosterPooThinkingIsRefused(t *testing.T) {
+func TestRunRosterPooThinkingReachesProvider(t *testing.T) {
 	oldNewProvider := newProvider
-	called := false
-	newProvider = func(runtime.StartOptions, string) (runtime.Provider, error) {
-		called = true
+	var got string
+	newProvider = func(opts runtime.StartOptions, _ string) (runtime.Provider, error) {
+		got = opts.Thinking
 		return newScriptedProvider(), nil
 	}
 	t.Cleanup(func() { newProvider = oldNewProvider })
@@ -175,14 +175,11 @@ func TestRunRosterPooThinkingIsRefused(t *testing.T) {
 		"--prompt", "review",
 		"--roster-file", rosterPath,
 		"--roster-entry", "reviewer",
-	}, func(string) string { return "" }, &stderr); code != 1 {
-		t.Fatalf("run() = %d, want 1; stderr=%s", code, stderr.String())
+	}, func(string) string { return "" }, &stderr); code != 0 {
+		t.Fatalf("run() = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if called {
-		t.Fatal("a provider was created for a poo entry carrying thinking")
-	}
-	if !strings.Contains(stderr.String(), `backend "poo" does not support parameter "thinking"`) {
-		t.Fatalf("stderr = %q, want the shared unsupported-parameter error", stderr.String())
+	if got != "high" {
+		t.Fatalf("provider thinking = %q, want high", got)
 	}
 }
 
